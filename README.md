@@ -30,7 +30,7 @@ Each Claude Code session that needs to send/receive on Discord needs its own bot
 
 3. Under **Privileged Gateway Intents**, enable **Message Content Intent** — without this the bot receives messages with empty content.
 
-4. Under **Bot** > **Token**, click **Reset Token** and copy it. You'll need this in step 4. The token is only shown once.
+4. Under **Bot** > **Token**, click **Reset Token** and copy it. You'll need this in step 3. The token is only shown once.
 
 5. Navigate to **OAuth2** > **URL Generator**. Select the `bot` scope. Under **Bot Permissions**, enable:
    - View Channels
@@ -46,19 +46,54 @@ Each Claude Code session that needs to send/receive on Discord needs its own bot
 
 For the full Discord bot setup guide, see [Anthropic's plugin docs](https://docs.anthropic.com/en/docs/claude-code/plugins).
 
-### 2. Install the plugin locally
+### 2. Install the plugin as a local marketplace
 
-Clone this repo somewhere on your machine:
+Claude Code discovers plugins through "marketplaces" — directories containing one or more plugin folders. To install this fork:
+
+**a. Clone this repo to a known location:**
 
 ```sh
-git clone https://github.com/YOUR_USER/claude-discord-bot-to-bot.git
-cd claude-discord-bot-to-bot
+git clone https://github.com/YOUR_USER/claude-discord-bot-to-bot.git ~/claude-plugins/claude-discord-bot-to-bot
 ```
 
-Then install as a local plugin in Claude Code:
+**b. Register the parent directory as a marketplace in `~/.claude/settings.json`:**
 
+```json
+{
+  "extraKnownMarketplaces": {
+    "my-plugins": {
+      "source": {
+        "source": "directory",
+        "path": "/home/you/claude-plugins"
+      }
+    }
+  }
+}
 ```
-/plugins add /path/to/claude-discord-bot-to-bot
+
+Replace `my-plugins` with whatever name you want for this marketplace, and update the path to match where you cloned the repo. On Windows, use `"path": "C:\\Users\\you\\claude-plugins"`.
+
+**c. Enable the plugin in the same `~/.claude/settings.json`:**
+
+```json
+{
+  "enabledPlugins": {
+    "discord-b2b@my-plugins": true
+  }
+}
+```
+
+The format is `<plugin-name>@<marketplace-name>`. The plugin name `discord-b2b` comes from `.claude-plugin/plugin.json` in this repo.
+
+If you also have the official `discord` plugin installed, disable it to avoid conflicts:
+
+```json
+{
+  "enabledPlugins": {
+    "discord@claude-plugins-official": false,
+    "discord-b2b@my-plugins": true
+  }
+}
 ```
 
 ### 3. Configure the bot token
@@ -71,13 +106,13 @@ Set `DISCORD_BOT_TOKEN` as a session environment variable when launching Claude 
 
 ```sh
 # Terminal 1 — "Coder" agent
-DISCORD_BOT_TOKEN=MTIz... claude --channels plugin:discord
+DISCORD_BOT_TOKEN=MTIz... claude --channels plugin:discord-b2b@my-plugins
 
 # Terminal 2 — "Reviewer" agent  
-DISCORD_BOT_TOKEN=NDU2... claude --channels plugin:discord
+DISCORD_BOT_TOKEN=NDU2... claude --channels plugin:discord-b2b@my-plugins
 
 # Terminal 3 — "Architect" agent
-DISCORD_BOT_TOKEN=Nzg5... claude --channels plugin:discord
+DISCORD_BOT_TOKEN=Nzg5... claude --channels plugin:discord-b2b@my-plugins
 ```
 
 The environment variable takes precedence over the `.env` file, so you can run multiple identities on the same machine without conflicts.
@@ -94,17 +129,19 @@ This writes `DISCORD_BOT_TOKEN=...` to `~/.claude/channels/discord/.env`.
 
 ### 4. Launch with the channel flag
 
-Claude Code won't connect to Discord unless you pass `--channels`:
+Claude Code won't connect to Discord unless you pass `--channels` with the full plugin reference:
 
 ```sh
-claude --channels plugin:discord
+claude --channels plugin:discord-b2b@my-plugins
 ```
 
 Or with the token inline:
 
 ```sh
-DISCORD_BOT_TOKEN=MTIz... claude --channels plugin:discord
+DISCORD_BOT_TOKEN=MTIz... claude --channels plugin:discord-b2b@my-plugins
 ```
+
+Replace `my-plugins` with the marketplace name you used in step 2.
 
 ### 5. Pair and allow
 
@@ -144,7 +181,7 @@ By default, all sessions share `~/.claude/channels/discord/` for state (access.j
 ```sh
 DISCORD_STATE_DIR=~/.claude/channels/discord-coder \
 DISCORD_BOT_TOKEN=MTIz... \
-claude --channels plugin:discord
+claude --channels plugin:discord-b2b@my-plugins
 ```
 
 This gives each agent its own allowlist, pending pairings, and inbox.
@@ -156,7 +193,7 @@ For production-like deployments where you don't want config to change at runtime
 ```sh
 DISCORD_ACCESS_MODE=static \
 DISCORD_BOT_TOKEN=MTIz... \
-claude --channels plugin:discord
+claude --channels plugin:discord-b2b@my-plugins
 ```
 
 In static mode, `access.json` is read once at boot and never modified. Pairing is downgraded to `allowlist` automatically (it requires runtime writes).
