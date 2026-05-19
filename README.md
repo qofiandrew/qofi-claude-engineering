@@ -70,15 +70,10 @@ This tells Claude Code to scan `~/claude-plugins/` for plugin directories. It au
 
 The plugin name `discord-b2b` comes from `.claude-plugin/plugin.json` in this repo. The marketplace name matches the directory name you registered.
 
-If you also have the official `discord` plugin installed, disable it to avoid conflicts — you can do this from `~/.claude/settings.json`:
+If you also have the official `discord` plugin installed, uninstall it from a Claude Code session to avoid conflicts:
 
-```json
-{
-  "enabledPlugins": {
-    "discord@claude-plugins-official": false,
-    "discord-b2b@claude-plugins": true
-  }
-}
+```
+/plugin uninstall discord
 ```
 
 ### 3. Configure the bot token
@@ -159,30 +154,6 @@ A typical multi-agent setup:
 
 Agents communicate by @mentioning each other's bots in channels. Messages from bots that don't @mention the receiving bot are ignored (no noise).
 
-### Separate state per agent
-
-By default, all sessions share `~/.claude/channels/discord/` for state (access.json, inbox). To keep each agent's state separate:
-
-```sh
-DISCORD_STATE_DIR=~/.claude/channels/discord-coder \
-DISCORD_BOT_TOKEN=MTIz... \
-claude --channels plugin:discord-b2b
-```
-
-This gives each agent its own allowlist, pending pairings, and inbox.
-
-### Static mode
-
-For production-like deployments where you don't want config to change at runtime:
-
-```sh
-DISCORD_ACCESS_MODE=static \
-DISCORD_BOT_TOKEN=MTIz... \
-claude --channels plugin:discord-b2b
-```
-
-In static mode, `access.json` is read once at boot and never modified. Pairing is downgraded to `allowlist` automatically (it requires runtime writes).
-
 ## Tools
 
 The plugin exposes these MCP tools to the Claude Code session:
@@ -194,10 +165,6 @@ The plugin exposes these MCP tools to the Claude Code session:
 | `edit_message` | Edit a message the bot previously sent. |
 | `fetch_messages` | Pull recent history (up to 100 messages, oldest-first). |
 | `download_attachment` | Download attachments from a message to the local inbox. |
-
-## Access control
-
-See **[ACCESS.md](./ACCESS.md)** for the full access control reference — DM policies, guild channels, mention detection, delivery config, and the `access.json` schema.
 
 ## License
 
