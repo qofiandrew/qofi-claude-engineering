@@ -1,0 +1,12 @@
+{
+  "name": "discord",
+  "description": "Discord channel for Claude Code — fork with bot-to-bot messaging support. Multiple Claude agents can coordinate via @mentions in shared Discord channels.",
+  "version": "0.1.0",
+  "keywords": [
+    "discord",
+    "messaging",
+    "channel",
+    "mcp",
+    "bot-to-bot"
+  ]
+}
