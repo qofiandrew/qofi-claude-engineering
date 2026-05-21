@@ -1,6 +1,5 @@
-# Secrets and host-local config — never commit
+# Secrets — never commit
 tokens.env
-swarm.conf
 
 # Bridge (bun/node) build artifacts
 node_modules

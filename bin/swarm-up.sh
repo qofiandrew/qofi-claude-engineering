@@ -4,10 +4,13 @@
 #
 # Avoids bash-4 features so it runs on macOS's default bash 3.2 (brew bash is fine too).
 #
-# Config: $SWARM_HOME/swarm.conf — one repo per line, pipe-separated:
-#     session_name | /path/to/repo | TOKEN_VAR_NAME
+# Config: $SWARM_HOME/swarm.conf — one repo per line, pipe-separated, FOUR fields:
+#     session_name | /path/to/repo | TOKEN_VAR_NAME | CHANNEL_ID
 #   TOKEN_VAR_NAME names an env var (defined in $SWARM_HOME/tokens.env) holding
-#   that repo's DISCORD_BOT_TOKEN. Blank lines and #-comments are ignored.
+#   that repo's DISCORD_BOT_TOKEN. CHANNEL_ID is the Discord channel this swarm is
+#   bound to (used by swarm-watch.sh for the per-channel heartbeat; swarm-up itself
+#   doesn't need it, but it must be present so the field is parsed cleanly).
+#   Blank lines and #-comments are ignored.
 #
 # Usage:
 #   swarm-up.sh up       # start any sessions not already running
@@ -21,7 +24,10 @@ SWARM_HOME="${SWARM_HOME:-$HOME/claude-swarm}"
 CONF="$SWARM_HOME/swarm.conf"
 TOKENS="$SWARM_HOME/tokens.env"
 PREFIX="swarm"                              # tmux session name prefix (no ':' allowed)
-PLUGIN="${SWARM_PLUGIN:-plugin:discord-b2b}"
+# Custom-marketplace channel plugin. Research-preview channels require the dev flag
+# (a marketplace you publish yourself is not on Anthropic's approved allowlist), and
+# the plugin must be fully qualified with @<marketplace>.
+PLUGIN="${SWARM_PLUGIN:-plugin:discord-b2b@qofi-swarm}"
 
 [ -f "$CONF" ] || { echo "swarm-up: missing $CONF" >&2; exit 1; }
 # shellcheck disable=SC1090
@@ -42,16 +48,19 @@ launch_one() {  # name repo tokvar
   # CRITICAL: unset ANTHROPIC_API_KEY so the lead bills against Max, not metered API.
   # Set this repo's own bot identity.
   tmux send-keys -t "$sess" "unset ANTHROPIC_API_KEY; export DISCORD_BOT_TOKEN='$token'" C-m
-  tmux send-keys -t "$sess" "claude --channels $PLUGIN" C-m
+  # CRITICAL: --dangerously-load-development-channels (not --channels) because the
+  # qofi-swarm marketplace is self-published, not on Anthropic's approved allowlist.
+  tmux send-keys -t "$sess" "claude --dangerously-load-development-channels $PLUGIN" C-m
   sleep 4   # let the CLI come up, then hand the lead its brief
   tmux send-keys -t "$sess" "Read TEAM_LEAD.md, ESCALATION.md, CLAUDE.md and PROJECT_SPEC.md. You are the team lead (CTO) for this repo; operate per TEAM_LEAD.md. The human will hold a product design conversation with you over Discord and the spec may be empty for now — do NOT build during the conversation. When the human says to build, first author PROJECT_SPEC.md and the one-way-door ADRs from the conversation, confirm them with the human, then decompose and spawn the team. Keep the docs reconciled with the implementation as it proceeds, and message the human for any major spec decision." C-m
 }
 
 cmd_up() {
-  while IFS='|' read -r name repo tokvar; do
-    name="$(echo "${name:-}"   | xargs)"
-    repo="$(echo "${repo:-}"   | xargs)"
+  while IFS='|' read -r name repo tokvar channel; do
+    name="$(echo "${name:-}"     | xargs)"
+    repo="$(echo "${repo:-}"     | xargs)"
     tokvar="$(echo "${tokvar:-}" | xargs)"
+    channel="$(echo "${channel:-}" | xargs)"   # consumed so it isn't merged into tokvar; used by swarm-watch.sh
     [ -z "$name" ] && continue
     launch_one "$name" "$repo" "$tokvar" || true
   done < <(grep -vE '^[[:space:]]*(#|$)' "$CONF")
