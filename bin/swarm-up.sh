@@ -29,6 +29,17 @@ PREFIX="swarm"                              # tmux session name prefix (no ':' a
 # the plugin must be fully qualified with @<marketplace>.
 PLUGIN="${SWARM_PLUGIN:-plugin:discord-b2b@qofi-swarm}"
 
+# Poll the pane for `pattern` until it appears or `timeout` seconds elapse.
+# Used to wait for prompts/states instead of fixed-duration sleeps. bash 3.2-safe.
+_wait_for() {  # session pattern timeout
+  local sess="$1" pat="$2" tmo="${3:-15}" i=0
+  while [ "$i" -lt "$tmo" ]; do
+    tmux capture-pane -t "$sess" -p 2>/dev/null | grep -qF -- "$pat" && return 0
+    sleep 1; i=$((i+1))
+  done
+  return 1
+}
+
 [ -f "$CONF" ] || { echo "swarm-up: missing $CONF" >&2; exit 1; }
 # shellcheck disable=SC1090
 [ -f "$TOKENS" ] && . "$TOKENS"
@@ -46,13 +57,35 @@ launch_one() {  # name repo tokvar
   echo "  launching: $sess  ($repo)"
   tmux new-session -d -s "$sess" -c "$repo"
   # CRITICAL: unset ANTHROPIC_API_KEY so the lead bills against Max, not metered API.
-  # Set this repo's own bot identity.
-  tmux send-keys -t "$sess" "unset ANTHROPIC_API_KEY; export DISCORD_BOT_TOKEN='$token'" C-m
+  # Source tokens.env INSIDE the pane and dereference by var name so the literal
+  # token value never appears on the command line / pane scrollback.
+  tmux send-keys -t "$sess" "unset ANTHROPIC_API_KEY; set -a; . '$TOKENS'; export DISCORD_BOT_TOKEN=\"\$$tokvar\"; set +a" C-m
   # CRITICAL: --dangerously-load-development-channels (not --channels) because the
   # qofi-swarm marketplace is self-published, not on Anthropic's approved allowlist.
   tmux send-keys -t "$sess" "claude --dangerously-load-development-channels $PLUGIN" C-m
-  sleep 4   # let the CLI come up, then hand the lead its brief
-  tmux send-keys -t "$sess" "Read TEAM_LEAD.md, ESCALATION.md, CLAUDE.md and PROJECT_SPEC.md. You are the team lead (CTO) for this repo; operate per TEAM_LEAD.md. The human will hold a product design conversation with you over Discord and the spec may be empty for now — do NOT build during the conversation. When the human says to build, first author PROJECT_SPEC.md and the one-way-door ADRs from the conversation, confirm them with the human, then decompose and spawn the team. Keep the docs reconciled with the implementation as it proceeds, and message the human for any major spec decision." C-m
+
+  # --dangerously-load-development-channels opens an interactive warning prompt:
+  #   ❯ 1. I am using this for local development
+  #     2. Exit
+  # Option 1 is preselected; a single Enter accepts it. Wait for the prompt to
+  # render rather than guessing how long the CLI takes to start.
+  if ! _wait_for "$sess" "I am using this for local development" 20; then
+    echo "  WARN: dev-channels prompt didn't appear in 20s — lead may not start" >&2
+  fi
+  tmux send-keys -t "$sess" Enter
+
+  # After accepting, claude needs a moment to load plugins and render the main
+  # input prompt. The "auto mode" hint in the footer is a reliable readiness marker.
+  if ! _wait_for "$sess" "auto mode" 20; then
+    echo "  WARN: main input didn't render in 20s — brief may not land" >&2
+  fi
+
+  # Send the brief, then submit. A trailing C-m on the same send-keys call gets
+  # absorbed into the input (treated as part of the paste) and does NOT fire
+  # submission — observed empirically. Send text and Enter as separate calls.
+  tmux send-keys -t "$sess" "Read TEAM_LEAD.md, ESCALATION.md, CLAUDE.md and PROJECT_SPEC.md. You are the team lead (CTO) for this repo; operate per TEAM_LEAD.md. The human will hold a product design conversation with you over Discord and the spec may be empty for now — do NOT build during the conversation. When the human says to build, first author PROJECT_SPEC.md and the one-way-door ADRs from the conversation, confirm them with the human, then decompose and spawn the team. Keep the docs reconciled with the implementation as it proceeds, and message the human for any major spec decision."
+  sleep 1
+  tmux send-keys -t "$sess" Enter
 }
 
 cmd_up() {
