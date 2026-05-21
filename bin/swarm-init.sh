@@ -48,9 +48,10 @@ cp "$TPL/ADR.template.md" "$REPO/docs/adr/ADR.template.md"; echo "  wrote: docs/
 
 # Hooks (invoked via 'bash' in settings, so no +x needed).
 mkdir -p "$REPO/.claude/hooks"
-cp "$TPL/hooks/test-gate.sh"  "$REPO/.claude/hooks/test-gate.sh"
-cp "$TPL/hooks/docs-check.sh" "$REPO/.claude/hooks/docs-check.sh"
-echo "  wrote: .claude/hooks/{test-gate.sh,docs-check.sh}"
+cp "$TPL/hooks/test-gate.sh"       "$REPO/.claude/hooks/test-gate.sh"
+cp "$TPL/hooks/docs-check.sh"      "$REPO/.claude/hooks/docs-check.sh"
+cp "$TPL/hooks/permission-gate.sh" "$REPO/.claude/hooks/permission-gate.sh"
+echo "  wrote: .claude/hooks/{test-gate.sh,docs-check.sh,permission-gate.sh}"
 
 # Settings — copy if absent; recursive-merge with jq if one exists; else leave a .new.
 SET="$REPO/.claude/settings.json"

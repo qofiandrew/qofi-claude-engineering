@@ -4,7 +4,21 @@
     "CLAUDE_TEST_CMD": "npm test --silent"
   },
   "teammateMode": "in-process",
+  "permissions": {
+    "allow": ["mcp__plugin_discord-b2b_discord__reply"]
+  },
   "hooks": {
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/permission-gate.sh\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
     "TaskCompleted": [
       {
         "hooks": [
