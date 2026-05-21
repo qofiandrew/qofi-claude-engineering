@@ -17,6 +17,8 @@
 #   swarm-up.sh down     # stop all swarm sessions
 #   swarm-up.sh status   # list running swarm sessions
 #   swarm-up.sh watch    # foreground supervisor: relaunch dead leads (Ctrl-C to stop)
+#   swarm-up.sh attach <name>   # attach the terminal to a running swarm to watch /
+#                               # interact live; Ctrl-b d detaches without stopping it.
 
 set -euo pipefail
 
@@ -109,6 +111,24 @@ cmd_status() {
   tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^${PREFIX}-" || echo "  (no swarm sessions running)"
 }
 
+cmd_attach() {  # [name]
+  local name="${1:-}"
+  if [ -z "$name" ]; then
+    {
+      echo "running swarm sessions:"
+      cmd_status
+      echo "usage: swarm-up.sh attach <name>"
+    } >&2
+    exit 1
+  fi
+  local sess="${PREFIX}-${name}"
+  if ! tmux has-session -t "$sess" 2>/dev/null; then
+    echo "swarm-up: no running swarm '$sess' — start it with swarm-up.sh up" >&2
+    exit 1
+  fi
+  exec tmux attach -t "$sess"
+}
+
 cmd_watch() {
   echo "Supervising swarm (Ctrl-C to stop). Checking every 30s."
   echo "Note: teammates do NOT survive a relaunch — a respawned lead recreates them per TEAM_LEAD.md."
@@ -121,5 +141,6 @@ case "${1:-}" in
   down)   cmd_down ;;
   status) cmd_status ;;
   watch)  cmd_watch ;;
-  *) echo "usage: swarm-up.sh {up|down|status|watch}" >&2; exit 1 ;;
+  attach) cmd_attach "${2:-}" ;;
+  *) echo "usage: swarm-up.sh {up|down|status|watch|attach <name>}" >&2; exit 1 ;;
 esac
