@@ -1,0 +1,10 @@
+# swarm.conf — one repo per line:  session_name | /path/to/repo | TOKEN_VAR_NAME
+# session_name: short, no spaces (becomes tmux session "swarm-<name>")
+# TOKEN_VAR_NAME: name of the env var in tokens.env holding that repo's bot token
+#
+# acme     | /Users/you/code/acme        | BOT_ACME
+# beacon   | /Users/you/code/beacon       | BOT_BEACON
+# ledger   | /Users/you/code/ledger       | BOT_LEDGER
+#
+# Keep this list short to start — one or two repos. A single Max pool won't feed
+# more than ~1–2 teams running concurrently.

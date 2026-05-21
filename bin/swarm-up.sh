@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# swarm-up.sh — run one persistent Agent Teams lead per repo in tmux on the
+# always-on host (Mac mini), each with its own Discord bot identity, supervised.
+#
+# Avoids bash-4 features so it runs on macOS's default bash 3.2 (brew bash is fine too).
+#
+# Config: $SWARM_HOME/swarm.conf — one repo per line, pipe-separated:
+#     session_name | /path/to/repo | TOKEN_VAR_NAME
+#   TOKEN_VAR_NAME names an env var (defined in $SWARM_HOME/tokens.env) holding
+#   that repo's DISCORD_BOT_TOKEN. Blank lines and #-comments are ignored.
+#
+# Usage:
+#   swarm-up.sh up       # start any sessions not already running
+#   swarm-up.sh down     # stop all swarm sessions
+#   swarm-up.sh status   # list running swarm sessions
+#   swarm-up.sh watch    # foreground supervisor: relaunch dead leads (Ctrl-C to stop)
+
+set -euo pipefail
+
+SWARM_HOME="${SWARM_HOME:-$HOME/claude-swarm}"
+CONF="$SWARM_HOME/swarm.conf"
+TOKENS="$SWARM_HOME/tokens.env"
+PREFIX="swarm"                              # tmux session name prefix (no ':' allowed)
+PLUGIN="${SWARM_PLUGIN:-plugin:discord-b2b}"
+
+[ -f "$CONF" ] || { echo "swarm-up: missing $CONF" >&2; exit 1; }
+# shellcheck disable=SC1090
+[ -f "$TOKENS" ] && . "$TOKENS"
+
+launch_one() {  # name repo tokvar
+  local name="$1" repo="$2" tokvar="$3"
+  local sess="${PREFIX}-${name}"
+  if tmux has-session -t "$sess" 2>/dev/null; then
+    echo "  running: $sess"; return 0
+  fi
+  [ -d "$repo" ] || { echo "  ERROR: repo not found: $repo" >&2; return 1; }
+  local token="${!tokvar:-}"
+  [ -z "$token" ] && { echo "  ERROR: no token in \$$tokvar (check tokens.env)" >&2; return 1; }
+
+  echo "  launching: $sess  ($repo)"
+  tmux new-session -d -s "$sess" -c "$repo"
+  # CRITICAL: unset ANTHROPIC_API_KEY so the lead bills against Max, not metered API.
+  # Set this repo's own bot identity.
+  tmux send-keys -t "$sess" "unset ANTHROPIC_API_KEY; export DISCORD_BOT_TOKEN='$token'" C-m
+  tmux send-keys -t "$sess" "claude --channels $PLUGIN" C-m
+  sleep 4   # let the CLI come up, then hand the lead its brief
+  tmux send-keys -t "$sess" "Read TEAM_LEAD.md, ESCALATION.md, CLAUDE.md and PROJECT_SPEC.md. You are the team lead (CTO) for this repo; operate per TEAM_LEAD.md. The human will hold a product design conversation with you over Discord and the spec may be empty for now — do NOT build during the conversation. When the human says to build, first author PROJECT_SPEC.md and the one-way-door ADRs from the conversation, confirm them with the human, then decompose and spawn the team. Keep the docs reconciled with the implementation as it proceeds, and message the human for any major spec decision." C-m
+}
+
+cmd_up() {
+  while IFS='|' read -r name repo tokvar; do
+    name="$(echo "${name:-}"   | xargs)"
+    repo="$(echo "${repo:-}"   | xargs)"
+    tokvar="$(echo "${tokvar:-}" | xargs)"
+    [ -z "$name" ] && continue
+    launch_one "$name" "$repo" "$tokvar" || true
+  done < <(grep -vE '^[[:space:]]*(#|$)' "$CONF")
+}
+
+cmd_down() {
+  tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^${PREFIX}-" | while read -r s; do
+    echo "  killing: $s"; tmux kill-session -t "$s" 2>/dev/null || true
+  done
+}
+
+cmd_status() {
+  tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^${PREFIX}-" || echo "  (no swarm sessions running)"
+}
+
+cmd_watch() {
+  echo "Supervising swarm (Ctrl-C to stop). Checking every 30s."
+  echo "Note: teammates do NOT survive a relaunch — a respawned lead recreates them per TEAM_LEAD.md."
+  echo "Liveness = tmux session exists; when claude exits the pane closes the session, so this is a fair proxy."
+  while true; do cmd_up >/dev/null 2>&1 || true; sleep 30; done
+}
+
+case "${1:-}" in
+  up)     cmd_up ;;
+  down)   cmd_down ;;
+  status) cmd_status ;;
+  watch)  cmd_watch ;;
+  *) echo "usage: swarm-up.sh {up|down|status|watch}" >&2; exit 1 ;;
+esac

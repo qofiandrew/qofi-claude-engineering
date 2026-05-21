@@ -1,2 +1,14 @@
+# Secrets and host-local config — never commit
+tokens.env
+swarm.conf
+
+# Bridge (bun/node) build artifacts
 node_modules
 bun.lock
+
+# OS / editor cruft
+.DS_Store
+*.swp
+
+# Settings merge leftovers
+.claude/settings.json.new
