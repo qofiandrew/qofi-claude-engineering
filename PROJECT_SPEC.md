@@ -120,6 +120,9 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
       the hooks block survives a merge into a repo with existing hooks.
 - [ ] (non-blocking) Measure real token burn for one team through a full build to
       calibrate whether a second concurrent team fits the Max pool (feeds ADR-0004).
+- [ ] (non-blocking) Run the first end-to-end shakedown (see `docs/SHAKEDOWN.md`
+      once written) — exercises the §4 directive-lifecycle acceptance criterion
+      that the unit gates can't cover.
 - [ ] (v2) Wedged-but-alive lead detection — design the heartbeat.
 
 ## 10. Build log
@@ -141,4 +144,13 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   from `bridge/`, and the A2 install path (`/plugin marketplace add <repo>/bridge`
   → `/plugin install discord-b2b@bridge`) loads the plugin with
   `--channels plugin:discord-b2b` attaching as expected. ADR-0007 stands as
-  accepted; no A3 fallback needed.
+  accepted; no A3 fallback needed. Migration committed as `3266f09`.
+- `2026-05-21` — Housekeeping pass post-migration. ADR-0007 body reconciled to
+  reflect that A2 and bun boot were verified live (not merely proposed) and that
+  A3 remains the documented regression fallback. §9 gained an open item for the
+  first end-to-end shakedown; §4's directive-lifecycle acceptance is intentionally
+  unchecked until that shakedown runs. Note for future archaeologists: the
+  bridge `README.md`'s pre-move history is reachable via `git log README.md`, not
+  `git log --follow bridge/README.md` — git's rename heuristic attributed path
+  continuity to the root `README.md` (which got rewritten as the whole-system
+  README in the same commit) rather than to `bridge/README.md`.

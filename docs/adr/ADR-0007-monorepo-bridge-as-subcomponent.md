@@ -66,7 +66,24 @@ The decision deliberately avoids a separately-irreversible move: writing a
 `.claude-plugin/marketplace.json` manifest would have committed the repo to a
 schema we cannot verify without loading it in Claude Code, with no easy way to
 prove later that we got it right. Registering `bridge/` directly as a marketplace
-is verifiable by running a single slash command and reverting on failure.
+was verifiable by running a single slash command and reverting on failure.
+
+## Verification
+
+Both runtime gates were verified live on 2026-05-21 against the committed monorepo
+(commit `3266f09`):
+
+- `bun` boots the MCP server clean from `bridge/` (the plugin's
+  `${CLAUDE_PLUGIN_ROOT}`-rooted `start` script resolves correctly at the new
+  path).
+- The A2 install path —
+  `/plugin marketplace add <repo>/bridge` followed by
+  `/plugin install discord-b2b@bridge` — loads the plugin, and
+  `claude --channels plugin:discord-b2b` attaches as expected.
+
+A3 (revert the bridge to repo root and nest the swarm under `swarm/` instead)
+was not invoked. It remains documented in *Alternatives considered* below as the
+zero-risk fallback if a future regression breaks A2.
 
 ## Consequences
 
@@ -103,8 +120,9 @@ Harder:
 - **Keep the bridge at the repo root and nest the swarm under `swarm/`
   (A3 fallback)** — rejected as the primary choice: it would invert the
   hierarchy (the smaller component framing the larger system) and leave the
-  swarm's operating contract a directory deep. Kept on standby as the
-  zero-risk fallback if A2 install verification fails.
+  swarm's operating contract a directory deep. Held as the zero-risk fallback
+  during A2 verification; with A2 verified live (see *Verification* above), A3
+  remains documented as the fallback if a future regression breaks A2.
 - **Add a `.claude-plugin/marketplace.json` manifest at repo root pointing at
   `bridge/` (A1)** — rejected: commits us to a manifest schema we cannot verify
   from the repo contents alone. A2 keeps the bridge installable by exactly the
