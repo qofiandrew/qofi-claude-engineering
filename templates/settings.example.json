@@ -4,6 +4,9 @@
     "CLAUDE_TEST_CMD": "npm test --silent"
   },
   "teammateMode": "in-process",
+  "enabledPlugins": {
+    "discord-b2b@qofi-swarm": true
+  },
   "permissions": {
     "allow": ["mcp__plugin_discord-b2b_discord__reply"]
   },
