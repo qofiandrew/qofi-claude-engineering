@@ -116,6 +116,64 @@ disagree with the code are a defect *you* fix — not a teammate's optional chor
   against the spec's scope (§3) and acceptance criteria (§4) — spawn a
   `reviewer` teammate for this if the diff is large.
 
+## Lead review of teammate output (the missing beat)
+
+A task is only done **after you have independently reviewed the diff and
+accepted it.** Reading a teammate's self-report ("done, tests green") is not
+review — read the actual code change, not the summary.
+
+Review **adversarially.** Assume the teammate has blind spots, especially the
+blind spots you would share (same model, same training). Hunt for them on
+purpose:
+
+- **Edge cases not exercised by tests** — empty inputs, negative numbers,
+  zero, off-by-one boundaries, unicode in strings, missing fields, partial
+  writes, exceptions from the layer below.
+- **Interface mismatches** with other teammates' work — does this module's
+  contract actually match what its callers expect?
+- **Missing tests for behavior visible in the code.** Green tests with
+  missing cases still get sent back.
+- **Happy-path-only handling.** What does it do on bad input or when the
+  thing it depends on fails?
+
+Do **not** rubber-stamp a passing suite. A teammate's tests cover what the
+teammate thought of; your review covers what they didn't.
+
+If the work is wrong or incomplete, **send it back with specific feedback**,
+not a vague "redo it." Quote the line, name the case, suggest the shape of the
+fix — e.g. *"your `parseId` accepts negative integers; spec implies positive
+ids only — add a test for `complete -3` and reject it with the usage error."*
+
+Every send-back is also a **progress post** (next section) — that is how the
+operator sees that review is actually happening.
+
+## Progress posting (visibility + audit trail)
+
+Post brief one-line progress updates to your Discord channel as you work.
+**Progress is separate from escalation.** Escalations are decisions the human
+needs to make (rare, per `ESCALATION.md`); progress is status the human can
+read or ignore (frequent, no response needed). Progress posts do **not** count
+against `ESCALATION.md`'s "batch and surface infrequently" rule — be quiet on
+decisions, chatty on status.
+
+Post on:
+
+- **Team spawned** — count and ownership (e.g. *"spawned 3 teammates: storage
+  / commands+CLI / integration"*).
+- **Each task accepted** — after your review (previous section), not when the
+  teammate said it was done.
+- **Test results** at each integration step (counts + pass/fail).
+- **Integration milestones** — phase done, suite green at N tests.
+- **v1 done** — one-line state (*"v1 shipped local: 49 tests green, awaiting
+  operator review"*).
+- **Every time you send a teammate's work back for revision** — what was
+  wrong and what you asked for. **This one is non-negotiable.** It is the
+  audit trail of review; without it the operator cannot tell the difference
+  between "you reviewed and accepted" and "you rubber-stamped."
+
+Keep posts to roughly one line (≤ ~200 chars). Don't paste diffs. The channel
+is a status stream, not a log dump.
+
 ## Operational discipline
 
 - **Delegate; don't do it yourself.** If you catch yourself implementing instead
