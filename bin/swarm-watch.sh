@@ -11,11 +11,21 @@
 # swarm-up.sh does. The heartbeat for a swarm is posted by that swarm's own bot,
 # into that swarm's channel.
 #
-# Per-swarm state (combines tmux liveness + transcript freshness):
+# Per-swarm state (combines tmux liveness + transcript freshness + pane footer):
 #   no tmux session            -> ⚪ down       (stopped on purpose, or pane closed)
 #   session, no transcript     -> 🟡 starting   (just launched, no activity yet)
 #   session, fresh transcript  -> 🟢 working
-#   session, stale transcript  -> 🔴 STALLED    (alive but stuck/rate-limited)
+#   session, stale, pane idle  -> 🟢 ready · waiting for input (HEALTHY)
+#   session, stale, mid-turn   -> 🔴 STALLED    (turn in flight but no writes)
+#
+# Idle vs stalled: the claude TUI footer contains "esc to interrupt" iff a turn
+# is actually in flight. Stale transcript + no "esc to interrupt" = healthy idle.
+# False-ready is preferred over false-stalled — bad alarms train operators to
+# ignore the heartbeat.
+#
+# The heartbeat is also PINNED to the channel after its first POST so it stays
+# visible as conversation accumulates. Subsequent ticks edit in place; the pin
+# is sticky on edits and is only re-applied on a (re)post.
 #
 # Why external: a crashed/stuck swarm cannot report its own death. This shares no
 # fate with any swarm and has no terminal. It posts via the bot token to the
@@ -54,6 +64,16 @@ session_alive() {  # name -> 0 alive, 1 absent, 2 tmux unknown
   "$TMUX_BIN" has-session -t "${PREFIX}-$1" 2>/dev/null
 }
 
+# Idle-ready vs mid-turn signal: the claude TUI footer ends with
+# "esc to interrupt" iff a turn is interruptible (in flight). When the lead is
+# at the prompt waiting for input, the footer ends with "← for agents". Returns
+# 0 = mid-turn, 1 = not mid-turn (idle / unknown — safe default).
+pane_mid_turn() {  # name
+  local sess="${PREFIX}-$1"
+  "$TMUX_BIN" capture-pane -t "$sess" -p 2>/dev/null \
+    | grep -qF 'esc to interrupt'
+}
+
 newest_transcript() {  # repo -> path or nonzero
   local base; base="$(basename "$1")"
   local t; t="$(ls -t "$CLAUDE_PROJECTS"/*/*.jsonl 2>/dev/null | grep -iF -- "$base" | head -1)"
@@ -72,12 +92,35 @@ post_heartbeat() {  # channel token content
     code="$(curl -s -o /dev/null -w '%{http_code}' -X PATCH \
       -H "Authorization: Bot $token" -H "Content-Type: application/json" \
       -d "$payload" "$API/channels/$channel/messages/$msgid")"
+    # 200 = edited in place; pin (set on initial POST) is sticky on edits.
     [ "$code" = "200" ] && return 0
+    # Anything else (404 deleted, etc.): fall through to POST + re-pin.
   fi
   local newid
   newid="$(curl -s -X POST -H "Authorization: Bot $token" -H "Content-Type: application/json" \
     -d "$payload" "$API/channels/$channel/messages" | extract_id)"
-  [ -n "$newid" ] && printf '%s' "$newid" > "$idfile"
+  if [ -z "$newid" ]; then
+    echo "swarm-watch: heartbeat POST returned no id for channel $channel" >&2
+    return 0
+  fi
+  printf '%s' "$newid" > "$idfile"
+  pin_message "$channel" "$token" "$newid"
+}
+
+# Pin the heartbeat so it stays reachable via the channel's pin icon as the
+# conversation scrolls. Only called when (re)posting fresh; subsequent edits
+# don't re-pin. Failures are logged, never fatal.
+pin_message() {  # channel token messageid
+  local channel="$1" token="$2" msgid="$3"
+  local code
+  code="$(curl -s -o /dev/null -w '%{http_code}' -X PUT \
+    -H "Authorization: Bot $token" \
+    "$API/channels/$channel/pins/$msgid")"
+  case "$code" in
+    204) ;;  # ok
+    403) echo "swarm-watch: pin failed for channel $channel (HTTP 403) — bot needs 'Manage Messages' permission in Discord" >&2 ;;
+    *)   echo "swarm-watch: pin failed for channel $channel (HTTP $code)" >&2 ;;
+  esac
 }
 
 now="$(date +%s)"
@@ -112,8 +155,14 @@ grep -vE '^[[:space:]]*(#|$)' "$CONF" | while IFS='|' read -r name repo tokvar c
     if [ "$a" -le "$STALE_SECONDS" ]; then
       status="🟢 swarm working"
       [ "$ENABLE_TYPING" = "1" ] && curl -s -X POST -H "Authorization: Bot $token" "$API/channels/$channel/typing" >/dev/null 2>&1 || true
+    elif pane_mid_turn "$name"; then
+      # Footer says "esc to interrupt" — a turn IS in flight, but the
+      # transcript hasn't been updated in > STALE_SECONDS. Genuinely stuck.
+      status="🔴 swarm STALLED — turn in flight but no transcript write for $(( a/60 ))m (rate-limited, hung tool, or crashed)"
     else
-      status="🔴 swarm STALLED — no activity for $(( a/60 ))m (stuck, rate-limited, or crashed)"
+      # Stale + not mid-turn — the lead finished its last turn and is at the
+      # prompt waiting for the next Discord message. Healthy.
+      status="🟢 swarm ready · waiting for input (idle $(( a/60 ))m)"
     fi
   fi
 
