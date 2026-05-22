@@ -93,13 +93,18 @@ launch_one() {  # name repo tokvar
   tmux send-keys -t "$sess" Enter
 }
 
-cmd_up() {
+cmd_up() {  # [name]
+  # Optional name filter: when set, only the matching swarm is launched.
+  # Used by swarm-attach.sh's attach-or-launch path so it doesn't drag
+  # unrelated down swarms up as a side effect.
+  local filter="${1:-}"
   while IFS='|' read -r name repo tokvar channel; do
     name="$(echo "${name:-}"     | xargs)"
+    [ -z "$name" ] && continue
+    [ -n "$filter" ] && [ "$name" != "$filter" ] && continue
     repo="$(echo "${repo:-}"     | xargs)"
     tokvar="$(echo "${tokvar:-}" | xargs)"
     channel="$(echo "${channel:-}" | xargs)"   # consumed so it isn't merged into tokvar; used by swarm-watch.sh
-    [ -z "$name" ] && continue
     launch_one "$name" "$repo" "$tokvar" || true
   done < <(grep -vE '^[[:space:]]*(#|$)' "$CONF")
 }
@@ -140,10 +145,10 @@ cmd_watch() {
 }
 
 case "${1:-}" in
-  up)     cmd_up ;;
+  up)     cmd_up "${2:-}" ;;
   down)   cmd_down ;;
   status) cmd_status ;;
   watch)  cmd_watch ;;
   attach) cmd_attach "${2:-}" ;;
-  *) echo "usage: swarm-up.sh {up|down|status|watch|attach <name>}" >&2; exit 1 ;;
+  *) echo "usage: swarm-up.sh {up [name]|down|status|watch|attach <name>}" >&2; exit 1 ;;
 esac
