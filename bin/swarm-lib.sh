@@ -133,6 +133,41 @@ except Exception as e:
 PY
 }
 
+# pane_working SESSION TMUX_BIN
+#
+# Inspect the live tmux pane for the Claude TUI footer that ONLY appears
+# while a turn is in flight, and return tri-valued status:
+#
+#     0 — working  (capture succeeded AND footer contains "esc to interrupt")
+#     1 — idle     (capture succeeded AND no "esc to interrupt" anywhere)
+#     2 — uncertain (tmux missing, session absent, capture-pane failed,
+#                    or empty output)
+#
+# Why footer-substring is the right signal: the spinner verb varies
+# ("Caramelizing", "Thinking", "Baking", …) and past-tense recaps like
+# "Crunched for 1m 28s" / "Worked for Ns" linger AFTER the turn finishes.
+# Only the footer is a stable binary indicator — `… · esc to interrupt`
+# while a turn is interruptible, `… · ← for agents` at the prompt.
+#
+# We grep the whole capture, not just the final line: a spinner or layout
+# shift can re-flow the footer's position, but the substring presence
+# survives. False positives (the literal string appearing in scrolled-back
+# content) are not a practical concern — `esc to interrupt` is the TUI's
+# interrupt hint, not a phrase users type into prompts.
+#
+# Fail-safe is silence: callers MUST treat anything other than rc=0 as
+# "do not claim working". This fixes the original typing-at-idle bug —
+# transcript age cannot distinguish "replied N seconds ago, now idle"
+# from "actively producing"; the pane content can.
+pane_working() {
+  local sess="$1" tmux_bin="${2:-tmux}"
+  command -v "$tmux_bin" >/dev/null 2>&1 || return 2
+  local out
+  out="$("$tmux_bin" capture-pane -t "$sess" -p 2>/dev/null)" || return 2
+  [ -z "$out" ] && return 2
+  printf '%s' "$out" | grep -qF 'esc to interrupt'
+}
+
 # ---------------------------------------------------------------------------
 # 2) Manifest walker + per-class apply helpers.
 # ---------------------------------------------------------------------------

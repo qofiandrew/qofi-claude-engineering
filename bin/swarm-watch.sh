@@ -11,17 +11,25 @@
 # swarm-up.sh does. The heartbeat for a swarm is posted by that swarm's own bot,
 # into that swarm's channel.
 #
-# Per-swarm state (combines tmux liveness + transcript freshness + pane footer):
-#   no tmux session            -> ⚪ down       (stopped on purpose, or pane closed)
-#   session, no transcript     -> 🟡 starting   (just launched, no activity yet)
-#   session, fresh transcript  -> 🟢 working
-#   session, stale, pane idle  -> 🟢 ready · waiting for input (HEALTHY)
-#   session, stale, mid-turn   -> 🔴 STALLED    (turn in flight but no writes)
+# Per-swarm state (pane content is the PRIMARY working signal; transcript
+# freshness disambiguates working-vs-stalled):
+#   no tmux session                     -> ⚪ down
+#   session, no transcript              -> 🟡 starting
+#   session, pane mid-turn, fresh       -> 🟢 working
+#   session, pane mid-turn, stale       -> 🔴 STALLED  (turn in flight, no writes)
+#   session, pane idle, fresh           -> 🟢 ready · waiting for input (just replied)
+#   session, pane idle, stale           -> 🟢 ready · waiting for input (idle Nm)
+#   session, pane unreadable            -> 🟢 ready  (fail-safe — never claim working
+#                                                    off transcript age alone)
 #
-# Idle vs stalled: the claude TUI footer contains "esc to interrupt" iff a turn
-# is actually in flight. Stale transcript + no "esc to interrupt" = healthy idle.
-# False-ready is preferred over false-stalled — bad alarms train operators to
-# ignore the heartbeat.
+# Why pane content, not age alone: transcript age cannot distinguish
+# "replied N seconds ago, now idle" from "actively producing". For the
+# full STALE_SECONDS window after any reply, an idle lead reads as fresh
+# — and used to false-paint 🟢 working. The TUI footer ends with
+# "esc to interrupt" iff a turn is interruptible (in flight); at the
+# prompt it ends with "← for agents". See pane_working in swarm-lib.sh.
+# False-ready is preferred over false-stalled — bad alarms train operators
+# to ignore the heartbeat.
 #
 # The heartbeat is also PINNED to the channel after its first POST so it stays
 # visible as conversation accumulates. Subsequent ticks edit in place; the pin
@@ -68,16 +76,6 @@ except Exception: print("")'; }
 session_alive() {  # name -> 0 alive, 1 absent, 2 tmux unknown
   command -v "$TMUX_BIN" >/dev/null 2>&1 || return 2
   "$TMUX_BIN" has-session -t "${PREFIX}-$1" 2>/dev/null
-}
-
-# Idle-ready vs mid-turn signal: the claude TUI footer ends with
-# "esc to interrupt" iff a turn is interruptible (in flight). When the lead is
-# at the prompt waiting for input, the footer ends with "← for agents". Returns
-# 0 = mid-turn, 1 = not mid-turn (idle / unknown — safe default).
-pane_mid_turn() {  # name
-  local sess="${PREFIX}-$1"
-  "$TMUX_BIN" capture-pane -t "$sess" -p 2>/dev/null \
-    | grep -qF 'esc to interrupt'
 }
 
 post_heartbeat() {  # channel token content
@@ -161,11 +159,16 @@ grep -vE '^[[:space:]]*(#|$)' "$CONF" | while IFS='|' read -r name repo tokvar c
     age="—"
   else
     if [ "$a" -lt 60 ]; then age="${a}s"; else age="$(( a/60 ))m"; fi
-    if [ "$a" -le "$STALE_SECONDS" ]; then
-      # Working — lead OR any teammate has written within STALE_SECONDS.
-      # If teammates are the ones producing, surface the count so the
-      # heartbeat distinguishes "lead is hot" from "lead idle, N teammates
-      # cranking" (the very state that motivated this change).
+    # Pane content is the PRIMARY working signal. Transcript freshness
+    # disambiguates working-vs-stalled when the pane says mid-turn, and
+    # flavors the just-replied vs been-idle-a-while ready message.
+    pane_working "${PREFIX}-$name" "$TMUX_BIN"; pw=$?
+    fresh=0; [ "$a" -le "$STALE_SECONDS" ] && fresh=1
+    if [ "$pw" -eq 0 ] && [ "$fresh" -eq 1 ]; then
+      # Pane mid-turn AND transcript fresh — actually producing. If
+      # teammates are the writers, surface the count so the heartbeat
+      # distinguishes "lead is hot" from "lead in tool call, N teammates
+      # cranking" (the original motivation for the teammate scan).
       if [ "${tn:-0}" -gt 0 ]; then
         if [ "$tn" -eq 1 ]; then plural=""; else plural="s"; fi
         status="🟢 swarm working · $tn teammate${plural} active"
@@ -173,17 +176,22 @@ grep -vE '^[[:space:]]*(#|$)' "$CONF" | while IFS='|' read -r name repo tokvar c
         status="🟢 swarm working"
       fi
       [ "$ENABLE_TYPING" = "1" ] && curl -s -X POST -H "Authorization: Bot $token" "$API/channels/$channel/typing" >/dev/null 2>&1 || true
-    elif pane_mid_turn "$name"; then
-      # Footer says "esc to interrupt" — a turn IS in flight, but neither
-      # the lead nor any teammate has written for > STALE_SECONDS. Stuck.
+    elif [ "$pw" -eq 0 ] && [ "$fresh" -eq 0 ]; then
+      # Footer says "esc to interrupt" but no transcript write for
+      # STALE_SECONDS+ — turn in flight from the TUI's view but nothing
+      # is being produced. Rate-limited, hung tool, or crashed.
       status="🔴 swarm STALLED — turn in flight but no transcript write for $(( a/60 ))m (rate-limited, hung tool, or crashed)"
     else
-      # Stale across the board + lead not mid-turn — lead at prompt and
-      # no teammate is producing. Healthy idle. (See swarm-lib.sh: the
-      # known limitation is that "every teammate hung simultaneously"
-      # would also paint as ready; parity with the previous lead-only
-      # implementation, no regression.)
-      status="🟢 swarm ready · waiting for input (idle $(( a/60 ))m)"
+      # Pane idle (pw=1) OR unreadable (pw=2) — at the prompt or
+      # uncertain. Both fail-safe to "ready"; never claim working off a
+      # transcript-fresh signal alone (the original false-working-at-idle
+      # bug). Distinguish "just replied" (transcript fresh) from "been
+      # idle a while" (transcript stale) for the operator-facing message.
+      if [ "$fresh" -eq 1 ]; then
+        status="🟢 swarm ready · waiting for input (just replied · ${age} ago)"
+      else
+        status="🟢 swarm ready · waiting for input (idle $(( a/60 ))m)"
+      fi
     fi
   fi
 

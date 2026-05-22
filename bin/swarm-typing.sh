@@ -3,16 +3,31 @@
 #
 # launchd starts this once with KeepAlive=true; it loops forever (NOT a
 # one-shot like swarm-watch.sh). Every ~8s, for each swarm in swarm.conf
-# that is *actively working* (tmux session alive AND newest transcript
-# mtime within STALE_SECONDS), POST to Discord /channels/<id>/typing using
+# that is *actively working*, POST to Discord /channels/<id>/typing using
 # that swarm's bot token. Discord's "is typing…" expires ~10s; an 8s
 # cadence keeps the bubble continuous.
 #
-# Working == the exact same predicate swarm-watch.sh paints as 🟢 working
-# (line 155–157): alive + has-transcript + age <= STALE_SECONDS. The
-# "🟢 ready · waiting for input" branch (stale + not mid-turn) is
-# deliberately EXCLUDED — typing means "actively producing," not "alive
-# at the prompt." Down / starting / stalled are also skipped.
+# Working == the exact same predicate swarm-watch.sh paints as 🟢 working:
+# alive AND pane shows "esc to interrupt" AND transcript fresh. All three
+# required.
+#
+# Pane gate (PRIMARY signal — pane_working from swarm-lib.sh):
+#   The Claude TUI footer ends with "esc to interrupt" iff a turn is in
+#   flight; at the prompt it ends with "← for agents". We grep the whole
+#   capture for that substring. This replaces the earlier age-only gate.
+#   Age cannot distinguish "replied N seconds ago, now idle" from
+#   "actively producing" — for the full STALE_SECONDS window after any
+#   reply, an idle lead reads as fresh and would false-fire typing.
+#
+# Transcript-fresh gate (belt-and-suspenders): if the pane says working
+# but the transcript hasn't moved within STALE_SECONDS, the swarm is
+# STALLED (rate-limited, hung tool, or crashed). Forever-typing on a
+# hung swarm is the worst UX, so we also require recent transcript
+# activity. Matches swarm-watch's STALLED state — typing stays silent
+# while the heartbeat shows 🔴 STALLED.
+#
+# Uncertain pane (tmux missing / capture failed) → silent. Same with
+# unreadable transcript age. The fail-safe is silence everywhere.
 #
 # Why a separate process from swarm-watch: the watcher fires once every
 # 90s; typing expires in ~10s. The two cadences are incompatible. This
@@ -102,25 +117,26 @@ while :; do
 
     case "$repo" in "~"*) repo="$HOME${repo#\~}";; esac
 
-    # Predicate: tmux session alive AND newest transcript (lead OR any
-    # teammate worktree) is within STALE_SECONDS. The teammate-count field
-    # the watcher uses is irrelevant here — typing is a boolean.
+    # Predicate: session alive AND pane shows "esc to interrupt" AND
+    # transcript fresh. All three required; any uncertainty → silent.
     #
-    # FAIL-SAFE IS SILENCE. If repo_activity returns anything other than
-    # an unambiguously-fresh age, we DO NOT fire. Empty/non-numeric (the
-    # function shouldn't produce these, but defend in depth) and the
-    # SWARM_NO_TRANSCRIPT_AGE sentinel both fall through the stale check
-    # because the sentinel is much larger than any plausible
-    # STALE_SECONDS. The previous "empty → skip" branch was correct, but
-    # `[ "$age" -gt N ]` errors loudly on non-numeric input under
-    # `set -u`, so we screen with a pattern match first.
-    session_alive "$name" || continue   # rc 1 (down) or 2 (no tmux) → skip
+    # 1) session_alive: cheap tmux has-session probe; bail early on down.
+    # 2) pane_working: PRIMARY signal — was the original bug's missing
+    #    piece. rc=0 working, rc=1 idle (at prompt), rc=2 uncertain
+    #    (capture failed / tmux missing / empty pane). Only rc=0 fires.
+    # 3) transcript freshness: belt-and-suspenders. If the pane reads
+    #    mid-turn but the transcript hasn't moved for STALE_SECONDS,
+    #    the swarm is STALLED — typing would lie to Discord. The
+    #    NO_TRANSCRIPT sentinel naturally fails the `<= STALE_SECONDS`
+    #    test; non-numeric output is screened first so set -u stays happy.
+    session_alive "$name" || continue
+    pane_working "${PREFIX}-$name" "$TMUX_BIN" || continue
     activity="$(repo_activity "$repo" "$CLAUDE_PROJECTS" "$STALE_SECONDS")"
     age="${activity%%|*}"
     case "$age" in
-      ''|*[!0-9]*) continue ;;          # blank / non-numeric → uncertain → silent
+      ''|*[!0-9]*) continue ;;
     esac
-    [ "$age" -gt "$STALE_SECONDS" ] && continue   # stale, starting, or sentinel → skip
+    [ "$age" -gt "$STALE_SECONDS" ] && continue   # stalled, starting, or sentinel → skip
 
     # Fire and forget. --max-time guards against a wedged Discord request
     # hanging the loop. Output is dropped; the next sweep retries 8s later.
