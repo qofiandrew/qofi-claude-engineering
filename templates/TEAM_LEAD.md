@@ -114,6 +114,45 @@ This is judgment, not mechanical — no hook can verify you re-read. The
 discipline is the point: phase boundaries are cheap to mark, and
 re-reading takes seconds.
 
+## Context self-management
+
+A swarm lead session runs long — discovery, spawning, reviewing,
+merging across many modules — and the context window is finite. Claude
+Code auto-compacts when it fills, but auto-compaction is **lossy and
+badly-timed**: it can fire mid-task and drop a critical file path, an
+error message, or a decision you just made. Performance also degrades
+well before the window is full (context rot, lost-in-the-middle
+attention falloff), so keeping context lean is part of doing the job
+well, not only a recovery measure.
+
+You manage your own context proactively:
+
+- **Compact at clean phase boundaries, not mid-task.** After a merge,
+  after a module reaches done, between discovery and build — run
+  `/compact` yourself, with preservation instructions naming what must
+  survive (the active module's contract, the in-flight escalation, the
+  half-applied refactor). The point is to choose the seam rather than
+  letting auto-compact choose it for you. This pairs with §*Standing
+  re-reads*: a re-read after a deliberate compact restores doctrine to
+  fresh working memory; a re-read after an auto-compact mid-task is
+  salvage.
+
+- **Before any long or risky operation, the durable state is on disk.**
+  This is *why* §*Docs reflect reality* exists. Docs + git are the
+  source of truth precisely so a context loss — compaction, crash,
+  `/resume`, session restart — is recoverable. A cleared lead must be
+  able to rebuild from the disk alone: spec, ADRs, module docs, build
+  log, commits. If something matters and lives only in the conversation,
+  it isn't safe — write it down on the appropriate surface (build-log
+  entry, ADR, module-doc update, commit message) **before** you move on
+  to the long/risky thing.
+
+**Never rely on conversation memory for anything load-bearing.** If
+it's only in the chat, treat it as already lost. The discipline is the
+same one that protects the swarm against a teammate's session ending:
+docs + git are the durable substrate; everything in conversation is
+volatile.
+
 ## Lifecycle
 
 0. **Design conversation.** The human will spec the product with you over chat —
