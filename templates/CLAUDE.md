@@ -82,6 +82,74 @@ decisions to make per `ESCALATION.md`.
 - Before declaring done or escalating, self-review the work against the spec's
   scope (§3) and acceptance criteria (§4).
 
+## Testing strategy (mocking policy)
+
+The over-engineering trap this section exists to prevent: an agent
+faces a dependency whose real substrate would force a 100+ test
+cascade (DB DDL collisions, transitive injection sweeps, etc.) and
+either (a) builds the heavyweight substrate anyway, burning a session
+on the wrong problem, or (b) writes a fictional mock to dodge it.
+Neither is the answer. The right answer depends on **what kind of
+dependency it is.**
+
+**Four cases, decided per dependency at plan-approval:**
+
+1. **Internal in-repo collaborator, cheap to run for real → use the
+   real thing.** Default. A module owned in this repo whose setup is
+   cheap (a function call, a small in-process collaborator) is tested
+   against the real implementation. Mocking what's already cheap and
+   in your tree hides integration bugs — the `$HOME`-pollution class
+   of failure is exactly what real-collaborator testing catches and
+   mocks paper over.
+
+2. **External service (third-party API: Stripe, Insightful, QBO,
+   Resend, SES, etc.) → mock at the contract boundary, permanently.**
+   Tests must never hit a live external endpoint. The boundary mock's
+   request/response shapes mirror the **provider's real payloads** —
+   that's how it stays a faithful contract substitute rather than a
+   fiction. This is a legitimate, permanent test strategy, not a
+   stopgap.
+
+3. **Heavy cross-module substrate → mock at the contract boundary.**
+   The signal: wiring the real collaborator into tests would cascade
+   into many unrelated test files (DB DDL collisions, transitive test-
+   DB injection, a substrate sweep across the suite). That cascade is
+   the cue to mock at the contract surface instead. Reserve-backend-2
+   commit `3a1762f` is the precedent: wiring `insightful-sync` for-real
+   would have triggered a 115-test substrate cascade; mocking the
+   contract (`vi.mock("…/insightful-sync/contract.js")`) in the 10
+   affected test files was the right call — **0 substrate growth**,
+   the consumer module's contract still proven.
+
+4. **Internal not-yet-built dependency → temporary mock, replaced when
+   the real module lands.** The **only** mock that is a stopgap. Build
+   the depended-on module first (`TEAM_LEAD.md` §*Dependencies and
+   integration order*); once it lands, the consumer's tests move to
+   the real contract. A temporary mock that outlives the missing
+   module is a defect.
+
+**The principle (one line):** mock at the seam, against the real
+payload/contract shape. A boundary mock that mirrors the real contract
+is a legitimate, permanent test strategy for external and heavy
+dependencies — not a workaround.
+
+**Guard against the opposite failure (over-mocking):** don't mock an
+internal owned collaborator that's cheap to test for real. The line is
+**mock external + heavy-substrate; use real for internal + cheap.**
+
+**Plan-approval gate (CTO).** Which dependencies are mocked vs. real
+is decided at plan-approval — agents do not pick this unilaterally,
+because that is where the trap lives (either grow the substrate or
+fake the dependency). The decision lands in `modules/<module>.md`
+under a *Testing notes* subsection: for each declared dependency, real
+or boundary-mock, and (for mocks) why — external or heavy. Mid-
+implementation re-classification comes back to the CTO.
+
+§Honesty still applies: a boundary mock that mirrors the real contract
+shape is not vacuous. A mock that doesn't mirror the real contract —
+shaped to whatever makes tests pass — is still gaming the gate and is
+the gravest behavioral violation in this manual.
+
 ## Working with existing code (work with the grain)
 - Match the existing conventions, structure, and patterns of the repo. Consistency
   beats your preferred style.
@@ -114,6 +182,10 @@ decisions to make per `ESCALATION.md`.
   or fix the split. Don't paper over it.
 - **Independently testable through the contract.** If you can't test a
   module without spinning up an unrelated peer, the contract is leaky.
+  Where the collaborator is external or its real substrate is heavy,
+  use a boundary mock that mirrors the real contract (per
+  §*Testing strategy*) — that is testing **through** the contract, not
+  around it.
 - **Where tooling can enforce, use it** — explicit exports, private-by-
   default, import-boundary lint rules. Where tooling can't, the CTO
   verifies boundary-respect at plan-approval and at review.
@@ -374,8 +446,10 @@ teammate output*). "The code works" is not done. An agent claiming
 done without addressing an item is an immediate flag.
 
 1. **Contract satisfied.** Does what `modules/<module>.md` promises,
-   input-to-output, against real collaborators (not against a mock
-   the agent wrote).
+   input-to-output. Internal in-repo collaborators tested for real;
+   external services and heavy substrates exercised via boundary mocks
+   that mirror the real contract shape, per §*Testing strategy*. Never
+   a mock the agent invented to dodge a real-but-cheap collaborator.
 2. **Tests pass.** Agent's unit + integration suite green.
    Mechanically enforced by the `TaskCompleted` hook.
 3. **Docs current.** Module doc + affected architecture/API docs are

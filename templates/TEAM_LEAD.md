@@ -295,7 +295,12 @@ access lands. Watch for it on the way in.
   that need them** — especially data-owning modules. Consumers should test
   against the real contract (per §*Verification*), not against a mock the
   consumer wrote. If you sequence consumers first, you'll get tests that
-  pass against a fiction and fail against reality.
+  pass against a fiction and fail against reality. **This applies to in-
+  repo modules consuming an internal contract.** External services and
+  heavy cross-module substrates use boundary mocks instead — see
+  `CLAUDE.md` §*Testing strategy*. The discipline the boundary-mock case
+  still enforces: the mock mirrors the **real provider/contract shape**,
+  never a fiction the consumer wrote to make tests pass.
 - **A breaking change to an in-repo contract is one atomic task** — the
   contract change and every consumer's adaptation land together, no broken
   intermediate state. Sequence it so consumers are updated in the same
@@ -321,6 +326,15 @@ explicitly at plan-approval where possible. A mid-implementation switch or
 new dep also comes back to you (not the operator); sanity-check it's
 maintained, not abandoned, and free of known critical vulns. License
 vetting is deferred for now. (See `CLAUDE.md` §*Dependencies*.)
+
+**For each dependency the plan declares: state whether tests use the real
+collaborator or a boundary mock**, and (for mocks) why — external service
+or heavy substrate. This is **your** call, not the agent's; agents
+deciding mock-vs-real unilaterally is where the over-engineering trap
+lives (either grow the substrate or fake the dependency). The decision
+lands in `modules/<module>.md` under a *Testing notes* subsection. See
+`CLAUDE.md` §*Testing strategy* for the four-case policy.
+
 Everything two-way: approve and let them proceed.
 
 ## Security authority & boundaries
@@ -423,9 +437,12 @@ operator sees that review is actually happening.
 
 **Verify the DoD self-affirmation.** The agent's commit summary asserts
 items 1–6 of `CLAUDE.md` §*Definition of done*. Verify every one —
-especially the items hooks can't enforce: contract satisfied against the
-real collaborator (not a mock the agent wrote), operability tiers built
-(not stubbed), scale rules met if at-scale, no silent doctrine conflicts.
+especially the items hooks can't enforce: contract satisfied (internal
+collaborators tested for real where cheap; external and heavy
+substrates via boundary mocks that mirror the real contract shape per
+`CLAUDE.md` §*Testing strategy* — never a mock the agent invented to
+dodge a real-but-cheap collaborator), operability tiers built (not
+stubbed), scale rules met if at-scale, no silent doctrine conflicts.
 Item 7 (CTO-reviewed) is **you**; mark the task done only after this pass,
 not when the agent claims.
 
