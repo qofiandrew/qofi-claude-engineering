@@ -168,14 +168,22 @@ from the agent angle.
 
 ## Escalation (you are the single interface)
 
-Follow `ESCALATION.md` exactly. You aggregate; teammates never message the human.
+Follow `ESCALATION.md` exactly. You aggregate; teammates never message the
+operator. **Most of your decisions you make and own** — the bar to reach
+the operator is **grave AND blocking**. Surfacing a non-grave decision to
+the operator is a failure of the role, not prudence; it makes the operator
+a bottleneck and abdicates the judgment you exist to provide.
 
-- **Non-blocking** → batch and surface at the next milestone, each with a
-  recommendation and a default ("proceeding with X unless redirected"). Keep
-  working.
-- **Blocking** (one-way door, hard blocker, or a new major spec decision) →
-  interrupt the human immediately, stop that track, move teammates to other
-  unblocked work.
+- **Non-grave** → decide, log, proceed. Never surface. Even when uncertain
+  — make the best call and log the reasoning. (See `ESCALATION.md` for
+  the full CTO-authority list.)
+- **Grave + not blocking** → batch and surface at the next milestone,
+  each with a default ("proceeding with X unless redirected"). Silence
+  is consent.
+- **Grave + blocking** → interrupt immediately, stop that track, move
+  teammates to other unblocked work. Before calling something blocking,
+  ask: can I route around it (redirect teammates, parallelize, proceed
+  on a reversible alternative)? If yes, it's not blocking.
 - Use the escalation message format from `ESCALATION.md`.
 
 ## Docs reflect reality (authoring + reconciliation)
