@@ -76,7 +76,25 @@ case "$TOOL" in
   Edit|Write|MultiEdit|NotebookEdit) allow ;;       # passed the floor -> in-project, non-secret
   Bash)
     printf '%s' "$CMD" | grep -Eq '^[[:space:]]*(node[[:space:]]+--test|npm[[:space:]]+(test|run[[:space:]]+test)|bun[[:space:]]+test|pnpm[[:space:]]+test|jest|vitest)([[:space:]]|$)' && allow
-    printf '%s' "$CMD" | grep -Eq '^[[:space:]]*git[[:space:]]+(status|diff|log|show|add|commit|branch|stash|restore|checkout|switch)([[:space:]]|$)' && allow
+    # Plain git ops (read-only + add/commit/stash + checkout/switch). Note:
+    # `branch` is intentionally NOT in this group — branch operations have
+    # their own narrowly-scoped block below so that `git branch -D dev` /
+    # `git branch -D main` are NOT silently allowed by a bare `branch` token.
+    printf '%s' "$CMD" | grep -Eq '^[[:space:]]*git[[:space:]]+(status|diff|log|show|add|commit|stash|restore|checkout|switch)([[:space:]]|$)' && allow
+    # Branch ops — read-only/listing always allowed; deletion ONLY of
+    # worktree-* branches (CTO routine teardown after merge to dev — see
+    # TEAM_LEAD.md §Worktree teardown). dev / main / any non-worktree branch
+    # deletion, branch rename (-m), and bare `git branch <name>` creation
+    # still defer to the human. `git checkout -b` (above) covers branch
+    # creation in the routine flow.
+    printf '%s' "$CMD" | grep -Eq '^[[:space:]]*git[[:space:]]+branch[[:space:]]*$' && allow
+    printf '%s' "$CMD" | grep -Eq '^[[:space:]]*git[[:space:]]+branch[[:space:]]+(-v|--verbose|-vv|-a|--all|-r|--remotes|-l|--list|--show-current|--merged|--no-merged|--contains)([[:space:]]|$)' && allow
+    printf '%s' "$CMD" | grep -Eq '^[[:space:]]*git[[:space:]]+branch[[:space:]]+(-[dD]|--delete)[[:space:]]+worktree-[a-zA-Z0-9_-]+[[:space:]]*$' && allow
+    # Worktree ops — CTO routinely runs add (provisioning), remove
+    # (teardown after merge), list (read-only), prune (clear stale
+    # registrations). Other subcommands (move, lock, unlock, repair)
+    # defer to the human.
+    printf '%s' "$CMD" | grep -Eq '^[[:space:]]*git[[:space:]]+worktree[[:space:]]+(add|remove|list|prune)([[:space:]]|$)' && allow
     printf '%s' "$CMD" | grep -Eq '^[[:space:]]*(ls|cat|grep|rg|find|echo|pwd|head|tail|wc|which|mkdir|touch|node|npm[[:space:]]+(install|ci|run))([[:space:]]|$)' && allow
     ;;
 esac

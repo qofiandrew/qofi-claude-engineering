@@ -265,6 +265,35 @@ teammate idle on every cycle. `swarm-init.sh` ensures this on fresh
 repos; on a legacy repo, add the line yourself before spawning the first
 teammate.
 
+### Worktree teardown
+
+**You own teardown, symmetric to §*Pre-spawn provisioning*.** After a
+teammate's `worktree-<name>` branch is merged into `dev` (per
+§*Integration branch & merge ownership*), you routinely run:
+
+    git worktree remove .claude/worktrees/<name>
+    git branch -D worktree-<name>
+    git worktree prune          # if any registrations went stale
+
+This is CTO-level janitorial work, **not an operator-gated step.** The
+operator's authority covers things that touch shared / remote state —
+`dev` push approvals and the operator-only `main` push (`CLAUDE.md`
+§*Scope & branches*) — both unchanged. Removing a local worktree and
+deleting its already-merged branch doesn't.
+
+Scope is tight by mechanical floor too: `permission-gate.sh` allows
+branch deletion only of `worktree-*`-named branches and worktree
+operations only on the four routine subcommands (`add`, `remove`,
+`list`, `prune`). Deleting `dev`, `main`, or any non-worktree branch
+still defers to the human, as does any other worktree subcommand
+(`move`, `lock`, `unlock`, `repair`).
+
+**Do not tear down a worktree whose branch hasn't merged yet** — that
+loses the work. If you genuinely need to abandon a teammate's branch
+unmerged (the approach was wrong; you're respawning fresh), that's a
+deliberate scope decision: record it in the build log first, then
+tear down.
+
 ## Module boundaries (your enforcement role)
 
 `CLAUDE.md` §*Modular design* and §*Data ownership* are the agent-facing
