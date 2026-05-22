@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.qofi.swarm-typing</string>
+
+  <!-- PERSISTENT typing-indicator pinger. One process for ALL swarms. The
+       script loops internally on ~8s so the Discord typing bubble stays
+       continuous (typing API expires ~10s). NOT periodic — no StartInterval. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/aschettino/qofirepos/qofi-claude-engineering/bin/swarm-typing.sh</string>
+  </array>
+
+  <!-- Start at load, run forever, relaunch on exit. KeepAlive cannot detect
+       a HANG; the script defends against that with `curl --max-time 5` on
+       every network call so a stalled Discord request can't wedge the loop. -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- Guard against a rapid-respawn loop if the script ever exits immediately
+       at start (e.g. missing $SWARM_HOME/swarm.conf). 10s is plenty. -->
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/aschettino/.config/swarm/typing.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/aschettino/.config/swarm/typing.err</string>
+
+  <!-- Same env shape as swarm-watch's plist (swarm.conf + tokens.env live in
+       SWARM_HOME). Bot tokens are NOT here — they live in tokens.env. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>SWARM_HOME</key>
+    <string>/Users/aschettino/qofirepos/qofi-claude-engineering</string>
+    <key>CLAUDE_PROJECTS_DIR</key>
+    <string>/Users/aschettino/.claude/projects</string>
+    <key>SWARM_STALE_SECONDS</key>
+    <string>300</string>
+    <!-- launchd has a minimal PATH; give tmux's absolute path explicitly.
+         Apple Silicon Homebrew is /opt/homebrew/bin/tmux; Intel is /usr/local/bin/tmux. -->
+    <key>SWARM_TMUX_BIN</key>
+    <string>/opt/homebrew/bin/tmux</string>
+  </dict>
+</dict>
+</plist>
