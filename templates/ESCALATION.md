@@ -24,6 +24,36 @@ later.
 
 ---
 
+## No silence-as-consent, no countdown defaults
+
+Never present a decision to the operator with a time-based default or
+"silence = consent." It is a category error — the surfacing signals
+operator input is required while the timer signals it isn't. There is
+no valid case for it.
+
+**Binary test, applied to every would-be escalation:**
+
+- **The decision REQUIRES operator input** (grave AND blocking per the
+  bar below) — surface it and **wait** for an actual answer. Run other
+  non-blocking work in parallel. **Never proceed on a timer.**
+- **It does not require operator input** — the CTO decides and proceeds
+  itself, logs the call (ADR if one-way). If a notification is useful
+  (advance notice of a future decision, or FYI on a one-way-door choice
+  already made), send it as a *notification* — no question, no timer,
+  no implied consent. See §*How to escalate* for the NOTIFY shape.
+
+If you catch yourself wanting to set a timer on a decision (*"I'll
+proceed with X in N hours if no objection"*), that is the signal you
+should have just decided and proceeded. **Surfacing was the mistake.**
+
+Advance notice is legitimate and useful — *"heads-up, you'll need to
+decide X before step N, expected in ~2 days"* — because it carries no
+implicit consent and no timer-default. When step N actually arrives,
+work pauses on that track (it has become blocking) until the operator
+decides; other tracks continue.
+
+---
+
 ## The ladder
 
 Two tiers. Each agent escalates one step up, never further.
@@ -66,14 +96,27 @@ calling something blocking. The operator must never be a bottleneck.
 
 ## Cadence
 
-- **Grave + blocking** → interrupt the operator **immediately**. Stop that
-  track. Move teammates to other unblocked work if any exists.
-- **Grave + not blocking** → batch and surface at a milestone boundary,
-  bundled with related items. Each entry includes a default
-  ("proceeding with X unless you redirect"). Silence is consent. Work
-  does not stall.
+Two tiers. **There is no third tier.**
+
+- **Grave + blocking** → interrupt the operator **immediately**. Stop
+  that track. Move teammates to other unblocked work if any exists.
+  Wait for the operator's actual answer. Never proceed on a timer
+  (per §*No silence-as-consent*).
 - **Non-grave** → decide, log, proceed. **Never surface.** Even when
   uncertain.
+
+A grave item that the work hasn't reached yet is **not** a third tier
+— it's either:
+- **Advance notice** (FYI without timer or implied consent — the CTO
+  proceeds on other tracks; the item becomes grave-and-blocking when
+  work actually hits it and pauses that track until answered); OR
+- **A call within CTO authority** that the CTO simply makes and logs
+  (with an ADR if one-way), without surfacing as a question.
+
+If neither fits, re-check the bar: if the operator's answer doesn't
+actually change what the CTO would do next, the CTO is asking for
+permission to do its job. That is a §*Core principle* failure, not
+prudence.
 
 ---
 
@@ -94,8 +137,17 @@ Surface to the CTO when:
 
 ## CTO → Operator triggers (grave items)
 
-When grave-AND-blocking, surface immediately. When grave-but-not-blocking,
-batch.
+Every item below is grave. Apply the §*Cadence* binary:
+
+- If the work has reached the item and the CTO cannot legitimately
+  proceed without the operator's answer, it is **blocking** — surface
+  immediately and wait.
+- If the work has not yet reached it, send **advance notice** (no
+  timer, no implied consent) and continue other tracks until it
+  becomes blocking.
+- If the call is one the CTO has authority to make under §*CTO
+  authority — decide, own, never surface*, **make it.** Do not kick
+  it up dressed as an escalation.
 
 - **Pushing to `main`.** Operator-only. The CTO does not authorize this;
   the operator runs the main push themselves. No agent process — Bash,
@@ -170,26 +222,55 @@ proceed. **Do not ask.**
 
 ## How to escalate
 
+Two message shapes: **ESCALATE** (asks for input; the CTO will wait) and
+**NOTIFY** (informational; not asking, no input expected).
+
+### ESCALATE — asks for input
+
 Every escalation message states, in this order:
 
 1. **Decision** — one line, what's being decided.
 2. **Options** — the realistic choices.
 3. **Recommendation** — your pick, one-line why.
 4. **Reversibility** — one-way or two-way, cost of changing later.
-5. **Default** — what you'll do if no answer
-   ("proceeding with X in <window> unless redirected") or
-   "BLOCKED — cannot continue".
+5. **Status** — one of:
+   - `BLOCKED — cannot continue [on <track>]` (work paused on that
+     track, awaiting answer; other tracks continue), or
+   - `ADVANCE NOTICE — will become blocking at <step/condition>` (work
+     proceeds elsewhere; this item becomes BLOCKED when reached).
+
+**No "Default" field. No "proceeding with X in <window> unless
+redirected."** Per §*No silence-as-consent*, an ESCALATE is either
+blocking (the CTO waits) or advance-notice (the CTO proceeds on other
+tracks until the item is reached) — never timer-defaulted.
 
 ### Message template
 
 ```
-[ESCALATE · <project> · <blocking|batched>]
+[ESCALATE · <project> · <blocking|advance-notice>]
 Decision: <one line>
 Options: A) … B) … C) …
 Recommendation: <A/B/C> — <one-line reason>
 Reversibility: <one-way: changing later = … | two-way: cheap to revisit>
-Default: <proceeding with X in <window> unless redirected | BLOCKED — cannot continue>
+Status: <BLOCKED — cannot continue [on <track>] | ADVANCE NOTICE — will become blocking at <step>>
 ```
+
+### NOTIFY — informational only
+
+For decisions the CTO has made under its own authority and that warrant
+the operator's awareness (a one-way-door call recorded as an ADR; a
+scope or stack choice the operator will see in the spec; an unusual
+trade-off worth flagging). One-line summary + the durable reference.
+No question, no fields, no timer, no consent implied.
+
+```
+[NOTIFY · <project>] <one-sentence summary> (see ADR-NNN / PROJECT_SPEC §10 entry / commit <sha>)
+```
+
+If you find yourself adding `Options:` or `Recommendation:` to a NOTIFY,
+it isn't a notification — it's a question. Convert to an ESCALATE or
+recognize that the call was within CTO authority and re-decide whether
+to surface it at all.
 
 ---
 

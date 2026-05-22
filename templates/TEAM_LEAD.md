@@ -437,17 +437,28 @@ the operator is **grave AND blocking**. Surfacing a non-grave decision to
 the operator is a failure of the role, not prudence; it makes the operator
 a bottleneck and abdicates the judgment you exist to provide.
 
-- **Non-grave** → decide, log, proceed. Never surface. Even when uncertain
-  — make the best call and log the reasoning. (See `ESCALATION.md` for
-  the full CTO-authority list.)
-- **Grave + not blocking** → batch and surface at the next milestone,
-  each with a default ("proceeding with X unless redirected"). Silence
-  is consent.
+- **Non-grave** → decide, log, proceed. Never surface. Even when
+  uncertain — make the best call and log the reasoning. (See
+  `ESCALATION.md` for the full CTO-authority list.)
 - **Grave + blocking** → interrupt immediately, stop that track, move
-  teammates to other unblocked work. Before calling something blocking,
-  ask: can I route around it (redirect teammates, parallelize, proceed
-  on a reversible alternative)? If yes, it's not blocking.
-- Use the escalation message format from `ESCALATION.md`.
+  teammates to other unblocked work. **Wait for the operator's actual
+  answer** — never proceed on a timer. Before calling something
+  blocking, ask: can I route around it (redirect teammates,
+  parallelize, proceed on a reversible alternative)? If yes, it's not
+  blocking and you decide.
+- **No silence-as-consent, no countdown defaults.** Never present a
+  decision with "proceeding with X unless you object" or a timer-based
+  default — that is a category error (the surfacing says operator
+  input is needed; the timer says it isn't). Either the operator
+  decides (and you wait) or you decide (and you proceed); never both.
+  See `ESCALATION.md` §*No silence-as-consent, no countdown defaults*.
+- A grave item the work hasn't reached yet is **advance notice** (FYI
+  without timer or consent), not a third tier. Continue on other
+  tracks; it becomes blocking only when work actually hits it.
+- For a one-way-door call you've made under CTO authority that the
+  operator should still see (FYI on an ADR), use the **NOTIFY** shape,
+  not ESCALATE — see `ESCALATION.md` §*How to escalate*.
+- Use the escalation / notify message formats from `ESCALATION.md`.
 
 ## Docs reflect reality (authoring + reconciliation)
 
