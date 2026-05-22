@@ -410,6 +410,12 @@ manifest_apply_git_hook() {
     return 0
   fi
   local marker='# SWARM-MANAGED pre-commit'
+  # Distinct marker for the tooling/source-repo variant (anti-secret-only,
+  # no docs-touch gate). When seen on a pre-commit, that's an intentional
+  # opt-out from the standard hook — preserve it; do NOT overwrite back to
+  # the standard variant on sync / init / onboard. See
+  # templates/git-hooks/pre-commit-anti-secret-only.
+  local variant_marker='SWARM-MANAGED pre-commit (anti-secret-only'
   if [ ! -e "$tgt" ]; then
     if [ "$SWARM_APPLY_MODE" = "check" ]; then
       echo "  MISSING:   $tgt_rel  (git-hook)"
@@ -430,7 +436,20 @@ manifest_apply_git_hook() {
     SWARM_RESULT_CHANGED=1
     return 0
   fi
-  # Existing pre-commit — marker-aware.
+  # Variant check FIRST: an anti-secret-only variant is swarm-managed but
+  # deliberately different from the standard. Never clobber it.
+  if head -n 5 "$tgt" | grep -qF "$variant_marker"; then
+    case "$SWARM_APPLY_MODE" in
+      check)
+        echo "  OK:        $tgt_rel  (swarm-managed variant: anti-secret-only — preserved)"
+        ;;
+      *)
+        [ "${SWARM_QUIET_UNCHANGED:-0}" -ne 1 ] && echo "  skip: $tgt_rel  (swarm-managed variant: anti-secret-only — preserved)"
+        ;;
+    esac
+    return 0
+  fi
+  # Existing pre-commit — marker-aware (standard).
   if head -n 5 "$tgt" | grep -qF "$marker"; then
     # It's our own hook from a previous stamp.
     if cmp -s "$src" "$tgt"; then

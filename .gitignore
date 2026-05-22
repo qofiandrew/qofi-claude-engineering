@@ -11,3 +11,7 @@ bun.lock
 
 # Settings merge leftovers
 .claude/settings.json.new
+
+# Per-teammate git worktrees (CTO provisions before spawn;
+# never tracked in the integration tree).
+.claude/worktrees/
