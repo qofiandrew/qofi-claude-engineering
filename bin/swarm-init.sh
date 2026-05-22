@@ -104,4 +104,32 @@ else
   echo "  skip (exists): .claude/test-cmd"
 fi
 
+# .gitignore: ensure .claude/worktrees/ is excluded. Each teammate's
+# isolated git worktree is created here on demand by the CTO before spawn
+# (see TEAM_LEAD.md §Integration branch & merge ownership). If this dir
+# is tracked, the docs-check.sh TeammateIdle hook misclassifies the
+# untracked worktree contents as "source changed, no docs touch" and
+# blocks teammate idle. Add the line idempotently — create .gitignore if
+# absent, append only if the line is missing.
+GI="$REPO/.gitignore"
+LINE='.claude/worktrees/'
+if [ ! -e "$GI" ]; then
+  {
+    echo "# Per-teammate git worktrees (CTO provisions before spawn;"
+    echo "# never tracked in the integration tree)."
+    echo "$LINE"
+  } > "$GI"
+  echo "  wrote: .gitignore  (created with .claude/worktrees/ entry)"
+elif grep -qxF "$LINE" "$GI"; then
+  echo "  skip (already gitignored): .claude/worktrees/"
+else
+  {
+    echo ""
+    echo "# Per-teammate git worktrees (CTO provisions before spawn;"
+    echo "# never tracked in the integration tree)."
+    echo "$LINE"
+  } >> "$GI"
+  echo "  appended: .gitignore  (.claude/worktrees/ entry)"
+fi
+
 echo "Done. The lead launched against this repo will hold the design conversation with you over Discord; when you say 'go build,' it authors PROJECT_SPEC.md and the one-way-door ADRs from the conversation, confirms with you, then decomposes and spawns. The stamped PROJECT_SPEC.md is a placeholder until then — see TEAM_LEAD.md."

@@ -293,8 +293,18 @@ CTO's call per module; what's non-negotiable is the substrate.
 - **Stay in your app.** In a monorepo, your writes are scoped to `apps/<app>/`
   (or the repo root for a single-app repo). Don't touch sibling apps. If your
   work genuinely needs a cross-app change, that's a CTO call — escalate.
-- **Work on `dev`.** Commit to local `dev` freely as you go.
-- **Push `dev` to remote only with CTO approval.** Don't push on your own.
+- **Work in your own worktree, on your own branch.** The CTO created
+  `.claude/worktrees/<your-name>/` on branch `worktree-<your-name>` for
+  you. All your commits land there. If you find yourself in an empty or
+  missing worktree at session start, that is a CTO provisioning gap —
+  surface it, do not bootstrap silently and do not land work in the wrong
+  tree (`§Conflict handling`).
+- **Never commit directly to the integration branch `dev`** (nor to
+  `main`). The CTO owns merges from `worktree-<name>` branches into `dev`.
+  Parallel commits in separate worktrees are fine; parallel merges are
+  not — that's why merging is centralized on the CTO.
+- **Push your `worktree-<name>` branch to remote only with CTO approval.**
+  Don't push on your own. Pushes of `dev` are the CTO's call.
 - **Pushing to `main` is operator-only.** Not even the CTO authorizes a main
   push; the operator runs it themselves. **No agent process ever executes
   `git push` to `main`** — not via Bash, not via a hook, not via a tool. If
