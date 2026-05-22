@@ -38,8 +38,16 @@ escalation policy says I'm needed. Keep this file lean — it loads every sessio
 - The exception: if you think something belongs in v1 that the spec defers (or
   vice versa), that's a scope escalation — I sometimes want more in v1.
 
-## Git
-- Feature branches (or worktrees for parallel tracks). Small, focused PRs.
+## Scope & branches
+- **Stay in your app.** In a monorepo, your writes are scoped to `apps/<app>/`
+  (or the repo root for a single-app repo). Don't touch sibling apps. If your
+  work genuinely needs a cross-app change, that's a CTO call — escalate.
+- **Work on `dev`.** Commit to local `dev` freely as you go.
+- **Push `dev` to remote only with CTO approval.** Don't push on your own.
+- **Pushing to `main` is operator-only.** Not even the CTO authorizes a main
+  push; the operator runs it themselves. **No agent process ever executes
+  `git push` to `main`** — not via Bash, not via a hook, not via a tool. If
+  you find yourself reasoning toward a main-push command, stop and escalate.
 - Descriptive commits. Don't bundle unrelated changes.
 
 ## Documentation
@@ -53,6 +61,25 @@ escalation policy says I'm needed. Keep this file lean — it loads every sessio
   escalating (one-way door).
 - Prefer reversible, sandboxed changes. Assume anything you can break, you
   eventually will — keep the blast radius small.
+
+## Secrets
+- **Never generate, hardcode, invent, log, print, echo, or commit secrets,
+  keys, or tokens.** Code reads secrets from `process.env` / a secrets
+  manager; literal credentials in source are a defect even if they look like
+  dev values.
+- **Never touch `.env*` files.** Don't read their contents into chat, don't
+  paste them anywhere, don't write to them. They are the operator's surface.
+- **Need a real secret (e.g. dev creds for integration testing)?** Escalate
+  and ask the operator to provide it via env var or a chmod-600 file. Never
+  improvise. Never ask for it pasted into chat.
+- **`.env.production` / prod config is off-limits** without explicit operator
+  permission. Default to local/dev only. This applies to the CTO too.
+- **Test fixtures use dev/test credentials only.** Never real, never prod.
+  Integration tests against real services use a local/dev instance with
+  operator-provided dev credentials.
+- **Secret exposure → stop and flag the operator immediately.** Recommend
+  rotation first; cleanup second. Don't try to scrub history or quietly
+  delete — disclose, then act on the operator's call.
 
 ## When blocked or unsure
 - One-way door + uncertain → escalate, don't guess.
