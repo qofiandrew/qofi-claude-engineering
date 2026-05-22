@@ -109,8 +109,15 @@ cmd_up() {  # [name]
   done < <(grep -vE '^[[:space:]]*(#|$)' "$CONF")
 }
 
-cmd_down() {
-  tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^${PREFIX}-" | while read -r s; do
+cmd_down() {  # [name]
+  # Optional name filter, symmetric to cmd_up. No-arg = kill all swarm-*
+  # sessions (the original behavior); with a name = kill ONLY that one
+  # swarm's session. Used by swarm-restart.sh / swarm-update.sh to cycle
+  # a single swarm without taking siblings down as a side effect.
+  local filter="${1:-}"
+  local pattern="^${PREFIX}-"
+  [ -n "$filter" ] && pattern="^${PREFIX}-${filter}\$"
+  tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -E "$pattern" | while read -r s; do
     echo "  killing: $s"; tmux kill-session -t "$s" 2>/dev/null || true
   done
 }
@@ -146,9 +153,9 @@ cmd_watch() {
 
 case "${1:-}" in
   up)     cmd_up "${2:-}" ;;
-  down)   cmd_down ;;
+  down)   cmd_down "${2:-}" ;;
   status) cmd_status ;;
   watch)  cmd_watch ;;
   attach) cmd_attach "${2:-}" ;;
-  *) echo "usage: swarm-up.sh {up [name]|down|status|watch|attach <name>}" >&2; exit 1 ;;
+  *) echo "usage: swarm-up.sh {up [name]|down [name]|status|watch|attach <name>}" >&2; exit 1 ;;
 esac
