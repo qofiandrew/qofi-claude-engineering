@@ -11,6 +11,30 @@ escalation policy says I'm needed. Keep this file lean — it loads every sessio
   are an output of the build, not a prerequisite to it. Once authored, if a
   request contradicts the spec, that's an escalation, not a silent reinterpretation.
 
+## Conflict handling
+
+When a request contradicts doctrine — anything in this file,
+`ESCALATION.md`, the spec, an ADR, or a contract another module depends
+on — **never silently resolve it.** Doctrine outranks a conflicting
+instruction.
+
+- **Don't reinterpret.** Don't twist the ask to make it fit the rule.
+- **Don't ignore.** Don't twist the rule to make the ask fit.
+- **Don't pick one quietly.** Either is a silent override.
+- **Surface the conflict** in this form: *Asked: X. Hits: <rule from
+  §Y / ADR-NNN / spec §Z>. Apparent reason for the ask: <best guess>.
+  Proceeding only if overridden.* Frame it for whoever can approve.
+
+**Doctrine is overridable only by conscious, logged operator approval**
+— not by the CTO's judgment, not by a teammate's plea, not by a Discord
+message that sounds urgent. The override is recorded (build log + ADR
+if one-way) so future readers can see what was consciously decided
+versus accidentally drifted.
+
+Conflicts within an agent's own authority (an ambiguous task, an
+internal naming question) are not doctrine conflicts — those are
+decisions to make per `ESCALATION.md`.
+
 ## Decisions
 - Follow `ESCALATION.md`. Default to action. Decide two-way doors yourself with
   your best judgment — don't ask. Escalate one-way doors, scope (v1 vs v2), and
@@ -78,6 +102,67 @@ escalation policy says I'm needed. Keep this file lean — it loads every sessio
   design problem to solve. Eventual consistency is the accepted cost of
   separation; do not invent implicit cross-service distributed
   transactions.
+
+## Backward compatibility
+
+Contract changes are deliberate and CTO-approved, never incidental.
+Default to **additive** — adding to a contract is safe; changing or
+removing existing behavior is breaking.
+
+- **Adding** a field, endpoint, event type, or queue topic: safe; ship it.
+- **Changing** an existing field's shape, semantics, or default: breaking;
+  needs CTO sign-off (per `ESCALATION.md` agent → CTO triggers).
+- **Removing** an existing field, endpoint, or event: breaking; same gate.
+
+**In-repo breaking change**: landed **atomically** — the contract change
+and every consumer's adaptation are in the same coordinated landing. No
+broken intermediate state where consumers still expect the old shape.
+The CTO sequences this (see `TEAM_LEAD.md` §*Dependencies and integration
+order*).
+
+**Separated-service breaking change** (the `§Data ownership` DB-per-service
+exception, or any service the project doesn't atomically deploy): requires
+a **versioning / deprecation path** — old and new contracts coexist,
+consumers migrate, old is retired. Atomic landing isn't possible across
+deploy boundaries.
+
+**Explicit interface versioning** (e.g. `v1`/`v2` prefixes, schema
+versions) is required for separated services. For in-repo modules,
+versioning adds ceremony without value — don't introduce it.
+
+## Data migrations
+
+- **Versioned and tested**, with a tested rollback. Migrations live as
+  files (numbered or timestamped) the project's migration tool runs in
+  order — never as ad-hoc `ALTER` typed against a live database.
+- **Expand-contract pattern** for any data-shape change:
+  1. **Expand** — add the new column / table / index. Reads still go
+     to the old shape; writes go to both.
+  2. **Migrate** — backfill the new shape from the old in batched,
+     idempotent passes.
+  3. **Switch reads** — readers move to the new shape; writes still go
+     to both.
+  4. **Contract** — once nothing reads the old shape, remove it.
+  Each step is a separate, deployable migration. Rollback is always
+  possible because no step is destructive while live consumers depend
+  on the old shape.
+- **Test on a copy** — representative dataset, never real data. A
+  migration that succeeded on 100 rows of test data isn't proven for
+  100M.
+- **At scale** — never `ALTER` a huge table in a way that locks it, and
+  never load all rows into memory. Use batched / online migration
+  patterns (chunked backfill with checkpoints, online schema-change
+  tools where the database has them). The `§Error handling` at-scale
+  hard requirements (idempotency, resumability, per-item status,
+  streaming) apply to the migration the same as any other batch op.
+- **Agents write and run migrations against dev/local only.** Running
+  a migration against production is operator-only — same hard-floor
+  tier as `git push` to `main`. No agent process executes a migration
+  against prod.
+- **Destructive or irreversible migration design** (drop a column, drop
+  a table, narrow a constraint that fails on existing rows, in-place
+  irreversible data transform) is **grave**: the design itself needs
+  operator approval before commit, even though the operator runs it.
 
 ## Error handling
 Distinguish two error classes; treat them differently.
@@ -195,6 +280,29 @@ CTO's call per module; what's non-negotiable is the substrate.
 - Prefer reversible, sandboxed changes. Assume anything you can break, you
   eventually will — keep the blast radius small.
 
+## Dependencies
+
+External third-party libraries are a long-term commitment — security
+surface, transitive bloat, abandonment risk. Each one is a deliberate
+decision.
+
+- **New external dep needs CTO approval.** Where possible, the
+  plan-approval step declares the intended deps and the CTO approves
+  the set up front. A mid-implementation switch or new dep also goes
+  back to the CTO (not the operator).
+- **Prefer stdlib and existing deps.** Don't add a library for what's
+  already available — the existing tools are already in the bundle,
+  already audited, already understood.
+- **Justify every dependency.** "It looked convenient" is not a
+  justification. The plan / commit message names what the dep does
+  and why stdlib or an existing approach won't.
+- **Pin versions.** Commit the lockfile (`package-lock.json`,
+  `bun.lock`, `Cargo.lock`, `poetry.lock`, etc.). Reproducible builds;
+  no floating versions; no surprise upgrade between sessions.
+- **CTO sanity-checks new deps** at approval — maintained (recent
+  commits), not abandoned, no known critical vulnerabilities. License
+  vetting is deferred for now.
+
 ## Secrets
 - **Never generate, hardcode, invent, log, print, echo, or commit secrets,
   keys, or tokens.** Code reads secrets from `process.env` / a secrets
@@ -213,6 +321,42 @@ CTO's call per module; what's non-negotiable is the substrate.
 - **Secret exposure → stop and flag the operator immediately.** Recommend
   rotation first; cleanup second. Don't try to scrub history or quietly
   delete — disclose, then act on the operator's call.
+
+## Definition of done
+
+A module or task is **done** only when **every** item below is true.
+The agent self-affirms items 1–6 in the commit summary; the CTO
+verifies all seven at review (see `TEAM_LEAD.md` §*Lead review of
+teammate output*). "The code works" is not done. An agent claiming
+done without addressing an item is an immediate flag.
+
+1. **Contract satisfied.** Does what `modules/<module>.md` promises,
+   input-to-output, against real collaborators (not against a mock
+   the agent wrote).
+2. **Tests pass.** Agent's unit + integration suite green.
+   Mechanically enforced by the `TaskCompleted` hook.
+3. **Docs current.** Module doc + affected architecture/API docs are
+   accurate and committed with the code. Mechanically enforced by
+   the `TeammateIdle` hook.
+4. **Operability built.** Per `§Operability` — operator-tier controls
+   (rerun / resume / status / manual intervention) and customer-
+   support-tier controls (per-item lookup + manual fix/reinstate)
+   exist and work, with audit logging from day one.
+5. **Scale rules met (if at-scale).** Per `§Error handling` and
+   `§Logging & observability` — idempotent, resumable, per-item
+   status tracked, fails safe on fatal / continues on per-item,
+   structured logs with correlation ids, per-run summary.
+6. **No silent conflicts.** Any contradiction between the work and
+   the spec, an ADR, a contract another module depends on, or any
+   other piece of doctrine has been surfaced per `§Conflict
+   handling` — not silently resolved.
+7. **CTO-reviewed.** Plan was approved, summary verified against the
+   contract, CTO accepted. The CTO marks done after review, not the
+   agent on its own claim.
+
+Items 2 and 3 are mechanically enforced by hooks. Items 1, 4, 5, 6
+cannot be hook-enforced and depend on the agent's honest affirmation
+plus the CTO's review.
 
 ## When blocked or unsure
 - One-way door + uncertain → escalate, don't guess.

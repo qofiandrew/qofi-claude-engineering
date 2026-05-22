@@ -119,8 +119,15 @@ batch.
   web framework, primary datastore. (Architecture topology within those
   — monolith-first vs services, module decomposition — is CTO authority;
   see below.)
-- **Schema migration that reshapes existing data.** (Initial schema for
-  a new module's owned tables is CTO authority — see below.)
+- **Running a migration against production.** Operator-only — same tier
+  as `git push` to main. Agents write and run migrations only against
+  dev/local. No agent process executes a migration against prod.
+- **Destructive or irreversible migration design**, even before it runs:
+  the design itself needs operator approval before commit. Examples:
+  dropping a column or table, narrowing a constraint that fails on
+  existing rows, in-place irreversible data transforms. (Additive
+  migrations within a module's own tables are CTO authority — see
+  below.)
 - **Security-relevant tradeoffs**: secrets handling design, PII storage,
   encryption choices.
 - **Cross-service atomicity need** — flag this as an explicit design
@@ -142,6 +149,11 @@ These are CTO calls. Write an ADR for one-way decisions; do NOT escalate.
 - **Build sequencing** — which module is built first, dependency order.
 - **Initial schema design for a new module's owned tables.** ADR-worthy
   when it's a meaningful shape decision; not escalated.
+- **Additive migrations within a module's owned tables** — adding a
+  column, a table, an index, or a constraint that doesn't fail on
+  existing rows. CTO authors or approves; agents run against dev/local;
+  the operator runs against prod. ADR when the shape decision is
+  meaningful.
 - **DB-per-service exception vs shared-DB default.** Per-module ADR;
   requires a concrete operational need (see `CLAUDE.md` §*Data
   ownership*).

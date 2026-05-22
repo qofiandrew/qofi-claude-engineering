@@ -128,6 +128,12 @@ access lands. Watch for it on the way in.
   against the real contract (per §*Verification*), not against a mock the
   consumer wrote. If you sequence consumers first, you'll get tests that
   pass against a fiction and fail against reality.
+- **A breaking change to an in-repo contract is one atomic task** — the
+  contract change and every consumer's adaptation land together, no broken
+  intermediate state. Sequence it so consumers are updated in the same
+  landing as the contract. (Separated services use a versioning /
+  deprecation path per `CLAUDE.md` §*Backward compatibility* — different
+  pattern, not atomic.)
 
 ## Plan-approval gate (your one-way-door enforcement)
 
@@ -142,6 +148,11 @@ if the plan would:
 - touch **production or real user data**
 
 Approve a plan only if it includes the **tests** for the work it describes.
+**Verify the external dependencies** the plan declares — approve the set
+explicitly at plan-approval where possible. A mid-implementation switch or
+new dep also comes back to you (not the operator); sanity-check it's
+maintained, not abandoned, and free of known critical vulns. License
+vetting is deferred for now. (See `CLAUDE.md` §*Dependencies*.)
 Everything two-way: approve and let them proceed.
 
 ## Security authority & boundaries
@@ -239,6 +250,14 @@ ids only — add a test for `complete -3` and reject it with the usage error."*
 
 Every send-back is also a **progress post** (next section) — that is how the
 operator sees that review is actually happening.
+
+**Verify the DoD self-affirmation.** The agent's commit summary asserts
+items 1–6 of `CLAUDE.md` §*Definition of done*. Verify every one —
+especially the items hooks can't enforce: contract satisfied against the
+real collaborator (not a mock the agent wrote), operability tiers built
+(not stubbed), scale rules met if at-scale, no silent doctrine conflicts.
+Item 7 (CTO-reviewed) is **you**; mark the task done only after this pass,
+not when the agent claims.
 
 ## Progress posting (visibility + audit trail)
 
