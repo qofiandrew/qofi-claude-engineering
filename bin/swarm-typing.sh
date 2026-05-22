@@ -51,20 +51,16 @@ CURL_MAX_TIME="${SWARM_TYPING_CURL_TIMEOUT:-5}"
 # well under the launchd KillMode timeout.
 trap 'echo "swarm-typing: exiting on signal" >&2; exit 0' TERM INT
 
-file_mtime() { python3 -c 'import os,sys
-try: print(int(os.path.getmtime(sys.argv[1])))
-except Exception: print(0)' "$1" 2>/dev/null; }
+# Shared repo_activity helper. Fires typing when ANY transcript (lead or
+# per-teammate worktree) is fresher than STALE_SECONDS — the watcher uses
+# the same helper for its 🟢-working decision, so the typing bubble and the
+# heartbeat can never disagree on "is this swarm producing?". See swarm-lib.sh.
+# shellcheck disable=SC1091
+. "$(cd "$(dirname "$0")" && pwd)/swarm-lib.sh"
 
 session_alive() {  # name -> 0 alive, 1 absent, 2 tmux unknown
   command -v "$TMUX_BIN" >/dev/null 2>&1 || return 2
   "$TMUX_BIN" has-session -t "${PREFIX}-$1" 2>/dev/null
-}
-
-newest_transcript() {  # repo -> path or nonzero
-  local base; base="$(basename "$1")"
-  local t; t="$(ls -t "$CLAUDE_PROJECTS"/*/*.jsonl 2>/dev/null | grep -iF -- "$base" | head -1)"
-  [ -z "$t" ] && return 1
-  printf '%s' "$t"
 }
 
 # Startup config sanity: warn (once) about any rows missing a token var or
@@ -92,7 +88,6 @@ while :; do
   # restart. Cheap (one shell-include of a small file).
   # shellcheck disable=SC1090
   [ -f "$TOKENS" ] && . "$TOKENS"
-  now="$(date +%s)"
 
   while IFS='|' read -r name repo tokvar channel; do
     name="$(echo "${name:-}" | xargs)"
@@ -107,13 +102,14 @@ while :; do
 
     case "$repo" in "~"*) repo="$HOME${repo#\~}";; esac
 
-    # Predicate: tmux session alive + transcript exists + fresh.
+    # Predicate: tmux session alive AND newest transcript (lead OR any
+    # teammate worktree) is within STALE_SECONDS. The teammate-count field
+    # the watcher uses is irrelevant here — typing is a boolean.
     session_alive "$name" || continue   # rc 1 (down) or 2 (no tmux) → skip
-    transcript="$(newest_transcript "$repo" || true)"
-    [ -z "$transcript" ] && continue    # starting (no transcript yet) → skip
-    mt="$(file_mtime "$transcript")"; mt="${mt//[^0-9]/}"; [ -z "$mt" ] && mt=0
-    age=$(( now - mt )); [ "$age" -lt 0 ] && age=0
-    [ "$age" -gt "$STALE_SECONDS" ] && continue   # stale (ready-waiting / stalled) → skip
+    activity="$(repo_activity "$repo" "$CLAUDE_PROJECTS" "$STALE_SECONDS")"
+    age="${activity%%|*}"
+    [ -z "$age" ] && continue           # starting (no transcript yet) → skip
+    [ "$age" -gt "$STALE_SECONDS" ] && continue   # stale (ready / stalled) → skip
 
     # Fire and forget. --max-time guards against a wedged Discord request
     # hanging the loop. Output is dropped; the next sweep retries 8s later.

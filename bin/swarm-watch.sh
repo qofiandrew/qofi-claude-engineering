@@ -53,9 +53,13 @@ mkdir -p "$STATE_DIR"
 # shellcheck disable=SC1090
 [ -f "$TOKENS" ] && . "$TOKENS"
 
-file_mtime() { python3 -c 'import os,sys
-try: print(int(os.path.getmtime(sys.argv[1])))
-except Exception: print(0)' "$1" 2>/dev/null; }
+# Shared repo_activity helper. Walks the lead's project dir AND every teammate
+# worktree dir recursively (including subagents/) for the newest *.jsonl mtime
+# and a count of distinct teammate dirs with a fresh transcript. Both signals
+# are needed for the state machine below — see swarm-lib.sh for details.
+# shellcheck disable=SC1091
+. "$(cd "$(dirname "$0")" && pwd)/swarm-lib.sh"
+
 json_content() { printf '%s' "$1" | python3 -c 'import json,sys; print(json.dumps({"content": sys.stdin.read()}))'; }
 extract_id() { python3 -c 'import json,sys
 try: print(json.load(sys.stdin).get("id",""))
@@ -74,13 +78,6 @@ pane_mid_turn() {  # name
   local sess="${PREFIX}-$1"
   "$TMUX_BIN" capture-pane -t "$sess" -p 2>/dev/null \
     | grep -qF 'esc to interrupt'
-}
-
-newest_transcript() {  # repo -> path or nonzero
-  local base; base="$(basename "$1")"
-  local t; t="$(ls -t "$CLAUDE_PROJECTS"/*/*.jsonl 2>/dev/null | grep -iF -- "$base" | head -1)"
-  [ -z "$t" ] && return 1
-  printf '%s' "$t"
 }
 
 post_heartbeat() {  # channel token content
@@ -125,8 +122,6 @@ pin_message() {  # channel token messageid
   esac
 }
 
-now="$(date +%s)"
-
 grep -vE '^[[:space:]]*(#|$)' "$CONF" | while IFS='|' read -r name repo tokvar channel; do
   name="$(echo "${name:-}" | xargs)"
   repo="$(echo "${repo:-}" | xargs)"
@@ -143,27 +138,43 @@ grep -vE '^[[:space:]]*(#|$)' "$CONF" | while IFS='|' read -r name repo tokvar c
   session_alive "$name"; rc=$?
   if [ "$rc" -eq 0 ]; then alive=1; elif [ "$rc" -eq 2 ]; then alive=2; else alive=0; fi
 
-  transcript="$(newest_transcript "$repo" || true)"
+  # repo_activity returns "<newest_age_seconds>|<active_teammate_count>".
+  # The age scan covers the lead's project dir AND every teammate worktree
+  # dir recursively — so "fresh" fires when *anyone* (lead or any teammate)
+  # is producing, not just the lead. See swarm-lib.sh.
+  activity="$(repo_activity "$repo" "$CLAUDE_PROJECTS" "$STALE_SECONDS")"
+  a="${activity%%|*}"
+  tn="${activity##*|}"
 
   if [ "$alive" -eq 0 ]; then
     status="⚪ swarm down (no session)"; age="—"
-  elif [ -z "$transcript" ]; then
+  elif [ -z "$a" ]; then
     if [ "$alive" -eq 1 ]; then status="🟡 swarm starting (no transcript yet)"; else status="⚪ no active session"; fi
     age="—"
   else
-    mt="$(file_mtime "$transcript")"; mt="${mt//[^0-9]/}"; [ -z "$mt" ] && mt=0
-    a=$(( now - mt )); [ "$a" -lt 0 ] && a=0
     if [ "$a" -lt 60 ]; then age="${a}s"; else age="$(( a/60 ))m"; fi
     if [ "$a" -le "$STALE_SECONDS" ]; then
-      status="🟢 swarm working"
+      # Working — lead OR any teammate has written within STALE_SECONDS.
+      # If teammates are the ones producing, surface the count so the
+      # heartbeat distinguishes "lead is hot" from "lead idle, N teammates
+      # cranking" (the very state that motivated this change).
+      if [ "${tn:-0}" -gt 0 ]; then
+        if [ "$tn" -eq 1 ]; then plural=""; else plural="s"; fi
+        status="🟢 swarm working · $tn teammate${plural} active"
+      else
+        status="🟢 swarm working"
+      fi
       [ "$ENABLE_TYPING" = "1" ] && curl -s -X POST -H "Authorization: Bot $token" "$API/channels/$channel/typing" >/dev/null 2>&1 || true
     elif pane_mid_turn "$name"; then
-      # Footer says "esc to interrupt" — a turn IS in flight, but the
-      # transcript hasn't been updated in > STALE_SECONDS. Genuinely stuck.
+      # Footer says "esc to interrupt" — a turn IS in flight, but neither
+      # the lead nor any teammate has written for > STALE_SECONDS. Stuck.
       status="🔴 swarm STALLED — turn in flight but no transcript write for $(( a/60 ))m (rate-limited, hung tool, or crashed)"
     else
-      # Stale + not mid-turn — the lead finished its last turn and is at the
-      # prompt waiting for the next Discord message. Healthy.
+      # Stale across the board + lead not mid-turn — lead at prompt and
+      # no teammate is producing. Healthy idle. (See swarm-lib.sh: the
+      # known limitation is that "every teammate hung simultaneously"
+      # would also paint as ready; parity with the previous lead-only
+      # implementation, no regression.)
       status="🟢 swarm ready · waiting for input (idle $(( a/60 ))m)"
     fi
   fi
