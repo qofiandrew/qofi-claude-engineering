@@ -32,9 +32,11 @@ EVENT="$(cat 2>/dev/null || true)"
 ROOT="${CLAUDE_PROJECT_DIR:-$PWD}"
 
 # Collect candidate text to search in: every string-valued field of the stdin
-# JSON event, joined with newlines. On any python failure, CANDIDATES stays
-# empty and we fall through to the HEAD commit message.
-CANDIDATES="$(printf '%s' "$EVENT" | python3 -c '
+# JSON event, joined with newlines. A parse failure (non-JSON stdin or empty
+# stdin) emits the sentinel "__PARSE_FAILED__" so the bash side can distinguish
+# "agent didn't write the affirmation" from "we couldn't read what the agent
+# said" — those need different surfaced messages, even though both block.
+CANDIDATES_RAW="$(printf '%s' "$EVENT" | python3 -c '
 import sys, json
 try:
     e = json.loads(sys.stdin.read())
@@ -48,8 +50,16 @@ try:
     walk(e)
     print("\n".join(out))
 except Exception:
-    pass
-' 2>/dev/null || true)"
+    print("__PARSE_FAILED__")
+' 2>/dev/null || echo "__PARSE_FAILED__")"
+
+PARSE_FAILED=0
+CANDIDATES=""
+if [ "$CANDIDATES_RAW" = "__PARSE_FAILED__" ]; then
+  PARSE_FAILED=1
+else
+  CANDIDATES="$CANDIDATES_RAW"
+fi
 
 # Also pull the most recent commit message on HEAD (if this is a git repo and
 # there is at least one commit). Tasks routinely end in a commit, so the
@@ -80,6 +90,21 @@ for n in 1 2 3 4 5 6; do
 done
 
 if [ -n "$missing" ]; then
+  if [ "$PARSE_FAILED" -eq 1 ]; then
+    # Stdin wasn't parseable AND the HEAD commit also lacks affirmation — we
+    # genuinely couldn't verify. Distinct from "agent forgot lines" so the
+    # surfaced guidance points at the right fix.
+    {
+      echo "dod-affirm: BLOCKED — couldn't verify affirmation, rerun."
+      echo ""
+      echo "Could not parse the TaskCompleted event payload, and the HEAD"
+      echo "commit message does not contain the Definition-of-Done affirmation"
+      echo "either. Re-run the task; include the six [DoD-1]..[DoD-6] lines"
+      echo "in your task summary or your commit message before marking complete."
+      echo "See CLAUDE.md §Definition of done for the exact format."
+    } >&2
+    exit 2
+  fi
   {
     echo "dod-affirm: BLOCKED — Definition-of-Done affirmation incomplete."
     echo ""
