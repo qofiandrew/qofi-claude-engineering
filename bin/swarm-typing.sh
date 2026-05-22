@@ -105,11 +105,22 @@ while :; do
     # Predicate: tmux session alive AND newest transcript (lead OR any
     # teammate worktree) is within STALE_SECONDS. The teammate-count field
     # the watcher uses is irrelevant here — typing is a boolean.
+    #
+    # FAIL-SAFE IS SILENCE. If repo_activity returns anything other than
+    # an unambiguously-fresh age, we DO NOT fire. Empty/non-numeric (the
+    # function shouldn't produce these, but defend in depth) and the
+    # SWARM_NO_TRANSCRIPT_AGE sentinel both fall through the stale check
+    # because the sentinel is much larger than any plausible
+    # STALE_SECONDS. The previous "empty → skip" branch was correct, but
+    # `[ "$age" -gt N ]` errors loudly on non-numeric input under
+    # `set -u`, so we screen with a pattern match first.
     session_alive "$name" || continue   # rc 1 (down) or 2 (no tmux) → skip
     activity="$(repo_activity "$repo" "$CLAUDE_PROJECTS" "$STALE_SECONDS")"
     age="${activity%%|*}"
-    [ -z "$age" ] && continue           # starting (no transcript yet) → skip
-    [ "$age" -gt "$STALE_SECONDS" ] && continue   # stale (ready / stalled) → skip
+    case "$age" in
+      ''|*[!0-9]*) continue ;;          # blank / non-numeric → uncertain → silent
+    esac
+    [ "$age" -gt "$STALE_SECONDS" ] && continue   # stale, starting, or sentinel → skip
 
     # Fire and forget. --max-time guards against a wedged Discord request
     # hanging the loop. Output is dropped; the next sweep retries 8s later.

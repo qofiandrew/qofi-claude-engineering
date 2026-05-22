@@ -296,12 +296,24 @@ recursively scans `*.jsonl` mtimes across:
 - the lead's own project transcript dir (Claude Code encodes the repo's
   `cwd` by replacing `/` and `.` with `-`), AND
 - every per-teammate worktree subdir matching `<lead-encoded>--claude-worktrees-*`
-  (covers the `subagents/` subdir where teammate transcripts live).
+  (covers the `subagents/` subdir where teammate transcripts live). A
+  teammate transcript dir whose corresponding `<repo>/.claude/worktrees/<name>`
+  has been torn down is skipped — defense-in-depth against the
+  TEAM_LEAD.md §Worktree teardown step that removes both.
 
-Returns `<newest_age_seconds>|<active_teammate_count>`. The watcher and the
-typing pinger consume this same signal so heartbeat status, typing bubble,
-and the WORKING safety rail can never drift apart. Default threshold:
-`SWARM_STALE_SECONDS=300` (5 minutes).
+Returns `<newest_age_seconds>|<active_teammate_count>`. The age is
+**always** numeric — when no transcript exists at all (or the scan hits
+an unrecoverable error) it returns the sentinel `SWARM_NO_TRANSCRIPT_AGE`
+(`9999999`, ~115 days), comfortably larger than any plausible
+`STALE_SECONDS`. Threshold-based callers (the typing pinger, the
+heartbeat predicate) treat it as stale automatically; the watcher
+compares against the sentinel only to render the more-specific "🟡
+starting (no transcript yet)" state. The function never returns blank —
+fail-safe for typing/heartbeat is **silence**, and a sentinel age makes
+that automatic. The watcher and the typing pinger consume this same
+signal so heartbeat status, typing bubble, and the WORKING safety rail
+can never drift apart. Default threshold: `SWARM_STALE_SECONDS=300`
+(5 minutes).
 
 ### The bridge
 

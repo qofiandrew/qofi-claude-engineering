@@ -274,6 +274,15 @@ teammate's `worktree-<name>` branch is merged into `dev` (per
     git worktree remove .claude/worktrees/<name>
     git branch -D worktree-<name>
     git worktree prune          # if any registrations went stale
+    # ALSO remove the teammate's transcript dir — Claude Code keeps a
+    # per-cwd projects dir under ~/.claude/projects/<lead-encoded>--claude-worktrees-<name>
+    # (where <lead-encoded> is the repo path with '/' and '.' replaced
+    # by '-'). Left behind, it pollutes the swarm liveness signal
+    # (repo_activity in swarm-lib.sh) with writes from a removed
+    # teammate, can misclassify the swarm as "working" days after the
+    # worktree is gone, and accumulates indefinitely across many
+    # teardowns. Remove it as part of the same teardown:
+    rm -rf "$HOME/.claude/projects/$(pwd | sed 's#[/.]#-#g')--claude-worktrees-<name>"
 
 This is CTO-level janitorial work, **not an operator-gated step.** The
 operator's authority covers things that touch shared / remote state —

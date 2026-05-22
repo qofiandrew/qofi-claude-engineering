@@ -142,13 +142,21 @@ grep -vE '^[[:space:]]*(#|$)' "$CONF" | while IFS='|' read -r name repo tokvar c
   # The age scan covers the lead's project dir AND every teammate worktree
   # dir recursively — so "fresh" fires when *anyone* (lead or any teammate)
   # is producing, not just the lead. See swarm-lib.sh.
+  #
+  # Age is ALWAYS a number now (no more blank). When no transcript exists
+  # at all the function returns $SWARM_NO_TRANSCRIPT_AGE — a sentinel
+  # larger than any plausible STALE_SECONDS, so threshold-based callers
+  # naturally treat it as stale. We compare against the sentinel here
+  # only to preserve the more-specific "🟡 starting (no transcript yet)"
+  # message; everything else flows through the existing predicate.
   activity="$(repo_activity "$repo" "$CLAUDE_PROJECTS" "$STALE_SECONDS")"
   a="${activity%%|*}"
   tn="${activity##*|}"
+  case "$a" in ''|*[!0-9]*) a="$SWARM_NO_TRANSCRIPT_AGE" ;; esac  # paranoia
 
   if [ "$alive" -eq 0 ]; then
     status="⚪ swarm down (no session)"; age="—"
-  elif [ -z "$a" ]; then
+  elif [ "$a" -eq "$SWARM_NO_TRANSCRIPT_AGE" ]; then
     if [ "$alive" -eq 1 ]; then status="🟡 swarm starting (no transcript yet)"; else status="⚪ no active session"; fi
     age="—"
   else

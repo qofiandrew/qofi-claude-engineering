@@ -114,8 +114,12 @@ else
   AGE="${ACT%%|*}"
   TN="${ACT##*|}"
   [ -z "${TN:-}" ] && TN=0
+  # repo_activity now always returns a numeric age (sentinel
+  # SWARM_NO_TRANSCRIPT_AGE when no transcript exists). Defend against
+  # any malformed output by coercing non-numeric to the sentinel.
+  case "$AGE" in ''|*[!0-9]*) AGE="$SWARM_NO_TRANSCRIPT_AGE" ;; esac
 
-  if [ -z "$AGE" ]; then
+  if [ "$AGE" -eq "$SWARM_NO_TRANSCRIPT_AGE" ]; then
     # No jsonl yet — session is starting; nothing in-flight to lose.
     echo "swarm-restart: session '$SESS' is alive but starting (no transcript yet) — safe to cycle"
   elif [ "$AGE" -le "$STALE_SECONDS" ]; then

@@ -23,7 +23,7 @@
 #                                    foreign hook entries.
 
 # ---------------------------------------------------------------------------
-# 1) repo_activity — used by swarm-watch + swarm-typing.
+# 1) repo_activity — used by swarm-watch + swarm-typing + swarm-restart.
 # ---------------------------------------------------------------------------
 #
 # Walks every Claude Code project dir associated with REPO_PATH — the lead's
@@ -32,9 +32,18 @@
 #
 #     "<newest_age_seconds>|<active_teammate_count>"
 #
-# - newest_age_seconds: integer seconds since the most recently modified
-#   *.jsonl anywhere under those dirs. Empty if NO jsonl exists at all
-#   (swarm just started, transcripts not yet flushed).
+# - newest_age_seconds: integer, ALWAYS NUMERIC. Real seconds-since-mtime
+#   when a transcript exists; the sentinel SWARM_NO_TRANSCRIPT_AGE
+#   (9999999 ≈ 115 days, larger than any plausible STALE_SECONDS) when
+#   either NO jsonl exists at all (swarm just started) OR the scan
+#   encountered an unrecoverable error. The function NEVER returns blank
+#   — empty age would force every caller to add the same parsing branch
+#   and the natural fail-mode of `[ "$age" -gt "$STALE_SECONDS" ]` would
+#   silently flip to "fresh" on weird input. Fail-safe is silence; the
+#   sentinel makes that automatic for any threshold-based predicate.
+#   Callers that need to distinguish "no transcript yet" from "stale
+#   transcript" compare `age == SWARM_NO_TRANSCRIPT_AGE` (see swarm-watch
+#   and swarm-restart for the "🟡 starting" message).
 # - active_teammate_count: number of distinct teammate worktree dirs whose
 #   most recent jsonl is ≤ STALE_SECONDS old. 0 if none.
 #
@@ -42,51 +51,85 @@
 # replacing every '/' and '.' with '-' and prepending '-'). Teammate worktree
 # dirs match the prefix "<lead-encoded>--claude-worktrees-" so this never
 # accidentally folds in a similarly-named sibling repo.
+#
+# Orphan-dir defense: a teammate transcript dir whose corresponding
+# <repo>/.claude/worktrees/<name> no longer exists is skipped. Teardown
+# (TEAM_LEAD.md §Worktree teardown) is the primary cleanup, but if it
+# misses the transcript dir we still don't let stale teammate-only
+# writes from a removed worktree poison the live signal.
+SWARM_NO_TRANSCRIPT_AGE=9999999
+
 repo_activity() {
   local repo="$1" projects="$2" stale="$3"
   python3 - "$repo" "$projects" "$stale" <<'PY'
 import os, re, sys, time
-repo, projects, stale = sys.argv[1], sys.argv[2], int(sys.argv[3])
 
-lead_enc = re.sub(r"[/.]", "-", repo)
-teammate_prefix = lead_enc + "--claude-worktrees-"
-
-now = time.time()
-newest_age = None
-teammate_newest = {}
+NO_TRANSCRIPT = 9999999  # MUST match SWARM_NO_TRANSCRIPT_AGE in swarm-lib.sh.
 
 try:
-    entries = os.listdir(projects)
-except FileNotFoundError:
-    print("|0")
-    raise SystemExit(0)
+    repo, projects, stale = sys.argv[1], sys.argv[2], int(sys.argv[3])
 
-for entry in entries:
-    is_lead = (entry == lead_enc)
-    is_teammate = entry.startswith(teammate_prefix)
-    if not (is_lead or is_teammate):
-        continue
-    for root, _, files in os.walk(os.path.join(projects, entry)):
-        for f in files:
-            if not f.endswith(".jsonl"):
-                continue
-            try:
-                mt = os.path.getmtime(os.path.join(root, f))
-            except OSError:
-                continue
-            age = int(now - mt)
-            if age < 0:
-                age = 0
-            if newest_age is None or age < newest_age:
-                newest_age = age
-            if is_teammate:
-                prev = teammate_newest.get(entry)
-                if prev is None or age < prev:
-                    teammate_newest[entry] = age
+    lead_enc = re.sub(r"[/.]", "-", repo)
+    teammate_prefix = lead_enc + "--claude-worktrees-"
 
-active = sum(1 for a in teammate_newest.values() if a <= stale)
-age_str = "" if newest_age is None else str(newest_age)
-print(f"{age_str}|{active}")
+    now = time.time()
+    newest_age = None
+    teammate_newest = {}
+
+    try:
+        entries = os.listdir(projects)
+    except FileNotFoundError:
+        # No projects dir at all — fail-stale, never blank.
+        print(f"{NO_TRANSCRIPT}|0")
+        raise SystemExit(0)
+
+    for entry in entries:
+        is_lead = (entry == lead_enc)
+        is_teammate = entry.startswith(teammate_prefix)
+        if not (is_lead or is_teammate):
+            continue
+        if is_teammate:
+            # Orphan check: skip teammate transcript dirs whose git
+            # worktree has been torn down (see TEAM_LEAD.md §Worktree
+            # teardown). Belt-and-suspenders to teardown removing the
+            # transcript dir itself.
+            wt_name = entry[len(teammate_prefix):]
+            wt_path = os.path.join(repo, ".claude", "worktrees", wt_name)
+            if not os.path.isdir(wt_path):
+                continue
+        try:
+            walker = os.walk(os.path.join(projects, entry))
+        except Exception:
+            continue
+        for root, _, files in walker:
+            for f in files:
+                if not f.endswith(".jsonl"):
+                    continue
+                try:
+                    mt = os.path.getmtime(os.path.join(root, f))
+                except OSError:
+                    continue
+                age = int(now - mt)
+                if age < 0:
+                    age = 0
+                if newest_age is None or age < newest_age:
+                    newest_age = age
+                if is_teammate:
+                    prev = teammate_newest.get(entry)
+                    if prev is None or age < prev:
+                        teammate_newest[entry] = age
+
+    active = sum(1 for a in teammate_newest.values() if a <= stale)
+    age_out = NO_TRANSCRIPT if newest_age is None else newest_age
+    print(f"{age_out}|{active}")
+except SystemExit:
+    raise
+except Exception as e:
+    # Catastrophic path: never let the function return blank. The
+    # liveness/typing predicates' fail-safe is silence; the sentinel
+    # achieves that under any threshold-based check.
+    sys.stderr.write(f"repo_activity: unexpected error: {e}\n")
+    print(f"{NO_TRANSCRIPT}|0")
 PY
 }
 
