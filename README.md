@@ -65,6 +65,16 @@ bin/swarm-up.sh watch     # foreground supervisor: relaunch dead leads
 bin/swarm-up.sh down      # stop all
 ```
 
+## Adding swarms
+
+To stand up a new swarm end-to-end, run `bin/swarm-add.sh <name> <repo>` and
+follow the prompts — it walks you through Discord bot setup (portal, intents,
+OAuth, invite, token) and ends with a verification checklist. For bringing the
+swarm operating system into a pre-existing real codebase that isn't greenfield,
+run `bin/swarm-onboard.sh <repo>` instead — it stamps doctrine + enforcement
+with refuse-and-report collision handling and leaves swarm registration to
+`swarm-add`.
+
 ## Using it
 
 DM a product's Discord channel and spec with its CTO. When you're ready, say **"go
