@@ -22,7 +22,10 @@
 
 set -euo pipefail
 
-SWARM_HOME="${SWARM_HOME:-$HOME/claude-swarm}"
+if [ -z "${SWARM_HOME:-}" ] || [ ! -d "${SWARM_HOME:-}/templates" ] || [ ! -f "${SWARM_HOME:-}/swarm.conf" ]; then
+  echo "swarm-init: SWARM_HOME unset or wrong — export SWARM_HOME=/Users/aschettino/qofirepos/qofi-claude-engineering" >&2
+  exit 1
+fi
 TPL="$SWARM_HOME/templates"
 
 REPO="${1:-}"
@@ -31,7 +34,6 @@ FORCE=0
 
 [ -z "$REPO" ]  && { echo "usage: swarm-init.sh /path/to/repo [--force]" >&2; exit 1; }
 [ -d "$REPO" ]  || { echo "swarm-init: $REPO is not a directory" >&2; exit 1; }
-[ -d "$TPL" ]   || { echo "swarm-init: templates not found at $TPL (set SWARM_HOME)" >&2; exit 1; }
 
 echo "Scaffolding swarm files into $REPO"
 

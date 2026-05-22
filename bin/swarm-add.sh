@@ -12,7 +12,10 @@
 
 set -euo pipefail
 
-SWARM_HOME="${SWARM_HOME:-$HOME/claude-swarm}"
+if [ -z "${SWARM_HOME:-}" ] || [ ! -d "${SWARM_HOME:-}/templates" ] || [ ! -f "${SWARM_HOME:-}/swarm.conf" ]; then
+  echo "swarm-add: SWARM_HOME unset or wrong — export SWARM_HOME=/Users/aschettino/qofirepos/qofi-claude-engineering" >&2
+  exit 1
+fi
 TOKENS="$SWARM_HOME/tokens.env"
 CONF="$SWARM_HOME/swarm.conf"
 OWNER_ID="${SWARM_OWNER_DISCORD_ID:-1507069153335443608}"

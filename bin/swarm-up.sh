@@ -22,7 +22,10 @@
 
 set -euo pipefail
 
-SWARM_HOME="${SWARM_HOME:-$HOME/claude-swarm}"
+if [ -z "${SWARM_HOME:-}" ] || [ ! -d "${SWARM_HOME:-}/templates" ] || [ ! -f "${SWARM_HOME:-}/swarm.conf" ]; then
+  echo "swarm-up: SWARM_HOME unset or wrong — export SWARM_HOME=/Users/aschettino/qofirepos/qofi-claude-engineering" >&2
+  exit 1
+fi
 CONF="$SWARM_HOME/swarm.conf"
 TOKENS="$SWARM_HOME/tokens.env"
 PREFIX="swarm"                              # tmux session name prefix (no ':' allowed)

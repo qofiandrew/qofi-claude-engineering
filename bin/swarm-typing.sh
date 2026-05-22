@@ -32,7 +32,10 @@
 
 set -uo pipefail
 
-SWARM_HOME="${SWARM_HOME:-$HOME/claude-swarm}"
+if [ -z "${SWARM_HOME:-}" ] || [ ! -d "${SWARM_HOME:-}/templates" ] || [ ! -f "${SWARM_HOME:-}/swarm.conf" ]; then
+  echo "swarm-typing: SWARM_HOME unset or wrong — export SWARM_HOME=/Users/aschettino/qofirepos/qofi-claude-engineering" >&2
+  exit 1
+fi
 CONF="$SWARM_HOME/swarm.conf"
 TOKENS="$SWARM_HOME/tokens.env"
 CLAUDE_PROJECTS="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
@@ -47,8 +50,6 @@ CURL_MAX_TIME="${SWARM_TYPING_CURL_TIMEOUT:-5}"
 # Curl already has --max-time, so any in-flight network call returns in
 # well under the launchd KillMode timeout.
 trap 'echo "swarm-typing: exiting on signal" >&2; exit 0' TERM INT
-
-[ -f "$CONF" ] || { echo "swarm-typing: no $CONF — exiting" >&2; exit 0; }
 
 file_mtime() { python3 -c 'import os,sys
 try: print(int(os.path.getmtime(sys.argv[1])))

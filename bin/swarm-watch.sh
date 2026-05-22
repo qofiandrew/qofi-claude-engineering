@@ -35,7 +35,10 @@
 
 set -uo pipefail
 
-SWARM_HOME="${SWARM_HOME:-$HOME/claude-swarm}"
+if [ -z "${SWARM_HOME:-}" ] || [ ! -d "${SWARM_HOME:-}/templates" ] || [ ! -f "${SWARM_HOME:-}/swarm.conf" ]; then
+  echo "swarm-watch: SWARM_HOME unset or wrong — export SWARM_HOME=/Users/aschettino/qofirepos/qofi-claude-engineering" >&2
+  exit 1
+fi
 CONF="$SWARM_HOME/swarm.conf"
 TOKENS="$SWARM_HOME/tokens.env"
 CLAUDE_PROJECTS="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
@@ -47,7 +50,6 @@ API="${SWARM_DISCORD_API:-https://discord.com/api/v10}"
 ENABLE_TYPING="${SWARM_ENABLE_TYPING:-0}"
 
 mkdir -p "$STATE_DIR"
-[ -f "$CONF" ] || { echo "swarm-watch: no $CONF" >&2; exit 0; }
 # shellcheck disable=SC1090
 [ -f "$TOKENS" ] && . "$TOKENS"
 

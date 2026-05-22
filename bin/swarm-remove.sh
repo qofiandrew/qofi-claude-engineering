@@ -10,7 +10,10 @@
 
 set -euo pipefail
 
-SWARM_HOME="${SWARM_HOME:-$HOME/claude-swarm}"
+if [ -z "${SWARM_HOME:-}" ] || [ ! -d "${SWARM_HOME:-}/templates" ] || [ ! -f "${SWARM_HOME:-}/swarm.conf" ]; then
+  echo "swarm-remove: SWARM_HOME unset or wrong — export SWARM_HOME=/Users/aschettino/qofirepos/qofi-claude-engineering" >&2
+  exit 1
+fi
 CONF="$SWARM_HOME/swarm.conf"
 STATE_DIR="${SWARM_STATE_DIR:-$HOME/.config/swarm}"
 ACCESS="$HOME/.claude/channels/discord/access.json"
