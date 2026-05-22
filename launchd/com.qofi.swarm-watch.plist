@@ -44,7 +44,7 @@
     <key>SWARM_TMUX_BIN</key>
     <string>/opt/homebrew/bin/tmux</string>
     <key>SWARM_ENABLE_TYPING</key>
-    <string>0</string>
+    <string>1</string>
   </dict>
 </dict>
 </plist>
