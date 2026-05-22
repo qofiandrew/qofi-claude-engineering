@@ -56,8 +56,38 @@ PREFIX="${SWARM_TMUX_PREFIX:-swarm}"
 TMUX_BIN="${SWARM_TMUX_BIN:-tmux}"            # may need full path under launchd
 API="${SWARM_DISCORD_API:-https://discord.com/api/v10}"
 ENABLE_TYPING="${SWARM_ENABLE_TYPING:-0}"
+CURL_MAX_TIME="${SWARM_WATCH_CURL_TIMEOUT:-5}"
 
 mkdir -p "$STATE_DIR"
+
+# Single-instance lock. At StartInterval=10 the chance of an overlap
+# fire grows with the fleet size — a slow capture or rate-limited curl
+# in tick N can outlive tick N+1's launch. Without a guard, two
+# instances race on heartbeat-$channel.id and heartbeat-$channel.content
+# and on the Discord PATCH itself. mkdir is atomic on POSIX; exactly one
+# caller wins. Stale-lock recovery covers abnormal exits (kill -9,
+# reboot mid-run) via the PID-alive check.
+LOCK="$STATE_DIR/swarm-watch.lock"
+acquire_lock() {
+  if mkdir "$LOCK" 2>/dev/null; then
+    echo $$ > "$LOCK/pid"
+    return 0
+  fi
+  local owner=""
+  [ -f "$LOCK/pid" ] && owner="$(tr -d '[:space:]' < "$LOCK/pid" 2>/dev/null)"
+  if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+    return 1   # honest contention — caller bails (no-op this tick)
+  fi
+  # Stale lock (owner dead or never wrote PID). Clean and retry once.
+  rm -rf "$LOCK"
+  if mkdir "$LOCK" 2>/dev/null; then
+    echo $$ > "$LOCK/pid"
+    return 0
+  fi
+  return 1   # lost the cleanup race; bail
+}
+acquire_lock || { echo "swarm-watch: previous instance still running — skipping this tick" >&2; exit 0; }
+trap 'rm -rf "$LOCK"' EXIT
 # shellcheck disable=SC1090
 [ -f "$TOKENS" ] && . "$TOKENS"
 
@@ -81,26 +111,52 @@ session_alive() {  # name -> 0 alive, 1 absent, 2 tmux unknown
 post_heartbeat() {  # channel token content
   local channel="$1" token="$2" content="$3"
   local idfile="$STATE_DIR/heartbeat-$channel.id"
-  local payload; payload="$(json_content "$content")"
+  local contentfile="$STATE_DIR/heartbeat-$channel.content"
   local msgid=""
   [ -r "$idfile" ] && msgid="$(tr -d '[:space:]' < "$idfile")"
+
+  # Change-guard. The pinned heartbeat is edited via PATCH; at a 10s
+  # StartInterval an unconditional edit is 8,640 API calls/day/channel
+  # — straight into Discord rate limits and pure waste while state is
+  # stable. We compare the new rendered content against the last
+  # successfully-posted content (persisted alongside the message id);
+  # identical → no-op. Operators read liveness off Discord's native
+  # "edited Nm ago" indicator on the pinned message, which is more
+  # honest than a script-written timestamp anyway. Realistic post-fix
+  # volume: ~edits per state transition (working → ready → working …),
+  # measured in dozens/day, not thousands.
+  if [ -n "$msgid" ] && [ -r "$contentfile" ]; then
+    local prior; prior="$(cat "$contentfile" 2>/dev/null)"
+    if [ "$prior" = "$content" ]; then
+      return 0
+    fi
+  fi
+
+  local payload; payload="$(json_content "$content")"
   if [ -n "$msgid" ]; then
     local code
-    code="$(curl -s -o /dev/null -w '%{http_code}' -X PATCH \
+    # --max-time bounds each network call so a hung Discord request
+    # can't make this fire outlive the 10s launchd interval (instance
+    # overlap risk; the lock catches the rest).
+    code="$(curl --max-time "$CURL_MAX_TIME" -s -o /dev/null -w '%{http_code}' -X PATCH \
       -H "Authorization: Bot $token" -H "Content-Type: application/json" \
       -d "$payload" "$API/channels/$channel/messages/$msgid")"
     # 200 = edited in place; pin (set on initial POST) is sticky on edits.
-    [ "$code" = "200" ] && return 0
-    # Anything else (404 deleted, etc.): fall through to POST + re-pin.
+    if [ "$code" = "200" ]; then
+      printf '%s' "$content" > "$contentfile"
+      return 0
+    fi
+    # Anything else (404 deleted, timeout, etc.): fall through to POST + re-pin.
   fi
   local newid
-  newid="$(curl -s -X POST -H "Authorization: Bot $token" -H "Content-Type: application/json" \
+  newid="$(curl --max-time "$CURL_MAX_TIME" -s -X POST -H "Authorization: Bot $token" -H "Content-Type: application/json" \
     -d "$payload" "$API/channels/$channel/messages" | extract_id)"
   if [ -z "$newid" ]; then
     echo "swarm-watch: heartbeat POST returned no id for channel $channel" >&2
     return 0
   fi
   printf '%s' "$newid" > "$idfile"
+  printf '%s' "$content" > "$contentfile"
   pin_message "$channel" "$token" "$newid"
 }
 
@@ -110,7 +166,7 @@ post_heartbeat() {  # channel token content
 pin_message() {  # channel token messageid
   local channel="$1" token="$2" msgid="$3"
   local code
-  code="$(curl -s -o /dev/null -w '%{http_code}' -X PUT \
+  code="$(curl --max-time "$CURL_MAX_TIME" -s -o /dev/null -w '%{http_code}' -X PUT \
     -H "Authorization: Bot $token" \
     "$API/channels/$channel/pins/$msgid")"
   case "$code" in
@@ -175,27 +231,34 @@ grep -vE '^[[:space:]]*(#|$)' "$CONF" | while IFS='|' read -r name repo tokvar c
       else
         status="🟢 swarm working"
       fi
-      [ "$ENABLE_TYPING" = "1" ] && curl -s -X POST -H "Authorization: Bot $token" "$API/channels/$channel/typing" >/dev/null 2>&1 || true
+      [ "$ENABLE_TYPING" = "1" ] && curl --max-time "$CURL_MAX_TIME" -s -X POST -H "Authorization: Bot $token" "$API/channels/$channel/typing" >/dev/null 2>&1 || true
     elif [ "$pw" -eq 0 ] && [ "$fresh" -eq 0 ]; then
       # Footer says "esc to interrupt" but no transcript write for
       # STALE_SECONDS+ — turn in flight from the TUI's view but nothing
       # is being produced. Rate-limited, hung tool, or crashed.
-      status="🔴 swarm STALLED — turn in flight but no transcript write for $(( a/60 ))m (rate-limited, hung tool, or crashed)"
+      status="🔴 swarm STALLED — turn in flight but no transcript writes (rate-limited, hung tool, or crashed)"
     else
       # Pane idle (pw=1) OR unreadable (pw=2) — at the prompt or
       # uncertain. Both fail-safe to "ready"; never claim working off a
       # transcript-fresh signal alone (the original false-working-at-idle
-      # bug). Distinguish "just replied" (transcript fresh) from "been
-      # idle a while" (transcript stale) for the operator-facing message.
+      # bug). The fresh/stale distinction fires one transition at the
+      # STALE_SECONDS boundary, keeping the change-guard quiet otherwise.
       if [ "$fresh" -eq 1 ]; then
-        status="🟢 swarm ready · waiting for input (just replied · ${age} ago)"
+        status="🟢 swarm ready · waiting for input (just replied)"
       else
-        status="🟢 swarm ready · waiting for input (idle $(( a/60 ))m)"
+        status="🟢 swarm ready · waiting for input"
       fi
     fi
   fi
 
-  content="$status · $name · last activity $age ago · checked $(date '+%H:%M:%S')"
+  # No dynamic-time substrings in the rendered content — they would defeat
+  # the change-guard (any per-second tick → content always "changes" →
+  # unconditional edits → rate-limit trap). Discord's native "(edited Nm
+  # ago)" indicator on the pinned message is the operator's elapsed-time
+  # signal, and it's the real last-edit time, not a script claim. The age
+  # variable above is still used by the predicate but does NOT appear in
+  # rendered output.
+  content="$status · $name"
   post_heartbeat "$channel" "$token" "$content"
 done
 

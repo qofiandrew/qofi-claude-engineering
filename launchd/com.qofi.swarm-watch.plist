@@ -13,9 +13,15 @@
     <string>/Users/aschettino/qofirepos/qofi-claude-engineering/bin/swarm-watch.sh</string>
   </array>
 
-  <!-- Fire every 90s. The script is a one-shot sweep over all swarms; launchd supervises. -->
+  <!-- Fire every 10s. The script is a one-shot sweep over all swarms;
+       launchd supervises. The Discord PATCH is change-guarded so a
+       stable state produces zero API traffic — the 10s cadence buys
+       fast transition response (~10s from state change to pinned-
+       heartbeat update) without rate-limit risk. Per-instance runtime
+       is bounded by curl --max-time and an atomic mkdir lock prevents
+       overlap if a fire ever runs long. -->
   <key>StartInterval</key>
-  <integer>90</integer>
+  <integer>10</integer>
 
   <!-- Run on load and every boot, so it survives reboots (pair with auto-restart-after-power-loss). -->
   <key>RunAtLoad</key>
