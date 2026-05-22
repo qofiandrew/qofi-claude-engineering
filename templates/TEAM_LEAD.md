@@ -79,6 +79,43 @@ sits where tooling can't catch the slip:
   — independent scaling, replicas, isolation, independent deploy/
   availability. "Cleaner separation" doesn't count.
 
+## Scale & operability gates (your done-gate enforcement)
+
+`CLAUDE.md` §*Error handling*, §*Logging & observability*, and §*Operability*
+are the agent-facing rules. Your enforcement sits at two moments:
+
+**At plan-approval** (for any plan that touches at-scale data):
+
+- Reject a plan whose at-scale operation doesn't name how it satisfies
+  idempotency, resumability/checkpointing, and per-item status tracking.
+  "We'll add it later" is the same answer that produced the defect
+  you're trying to prevent.
+- Reject a plan that slurps the whole dataset into memory or ignores
+  provider rate limits. Stream/batch with explicit page or cursor.
+
+**At done-gate review** (see §*Lead review of teammate output*):
+
+- **Logging**: confirm structured logs, correct levels (per-item
+  failures aggregated as `WARN`, not `ERROR`-per-item), a run-id
+  threaded through, and a per-run summary entry. A teammate's
+  "tests are green" with `console.log` debug spew is not done.
+- **Operability tiers**: confirm both the operator tier (rerun /
+  resume / status / manual intervention) and the customer-support
+  tier (per-item state lookup, manual fix/reinstate) are built —
+  not stubbed, not TODO'd. The window for building these while
+  context is fresh is now.
+- **Audit logging**: confirm every support-tier manual intervention
+  writes an audit entry (who, what, whose data, when, why). Day-one
+  requirement even though access is developer-only today.
+- **Authz accommodation**: confirm admin/support surfaces don't
+  hardcode wide-open access — an authz layer can be dropped in
+  front later without rewrite. (You do NOT spec or build the
+  permission system itself unless the spec asks for it.)
+
+The bulk-scope guideline (single-item default; bulk = operator/CTO) is
+soft now and becomes a hard refusal at review when real user or support
+access lands. Watch for it on the way in.
+
 ## Dependencies and integration order
 
 - Use the task list's dependency feature. A task that consumes a contract

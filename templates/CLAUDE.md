@@ -79,6 +79,98 @@ escalation policy says I'm needed. Keep this file lean — it loads every sessio
   separation; do not invent implicit cross-service distributed
   transactions.
 
+## Error handling
+Distinguish two error classes; treat them differently.
+
+- **Fatal / systemic** — invalid config, dependency unreachable, auth failed,
+  contract violated. **Fail fast, fail safe.** Default to deny/stop, never
+  permissive. Surface immediately with full context (the inputs, source
+  location, cause). Don't start or continue a doomed run.
+- **Per-item** — one file/record/row in a batch fails. **Isolate, log
+  compactly (id + error class + one-line reason), continue the batch.** A
+  single bad item never aborts the whole job. Aggregate failures into an
+  end-of-run summary: counts, failures by category, list of failed ids
+  for retry.
+- **Never silently swallow errors.** No empty `catch`, no ignored return
+  codes, no `try { ... } catch {}` that drops the cause.
+- **Never silently leave corrupt or half-written state.** A failed item is
+  marked failed and skipped — not partially written.
+- **Validate at contract surfaces.** Don't trust callers. Garbage in at
+  the boundary becomes garbage at the storage layer.
+
+**Hard requirements for at-scale data operations** (CTO verifies these are
+in the plan before approval):
+
+- **Idempotency.** Re-running is safe; reprocessing a completed item is
+  a no-op. The job survives a half-finished kill.
+- **Resumability / checkpointing.** A job that dies mid-run resumes from
+  the last checkpoint without redoing completed work.
+- **Per-item status tracking.** Retries touch only the failures; a
+  "retry" that re-runs the whole job is a defect.
+- **Stream, don't slurp.** Never load the entire dataset into memory.
+  Batch with explicit page/cursor; respect backpressure and provider
+  rate limits.
+
+A batch operation lacking these is broken, not stylistically different.
+The test for "at scale" is "could this run against millions of items" —
+if yes, the four hard requirements are non-negotiable.
+
+## Logging & observability
+- **Structured logs only** — JSON or key=value, never freeform `print` /
+  `console.log` strings concatenated together. Logs at volume must be
+  queryable and aggregatable.
+- **Use levels correctly.**
+  - `ERROR` — needs attention; a human will look at this.
+  - `WARN`  — recoverable / degraded; aggregated, not flooded.
+  - `INFO`  — lifecycle milestones (job start, job end, phase change).
+  - `DEBUG` — off in normal operation; on only when diagnosing.
+- **Per-item failures are `WARN` and aggregated, not `ERROR` per item.**
+  A million-row job with 0.1% failure is 1,000 entries — `ERROR` per
+  item is a log explosion that buries the real signal.
+- **Never log secrets or PII.** Token, key, password, email, address,
+  raw user content — none of it goes into logs. (See `§Secrets`.)
+- **Correlation IDs.** A batch run has a run-id; every item in that run
+  carries the same run-id (plus its own item-id). One job's behavior
+  is traceable end-to-end across whatever services it touches.
+- **Per-run summary** — at job end, emit one summary entry: counts
+  (total / success / failure), failure breakdown by category, duration,
+  throughput. This is the artifact ops looks at first.
+
+**Hard requirement**: structured logs + correct levels + run-IDs + per-run
+summary, on every at-scale job. Bigger observability infrastructure —
+dashboards, distributed tracing, metrics pipelines — is a CTO escalation
+when the operation warrants it, not a default. But traceability and the
+per-run summary are floor, not ceiling.
+
+## Operability
+Every at-scale tool or module ships its **support controls as part of
+being done** — built per-module while context is fresh, not deferred to a
+later sweep that never comes. The form (CLI / API / admin surface) is the
+CTO's call per module; what's non-negotiable is the substrate.
+
+- **Operator tier**: rerun (failed items or whole job), resume from
+  checkpoint, query run/item status, manual intervention (skip a poison
+  item, force-complete, requeue, replay a range). All of this rides on
+  the `§Error handling` idempotency + checkpoint + per-item-status
+  requirements — they exist *so* this tier is possible.
+- **Customer-support tier**: a surface where support can look up a
+  customer's or item's current state and its failure reason, and
+  manually fix or reinstate a stuck flow — so support resolves customer
+  issues without paging engineering.
+- **Audit (hard requirement from day one)**: every support-tier manual
+  intervention writes an audit entry — who acted, on whose data, when,
+  why. Even while access is developer-only, the audit log is built in
+  *now*. Retrofitting audit later is much harder than building it in.
+- **Bulk-scope default is single-customer / single-item.** Bulk actions
+  (replay 10,000 items, force-complete a range) are operator/CTO
+  actions. Soft guideline now; becomes a hard requirement when real
+  user or support access lands.
+- **Future-proof for an authz layer.** User access, roles, and
+  permission enforcement are a known future addition. Build admin and
+  support surfaces so an authz layer can be added in front of them
+  later — don't hardcode wide-open access. Do **not** build the
+  permission system now unless the spec calls for it.
+
 ## Scope & branches
 - **Stay in your app.** In a monorepo, your writes are scoped to `apps/<app>/`
   (or the repo root for a single-app repo). Don't touch sibling apps. If your
