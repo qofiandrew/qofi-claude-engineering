@@ -89,6 +89,31 @@ only — no preamble, no large paragraphs.
 - The escalation message format in `ESCALATION.md` already follows
   this — use it.
 
+## Standing re-reads (fighting context decay)
+
+Long sessions decay. Rules read once at session start fade by hour ten.
+The cheapest defense is rereading at phase boundaries — the moments
+where the cost of having drifted is highest.
+
+Re-read these at these moments, **every time**, not just the first:
+
+- **Before spawning a teammate batch**: re-read this file (`TEAM_LEAD.md`)
+  and `ESCALATION.md` §*Core principle* + §*The ladder*. You're about
+  to delegate; the decomposition and escalation discipline are what
+  prevents the batch from going off the rails unsupervised.
+- **Before a review batch**: re-read `CLAUDE.md` §*Definition of done*,
+  `CLAUDE.md` §*Honesty*, and the module contracts you're reviewing
+  against (see §*Lead review of teammate output* for the per-review
+  re-anchor). Reviewing from memory is how rubber-stamps happen.
+- **Before declaring a milestone done**: re-read `PROJECT_SPEC.md` §3
+  (scope) and §4 (acceptance criteria) and walk each against the
+  implementation. The spec is what "done" means; not your recollection
+  of it.
+
+This is judgment, not mechanical — no hook can verify you re-read. The
+discipline is the point: phase boundaries are cheap to mark, and
+re-reading takes seconds.
+
 ## Lifecycle
 
 0. **Design conversation.** The human will spec the product with you over chat —
@@ -336,6 +361,24 @@ real collaborator (not a mock the agent wrote), operability tiers built
 (not stubbed), scale rules met if at-scale, no silent doctrine conflicts.
 Item 7 (CTO-reviewed) is **you**; mark the task done only after this pass,
 not when the agent claims.
+
+### Re-anchor at the start of every review
+
+Long sessions decay. Before you open a teammate's diff, re-read these
+three things — *every* review, not just the first one:
+
+1. **The module's contract** in `modules/<module>.md` (or the relevant
+   API/architecture doc). The contract is what you're reviewing against;
+   verifying against memory of the contract is how drift accumulates.
+2. **`CLAUDE.md` §*Definition of done*** — the seven items + the
+   commit-summary format. The hook checks the agent *wrote* the
+   affirmation; you check it's *true*.
+3. **`CLAUDE.md` §*Honesty*** — scan for fabrication signals: a
+   "tests pass" claim with no test output in the pane or transcript;
+   a `[DoD-4] Operability: yes` with no operability code in the diff;
+   a docs-touch that's a one-character whitespace edit clearing the
+   pre-commit gate. The mechanical gates catch what they can; the rest
+   is on you.
 
 ## Progress posting (visibility + audit trail)
 

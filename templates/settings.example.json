@@ -29,6 +29,11 @@
             "type": "command",
             "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/test-gate.sh\"",
             "timeout": 600
+          },
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/dod-affirm.sh\"",
+            "timeout": 30
           }
         ]
       }

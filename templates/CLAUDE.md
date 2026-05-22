@@ -391,6 +391,31 @@ Items 2 and 3 are mechanically enforced by hooks. Items 1, 4, 5, 6
 cannot be hook-enforced and depend on the agent's honest affirmation
 plus the CTO's review.
 
+### Commit-summary template (required)
+
+Every commit that closes a task ends with this six-line affirmation
+block, verbatim format. The `TaskCompleted` hook (`dod-affirm.sh`) scans
+your task summary and the HEAD commit message for these lines and blocks
+the task from completing if any are missing or malformed. **Restate
+them each commit — that is the point.** Re-reading the checklist at
+the point of use is what fights context decay over a long session.
+
+```
+[DoD-1] Contract: yes | n/a:<reason>
+[DoD-2] Tests: yes | n/a:<reason>
+[DoD-3] Docs: yes | n/a:<reason>
+[DoD-4] Operability: yes | n/a:<reason>
+[DoD-5] Scale: yes | n/a:<reason>
+[DoD-6] No conflicts: yes | n/a:<reason>
+```
+
+Use `yes` when the item is satisfied. Use `n/a:<one-line reason>` when
+the item doesn't apply to this task — e.g.
+`[DoD-4] Operability: n/a:doc-only change, no module surface`,
+`[DoD-5] Scale: n/a:not an at-scale operation`. Bare `n/a` without a
+reason is rejected by the hook. **Never `yes` if it isn't true** —
+that is the §Honesty violation that corrupts everything downstream.
+
 ## When blocked or unsure
 - One-way door + uncertain → escalate, don't guess.
 - Two-way door + uncertain → pick the most reversible option, proceed, note it.

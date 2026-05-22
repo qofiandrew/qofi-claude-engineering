@@ -5,15 +5,20 @@
 # Source of truth is $SWARM_HOME/templates (default ~/claude-swarm/templates),
 # which must contain the artifacts you downloaded:
 #   CLAUDE.md  ESCALATION.md  TEAM_LEAD.md  PROJECT_SPEC.template.md
-#   ADR.template.md  settings.example.json  hooks/test-gate.sh  hooks/docs-check.sh
+#   ADR.template.md  settings.example.json
+#   hooks/{test-gate.sh,docs-check.sh,permission-gate.sh,dod-affirm.sh}
+#   git-hooks/pre-commit
 #
 # It writes into the target repo:
 #   CLAUDE.md, ESCALATION.md, TEAM_LEAD.md      (root — refreshed every run; they're policy)
 #   PROJECT_SPEC.md                              (from template; never clobbered)
 #   docs/adr/ADR.template.md
-#   .claude/hooks/{test-gate.sh,docs-check.sh}
+#   .claude/hooks/{test-gate.sh,docs-check.sh,permission-gate.sh,dod-affirm.sh}
 #   .claude/settings.json                        (copied, or jq-merged if one exists)
 #   .claude/test-cmd                             (placeholder; edit to your test command)
+#   .git/hooks/pre-commit                        (docs-touch + anti-secret gate,
+#                                                 only installed if the marker
+#                                                 line matches or no pre-commit exists)
 
 set -euo pipefail
 
@@ -51,7 +56,32 @@ mkdir -p "$REPO/.claude/hooks"
 cp "$TPL/hooks/test-gate.sh"       "$REPO/.claude/hooks/test-gate.sh"
 cp "$TPL/hooks/docs-check.sh"      "$REPO/.claude/hooks/docs-check.sh"
 cp "$TPL/hooks/permission-gate.sh" "$REPO/.claude/hooks/permission-gate.sh"
-echo "  wrote: .claude/hooks/{test-gate.sh,docs-check.sh,permission-gate.sh}"
+cp "$TPL/hooks/dod-affirm.sh"      "$REPO/.claude/hooks/dod-affirm.sh"
+echo "  wrote: .claude/hooks/{test-gate.sh,docs-check.sh,permission-gate.sh,dod-affirm.sh}"
+
+# Git pre-commit hook — docs-touch + anti-secret. Only install if (a) no
+# pre-commit exists yet, or (b) the existing one carries our SWARM-MANAGED
+# marker line (i.e., it's our own from a previous swarm-init run). NEVER
+# clobber a user-authored pre-commit; warn instead so they can merge by hand.
+if [ -d "$REPO/.git" ]; then
+  PRECOMMIT="$REPO/.git/hooks/pre-commit"
+  MARKER='# SWARM-MANAGED pre-commit'
+  if [ ! -e "$PRECOMMIT" ]; then
+    cp "$TPL/git-hooks/pre-commit" "$PRECOMMIT"
+    chmod +x "$PRECOMMIT"
+    echo "  wrote: .git/hooks/pre-commit  (docs-touch + anti-secret gate)"
+  elif head -n 5 "$PRECOMMIT" | grep -qF "$MARKER"; then
+    cp "$TPL/git-hooks/pre-commit" "$PRECOMMIT"
+    chmod +x "$PRECOMMIT"
+    echo "  updated: .git/hooks/pre-commit  (existing was swarm-managed)"
+  else
+    echo "  NOTE: kept existing .git/hooks/pre-commit (no SWARM-MANAGED marker);"
+    echo "        review $TPL/git-hooks/pre-commit and merge by hand if you want"
+    echo "        the docs-touch + anti-secret gate active."
+  fi
+else
+  echo "  skip: .git/hooks/pre-commit  ($REPO is not a git working tree)"
+fi
 
 # Settings — copy if absent; recursive-merge with jq if one exists; else leave a .new.
 SET="$REPO/.claude/settings.json"

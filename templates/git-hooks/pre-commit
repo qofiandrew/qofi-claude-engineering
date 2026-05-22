@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# SWARM-MANAGED pre-commit (managed by swarm-init.sh — do not edit by hand)
+#
+# Two enforcement layers on every `git commit`:
+#
+#   (1) Docs-touched-per-commit — if any source file is staged, at least one
+#       doc/markdown file must also be staged. Enforces the §Documentation
+#       floor from CLAUDE.md ("stale docs are a defect").
+#
+#       NOTE: this is the INTERIM floor — "any src + any doc". The intended
+#       target is module-specific mapping (src/<module>/* must be paired with
+#       modules/<module>.md / docs/modules/<module>.md). That refinement is
+#       deferred until a repo-wide convention for module-to-path mapping
+#       exists. Until then, the any+any floor catches the common failure mode
+#       ("committed code with zero docs") at the cost of allowing an agent to
+#       satisfy the gate by editing any markdown — which is a §Honesty
+#       violation the CTO must catch at review.
+#
+#   (2) Anti-secret patterns — scan staged content for high-confidence secret
+#       shapes (Discord/AWS/GitHub/Slack tokens, PEM private keys, JWTs) and
+#       block the commit if any match. Pattern-only; custom-formatted secrets
+#       won't be caught — that's the §Secrets doctrine's job.
+#
+# Bypass: `git commit --no-verify` skips this hook. CLAUDE.md §Verification
+# already forbids that. We can't mechanically prevent it; we can only refuse
+# to be the one who uses it.
+
+set -uo pipefail
+
+# ---------------------------------------------------------------------------
+# Layer 1: docs-touched-per-commit
+# ---------------------------------------------------------------------------
+
+STAGED="$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null || true)"
+if [ -z "$STAGED" ]; then
+  # Nothing staged (initial commit? amend with nothing?). Nothing to gate.
+  exit 0
+fi
+
+SRC_COUNT=0
+DOC_COUNT=0
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
+  case "$f" in
+    # Docs / markdown / spec — counts as a doc touch.
+    *.md|*.mdx|docs/*|*/docs/*|ADR-*|PROJECT_SPEC*|CLAUDE.md|TEAM_LEAD.md|ESCALATION.md)
+      DOC_COUNT=$((DOC_COUNT + 1)) ;;
+    # Everything else — counts as a source touch.
+    *)
+      SRC_COUNT=$((SRC_COUNT + 1)) ;;
+  esac
+done <<EOF
+$STAGED
+EOF
+
+if [ "$SRC_COUNT" -gt 0 ] && [ "$DOC_COUNT" -eq 0 ]; then
+  {
+    echo "pre-commit: BLOCKED — source changed but no docs are staged."
+    echo ""
+    echo "Source files staged: $SRC_COUNT"
+    echo "Doc files staged:    0"
+    echo ""
+    echo "Update the docs your change affects (module doc / README / API doc /"
+    echo "PROJECT_SPEC §10 build log / ADR if it's a one-way-door decision),"
+    echo "stage them, and re-commit."
+    echo ""
+    echo "If you genuinely believe this change needs no doc update, that's a"
+    echo "judgment call to log in the commit message — but the hook will still"
+    echo "block here. Touch a relevant doc (build log is usually right) and"
+    echo "re-commit."
+  } >&2
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Layer 2: anti-secret patterns
+# ---------------------------------------------------------------------------
+
+# Get the staged diff (added/changed lines only), zero context.
+DIFF="$(git diff --cached -U0 --no-color 2>/dev/null || true)"
+
+# Each entry: pattern_name|regex. Order doesn't matter; we report all hits.
+patterns_check() {
+  local name="$1" rx="$2"
+  # Only look at added lines (start with '+' but not '+++'). The trailing
+  # `grep -Eo -- "$rx"` uses `--` so that patterns starting with `-----` (PEM
+  # private keys) are not mistaken for grep options — without this guard the
+  # PEM check silently failed open in early testing.
+  local hit
+  hit="$(printf '%s\n' "$DIFF" | grep -nE '^\+' | grep -vE '^\+\+\+ ' | grep -Eo -- "$rx" | head -1 || true)"
+  if [ -n "$hit" ]; then
+    # Identify which staged file(s) contained the match. (best-effort)
+    local files
+    files="$(printf '%s\n' "$STAGED" | tr '\n' ' ')"
+    {
+      echo "pre-commit: BLOCKED — staged content matches secret pattern '$name'."
+      echo "  files in this commit: $files"
+      echo "  (matched value NOT printed; rotate the secret if it was a real one)"
+    } >&2
+    return 1
+  fi
+  return 0
+}
+
+# High-confidence secret shapes. Conservative — false positives are operator
+# annoyance; false negatives are real leaks. Bias towards a few solid catches
+# over a wide net that cries wolf.
+FOUND_SECRET=0
+patterns_check "Discord bot token" 'MT[A-Za-z0-9._-]{40,}'                                      || FOUND_SECRET=1
+patterns_check "AWS access key"    'AKIA[0-9A-Z]{16}'                                           || FOUND_SECRET=1
+patterns_check "GitHub token"      'gh[pousr]_[A-Za-z0-9]{36}'                                  || FOUND_SECRET=1
+patterns_check "Slack token"       'xox[baprs]-[0-9]{10,}-[a-zA-Z0-9-]+'                        || FOUND_SECRET=1
+patterns_check "PEM private key"   '-----BEGIN [A-Z ]*PRIVATE KEY-----'                         || FOUND_SECRET=1
+patterns_check "JWT-shaped"        'eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}' || FOUND_SECRET=1
+
+if [ "$FOUND_SECRET" -ne 0 ]; then
+  {
+    echo ""
+    echo "If any matched value is a REAL secret: rotate it first, then unstage"
+    echo "the change, then re-commit without it. Per CLAUDE.md §Secrets,"
+    echo "exposed secrets are flagged to the operator immediately."
+  } >&2
+  exit 1
+fi
+
+exit 0

@@ -31,11 +31,18 @@ if [ -z "$TEST_CMD" ]; then
   fi
 fi
 
-# No tests configured anywhere: don't block (so it works on day-1 repos), but make
-# the gap loud so it gets fixed.
+# No tests configured anywhere: FAIL CLOSED. A missing test command is a
+# config defect, not "no tests to run" — leaving the gate open means an agent
+# can mark anything done without proving it works. Block until the operator
+# wires the test command.
 if [ -z "$TEST_CMD" ]; then
-  echo "test-gate: NO TEST COMMAND FOUND. Set CLAUDE_TEST_CMD in settings.json or write .claude/test-cmd. This task shipped UNGATED." >&2
-  exit 0
+  {
+    echo "test-gate: BLOCKED — no test command resolved."
+    echo "Set CLAUDE_TEST_CMD in .claude/settings.json, or write the command"
+    echo "into .claude/test-cmd, or add a 'test' script to package.json."
+    echo "An ungated done is not done; refusing to pass with no gate."
+  } >&2
+  exit 2
 fi
 
 # Run the gate.
