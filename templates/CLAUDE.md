@@ -38,6 +38,47 @@ escalation policy says I'm needed. Keep this file lean — it loads every sessio
 - The exception: if you think something belongs in v1 that the spec defers (or
   vice versa), that's a scope escalation — I sometimes want more in v1.
 
+## Modular design
+- **Single responsibility.** A module does one thing. If you can't state its
+  job in one sentence, it's two modules — split before you build.
+- **One contract surface.** Each module exposes exactly one defined contract
+  — the agreed way other modules interact with it. The surface can be a
+  function/API (sync), a queue/topic/event the module publishes or consumes
+  (async), or an internal network interface — all equally valid. "Contract
+  surface" ≠ "public/internet endpoint": internal-only is the common case.
+- **Document it** in `modules/<module>.md` per module: what it OFFERS (the
+  contract surface, fully specified) and what it REQUIRES (every contract
+  surface from other modules it consumes).
+- **Depend only on contract surfaces, never on internals.** If you find
+  yourself reaching into another module's internal file, function, or
+  table, the boundary is wrong — escalate.
+- **Dependencies point one direction.** No cycles. If A needs B and B needs
+  A, the boundary is wrong; surface the shared concern into a third module
+  or fix the split. Don't paper over it.
+- **Independently testable through the contract.** If you can't test a
+  module without spinning up an unrelated peer, the contract is leaky.
+- **Where tooling can enforce, use it** — explicit exports, private-by-
+  default, import-boundary lint rules. Where tooling can't, the CTO
+  verifies boundary-respect at plan-approval and at review.
+
+## Data ownership
+- **Default: shared database, single-owner tables.** Each table/schema is
+  owned by exactly one module. Only the owner writes it. Other modules
+  read via the owner's contract surface — never by touching its tables
+  directly. A `SELECT` against a peer module's table is the data-layer
+  equivalent of reaching into its internals.
+- **DB-per-service is an exception, not a default.** Use it only when a
+  module has a *concrete* operational need: independent scaling,
+  replicas, isolation, or independent deploy/availability. The CTO
+  authors an ADR per-module that names the real need; "feels cleaner"
+  doesn't count.
+- **When separated**, the ADR states the cross-service read pattern
+  (API-call for simple reads, event-driven local read-copy for hot
+  paths) and flags any cross-service atomicity need as an explicit
+  design problem to solve. Eventual consistency is the accepted cost of
+  separation; do not invent implicit cross-service distributed
+  transactions.
+
 ## Scope & branches
 - **Stay in your app.** In a monorepo, your writes are scoped to `apps/<app>/`
   (or the repo root for a single-app repo). Don't touch sibling apps. If your

@@ -58,6 +58,27 @@ clobbering each other is disjoint file ownership. Therefore:
   endpoint). Aim for ~5–6 tasks per teammate. If you're not creating enough
   tasks, split finer.
 
+## Module boundaries (your enforcement role)
+
+`CLAUDE.md` §*Modular design* and §*Data ownership* are the agent-facing
+rules; every teammate (and you) operate by them. Your enforcement layer
+sits where tooling can't catch the slip:
+
+- **At plan-approval**: reject a plan whose module bundles two
+  responsibilities, exposes more than one contract surface, or fails to
+  declare what it OFFERS and what it REQUIRES in `modules/<module>.md`.
+  Ask for a re-split rather than rubber-stamping a "we'll factor it
+  later" excuse — later doesn't come.
+- **At review** (see §*Lead review of teammate output*): hunt for boundary
+  drift — a `SELECT` against a peer module's table, an import that
+  reaches into another module's internal file, a "temporary" cross-
+  module utility that's growing. Send these back specifically.
+- **The DB-per-service exception is yours to authorize.** When a teammate
+  proposes splitting a module to its own DB, you write the ADR (or
+  approve theirs) only after the *concrete* operational need is named
+  — independent scaling, replicas, isolation, independent deploy/
+  availability. "Cleaner separation" doesn't count.
+
 ## Dependencies and integration order
 
 - Use the task list's dependency feature. A task that consumes a contract
@@ -65,6 +86,11 @@ clobbering each other is disjoint file ownership. Therefore:
   claimed until the contract lands.
 - Fix contracts → fan out implementation → converge for integration. Run the gate
   (tests/CI) between each integration step, not just at the end.
+- **Build depended-on modules first, contract-proven, before the consumers
+  that need them** — especially data-owning modules. Consumers should test
+  against the real contract (per §*Verification*), not against a mock the
+  consumer wrote. If you sequence consumers first, you'll get tests that
+  pass against a fiction and fail against reality.
 
 ## Plan-approval gate (your one-way-door enforcement)
 
