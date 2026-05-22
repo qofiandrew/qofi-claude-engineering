@@ -14,6 +14,15 @@
             "timeout": 600
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/dod-affirm.sh\"",
+            "timeout": 30
+          }
+        ]
       }
     ],
     "TeammateIdle": [
@@ -26,6 +35,25 @@
           }
         ]
       }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/permission-gate.sh\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  },
+  "enabledPlugins": {
+    "discord-b2b@qofi-swarm": true
+  },
+  "permissions": {
+    "allow": [
+      "mcp__plugin_discord-b2b_discord__reply"
     ]
   }
 }
