@@ -64,7 +64,12 @@ launch_one() {  # name repo tokvar
   # CRITICAL: unset ANTHROPIC_API_KEY so the lead bills against Max, not metered API.
   # Source tokens.env INSIDE the pane and dereference by var name so the literal
   # token value never appears on the command line / pane scrollback.
-  tmux send-keys -t "$sess" "unset ANTHROPIC_API_KEY; set -a; . '$TOKENS'; export DISCORD_BOT_TOKEN=\"\$$tokvar\"; set +a" C-m
+  # Export SWARM_HOME into the pane so the CTO can invoke
+  # "$SWARM_HOME/bin/swarm-attention.sh" portably (the canonical form pinned
+  # in templates/ESCALATION.md §Attention flag). The helper self-locates as
+  # belt-and-suspenders, but the env var makes the doctrine form work
+  # without hardcoding the host path.
+  tmux send-keys -t "$sess" "unset ANTHROPIC_API_KEY; export SWARM_HOME='$SWARM_HOME'; set -a; . '$TOKENS'; export DISCORD_BOT_TOKEN=\"\$$tokvar\"; set +a" C-m
   # CRITICAL: --dangerously-load-development-channels (not --channels) because the
   # qofi-swarm marketplace is self-published, not on Anthropic's approved allowlist.
   tmux send-keys -t "$sess" "claude --dangerously-load-development-channels $PLUGIN" C-m

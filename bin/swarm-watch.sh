@@ -107,6 +107,14 @@ SILENCE_SECONDS="${SWARM_SILENCE_SECONDS:-900}"
 # default channel notification is not enough.
 ALERT_MENTION="${SWARM_ALERT_MENTION:-}"
 
+# iOS-widget status feed. Both optional; both required to enable the POST.
+# When unset, $STATE_DIR/status.json is still written locally — it's the
+# source-of-truth snapshot that downstream consumers (Railway, future
+# local readers) consume. The POST is a separate, best-effort transport
+# on top of that file.
+STATUS_ENDPOINT="${SWARM_STATUS_ENDPOINT:-}"
+STATUS_SECRET="${SWARM_STATUS_SECRET:-}"
+
 mkdir -p "$STATE_DIR"
 
 # Single-instance lock. At StartInterval=10 the chance of an overlap
@@ -269,6 +277,58 @@ pin_message() {  # channel token messageid
   esac
 }
 
+# Per-tick status accumulator. Each swarm appends one JSON object (one line)
+# here; the assembler at the end of the tick wraps the lines into the full
+# status.json structure. Truncate at the start so a previous tick's content
+# never leaks into this one.
+STATUS_SWARMS_TMP="$STATE_DIR/status.swarms.tmp"
+: > "$STATUS_SWARMS_TMP"
+
+# Append one swarm's status JSON to the accumulator. needs_attention follows
+# the two-source rule: CTO-raised flag wins (with its reason); otherwise the
+# watcher's own bad-state assessment fires. The widget renders cto and
+# watcher sources differently (different urgencies).
+emit_status() {  # name channel state age_or_empty reset_or_empty
+  local name="$1" channel="$2" state="$3" age="$4" reset="$5"
+  local flagfile="$STATE_DIR/attention-$channel.flag"
+  local cto_reason=""
+  if [ -r "$flagfile" ]; then
+    # Trim trailing newline; length-capped on write so we don't re-cap here.
+    cto_reason="$(tr -d '\000-\037' < "$flagfile")"
+  fi
+  python3 - "$name" "$channel" "$state" "$age" "$reset" "$cto_reason" <<'PY' >> "$STATUS_SWARMS_TMP"
+import json, sys
+name, channel, state, age, reset, cto_reason = sys.argv[1:7]
+out = {
+    "name": name,
+    "channel": channel,
+    "state": state,
+    "last_activity_age_seconds": int(age) if age else None,
+    "limit_reset_hint": reset if reset else None,
+}
+# Two-source needs_attention. CTO-raised wins because it's the authoritative
+# "I need you" signal — the watcher's failure-state assessment is the
+# safety net for when the CTO can't self-report (throttled, crashed).
+if cto_reason:
+    out["needs_attention"] = True
+    out["attention_source"] = "cto"
+    out["attention_reason"] = cto_reason
+elif state in ("stalled", "silent", "down", "paused-limit"):
+    out["needs_attention"] = True
+    out["attention_source"] = "watcher"
+    if state == "paused-limit" and reset:
+        out["attention_reason"] = "paused on usage limit (resets " + reset + ")"
+    else:
+        out["attention_reason"] = state
+else:
+    out["needs_attention"] = False
+    out["attention_source"] = None
+    out["attention_reason"] = None
+# One JSON object per line — the assembler reads line-delimited.
+sys.stdout.write(json.dumps(out) + "\n")
+PY
+}
+
 grep -vE '^[[:space:]]*(#|$)' "$CONF" | while IFS='|' read -r name repo tokvar channel; do
   name="$(echo "${name:-}" | xargs)"
   repo="$(echo "${repo:-}" | xargs)"
@@ -308,15 +368,26 @@ grep -vE '^[[:space:]]*(#|$)' "$CONF" | while IFS='|' read -r name repo tokvar c
   alert_state="ok"
   alert_msg=""
 
+  # status_state — the enum the iOS-widget status.json schema uses. Parallel
+  # to alert_state (which is alert/no-alert), this names the swarm's
+  # condition for downstream consumers. age_secs_for_status carries the raw
+  # seconds integer (or empty when no transcript). limit_reset_for_status
+  # holds the reset hint when state is paused-limit.
+  status_state="ready"
+  age_secs_for_status=""
+  limit_reset_for_status=""
+
   if [ "$alive" -eq 0 ]; then
     status="⚪ swarm down (no session)"; age="—"
     alert_state="down"
     alert_msg="⚪ swarm \`$name\` · DOWN — tmux session gone. Process dead; \`swarm-up.sh up $name\` to restart."
+    status_state="down"
   elif [ "$a" -eq "$SWARM_NO_TRANSCRIPT_AGE" ]; then
-    if [ "$alive" -eq 1 ]; then status="🟡 swarm starting (no transcript yet)"; else status="⚪ no active session"; fi
+    if [ "$alive" -eq 1 ]; then status="🟡 swarm starting (no transcript yet)"; status_state="starting"; else status="⚪ no active session"; status_state="down"; fi
     age="—"
   else
     if [ "$a" -lt 60 ]; then age="${a}s"; else age="$(( a/60 ))m"; fi
+    age_secs_for_status="$a"
     # Pane state — the finer-grained pane_state replaces pane_working
     # here because the alerter needs to distinguish "paused on a known
     # limit" from "pane in unknown state". pane_working semantics are
@@ -337,6 +408,7 @@ grep -vE '^[[:space:]]*(#|$)' "$CONF" | while IFS='|' read -r name repo tokvar c
         status="🟢 swarm working"
       fi
       [ "$ENABLE_TYPING" = "1" ] && curl --max-time "$CURL_MAX_TIME" -s -X POST -H "Authorization: Bot $token" "$API/channels/$channel/typing" >/dev/null 2>&1 || true
+      status_state="working"
     elif [ "$ps" -eq 0 ] && [ "$fresh" -eq 0 ]; then
       # Footer says "esc to interrupt" but no transcript write for
       # STALE_SECONDS+ — turn in flight from the TUI's view but nothing
@@ -344,6 +416,7 @@ grep -vE '^[[:space:]]*(#|$)' "$CONF" | while IFS='|' read -r name repo tokvar c
       status="🔴 swarm STALLED — turn in flight but no transcript writes (rate-limited, hung tool, or crashed)"
       alert_state="stalled"
       alert_msg="🔴 swarm \`$name\` · STALLED — turn in flight (\"esc to interrupt\") but no transcript writes for ${age}. Hung tool, rate-limited mid-turn, or crashed. Investigate the tmux pane."
+      status_state="stalled"
     elif [ "$ps" -eq 2 ]; then
       # Paused on a known Claude Code usage/rate limit. Process alive,
       # just capped. This is the case the CTO can NOT self-report —
@@ -357,6 +430,8 @@ grep -vE '^[[:space:]]*(#|$)' "$CONF" | while IFS='|' read -r name repo tokvar c
         alert_msg="🟡 swarm \`$name\` · PAUSED ON USAGE LIMIT — reset time not parseable; check the tmux pane. Not a crash."
       fi
       alert_state="paused-limit"
+      status_state="paused-limit"
+      limit_reset_for_status="$reset_hint"
     elif [ "$ps" -eq 1 ]; then
       # Pane at clean prompt ("← for agents"). Idle-at-prompt is a
       # LEGITIMATE state — the operator hasn't sent a turn in N minutes.
@@ -366,6 +441,7 @@ grep -vE '^[[:space:]]*(#|$)' "$CONF" | while IFS='|' read -r name repo tokvar c
       else
         status="🟢 swarm ready · waiting for input"
       fi
+      status_state="ready"
     else
       # ps=3 (unknown footer) or ps=4 (capture failed) — the pane is
       # not readable as any known state. While transcript is fresh,
@@ -380,10 +456,12 @@ grep -vE '^[[:space:]]*(#|$)' "$CONF" | while IFS='|' read -r name repo tokvar c
       else
         status="🟢 swarm ready · waiting for input"
       fi
+      status_state="ready"
       if [ "$a" -gt "$SILENCE_SECONDS" ]; then
         if [ "$a" -lt 3600 ]; then silence_age="$(( a/60 ))m"; else silence_age="$(( a/3600 ))h"; fi
         alert_state="silent"
         alert_msg="🔴 swarm \`$name\` · SILENT — no recognized pane state, no working signal, no known limit message, transcript stale ${silence_age}. The CTO can't self-report; investigate the tmux pane (\`tmux attach -t ${PREFIX}-$name\`)."
+        status_state="silent"
       fi
     fi
   fi
@@ -402,6 +480,108 @@ grep -vE '^[[:space:]]*(#|$)' "$CONF" | while IFS='|' read -r name repo tokvar c
   # the same tick as the alert. Both flow through the watcher's direct
   # curl to Discord; neither depends on the swarm/CTO being responsive.
   post_alert "$channel" "$token" "$alert_state" "$alert_msg"
+  # iOS-widget status fragment. emit_status reads the CTO's attention flag
+  # file (if any) and writes one JSON line per swarm into the accumulator.
+  # The assembler after the loop wraps the lines and writes status.json.
+  emit_status "$name" "$channel" "$status_state" "$age_secs_for_status" "$limit_reset_for_status"
 done
+
+# ---------------------------------------------------------------------------
+# iOS-widget status feed. Two stages:
+#   1) Assemble per-swarm fragments into $STATE_DIR/status.json (atomic).
+#      This file is the LOCAL source of truth — written every tick, whether
+#      or not the Railway endpoint is configured.
+#   2) POST to Railway endpoint when both SWARM_STATUS_ENDPOINT and
+#      SWARM_STATUS_SECRET are set. Change-guarded against a stable
+#      signature so a steady-state fleet produces zero POSTs.
+# Failures of either stage log to watch.err and do not disrupt the tick's
+# core heartbeat/alert duties — status-feed is best-effort, alerting is not.
+# ---------------------------------------------------------------------------
+STATUS_FILE="$STATE_DIR/status.json"
+
+if [ -s "$STATUS_SWARMS_TMP" ]; then
+  status_tmp="$STATUS_FILE.tmp.$$"
+  python3 - "$STATUS_SWARMS_TMP" "$status_tmp" <<'PY' || echo "swarm-watch: status.json assembly failed" >&2
+import json, sys, datetime
+src, dst = sys.argv[1], sys.argv[2]
+swarms = []
+with open(src) as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            swarms.append(json.loads(line))
+        except Exception as e:
+            # Drop the malformed fragment rather than blow up the whole
+            # snapshot. Logged so it surfaces; widget keeps rendering the
+            # other swarms.
+            sys.stderr.write("swarm-watch: dropping malformed status fragment: " + str(e) + "\n")
+out = {
+    "schema": "swarm-status/v1",
+    "generated_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "swarms": swarms,
+}
+with open(dst, "w") as f:
+    json.dump(out, f, indent=2)
+    f.write("\n")
+PY
+  if [ -f "$status_tmp" ]; then
+    mv "$status_tmp" "$STATUS_FILE"
+  fi
+fi
+rm -f "$STATUS_SWARMS_TMP"
+
+# Railway POST — only if BOTH config vars are set. The endpoint URL alone
+# isn't enough (no auth means anyone with the URL could spoof); the secret
+# alone isn't enough (nowhere to send). Both required.
+if [ -n "$STATUS_ENDPOINT" ] && [ -n "$STATUS_SECRET" ] && [ -f "$STATUS_FILE" ]; then
+  # Stable signature for the change-guard. EXCLUDES last_activity_age_seconds
+  # (drifts every tick — would defeat the guard entirely) and generated_at
+  # (timestamp — same problem). INCLUDES state, needs_attention, attention
+  # source/reason, and limit_reset_hint per swarm — so transitions and
+  # attention changes flip the signature and push promptly, but steady-
+  # state produces zero POSTs.
+  STATUS_SIG_FILE="$STATE_DIR/status.last-posted.sig"
+  current_sig="$(python3 - "$STATUS_FILE" <<'PY'
+import json, sys, hashlib
+with open(sys.argv[1]) as f:
+    s = json.load(f)
+parts = []
+for sw in s.get("swarms", []):
+    parts.append("|".join([
+        str(sw.get("name", "")),
+        str(sw.get("channel", "")),
+        str(sw.get("state", "")),
+        str(sw.get("needs_attention", "")),
+        str(sw.get("attention_source") or ""),
+        str(sw.get("attention_reason") or ""),
+        str(sw.get("limit_reset_hint") or ""),
+    ]))
+sig = hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+print(sig)
+PY
+  )"
+  prior_sig=""
+  [ -r "$STATUS_SIG_FILE" ] && prior_sig="$(cat "$STATUS_SIG_FILE" 2>/dev/null)"
+  if [ "$current_sig" != "$prior_sig" ]; then
+    # --max-time bounds the POST so a slow Railway response can't wedge
+    # the 10s tick. Fail-safe: any non-2xx logs and continues; the sig
+    # file isn't updated, so the next tick naturally retries.
+    code="$(curl --max-time "$CURL_MAX_TIME" -s -o /dev/null -w '%{http_code}' -X POST \
+      -H "Authorization: Bearer $STATUS_SECRET" \
+      -H "Content-Type: application/json" \
+      --data-binary "@$STATUS_FILE" \
+      "$STATUS_ENDPOINT" 2>/dev/null)"
+    case "$code" in
+      200|201|202|204)
+        printf '%s' "$current_sig" > "$STATUS_SIG_FILE"
+        ;;
+      *)
+        echo "swarm-watch: status POST failed (HTTP ${code:-network-error}) — endpoint=$STATUS_ENDPOINT" >&2
+        ;;
+    esac
+  fi
+fi
 
 exit 0

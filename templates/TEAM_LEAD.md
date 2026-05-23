@@ -637,6 +637,14 @@ a bottleneck and abdicates the judgment you exist to provide.
   blocking, ask: can I route around it (redirect teammates,
   parallelize, proceed on a reversible alternative)? If yes, it's not
   blocking and you decide.
+- **Raise the attention flag on BLOCKED; clear on unblock.** A BLOCKED
+  ESCALATE also raises `"$SWARM_HOME/bin/swarm-attention.sh" raise
+  "<reason>"` (canonical form — the permission gate auto-approves
+  exactly this) so the operator's iOS widget surfaces the hand
+  independently of Discord notification reliability. Clear with `"...
+  /bin/swarm-attention.sh" clear` the moment you unblock. NOTIFY and
+  ADVANCE NOTICE do NOT raise the flag — only blocking does. See
+  `ESCALATION.md` §*Attention flag*.
 - **No silence-as-consent, no countdown defaults.** Never present a
   decision with "proceeding with X unless you object" or a timer-based
   default — that is a category error (the surfacing says operator

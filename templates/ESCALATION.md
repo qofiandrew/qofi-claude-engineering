@@ -305,6 +305,41 @@ it isn't a notification — it's a question. Convert to an ESCALATE or
 recognize that the call was within CTO authority and re-decide whether
 to surface it at all.
 
+### Attention flag — raised on BLOCKED, never on NOTIFY/ADVANCE NOTICE
+
+A BLOCKED escalation surfaces work that depends on the operator. The
+Discord ESCALATE message is the substance; the **attention flag** is the
+durable hand the operator's iOS widget surfaces independently of Discord
+notification reliability. Raise it AT THE SAME MOMENT you post a BLOCKED
+ESCALATE, using the **canonical form** below — this exact shell syntax is
+the only one the permission gate auto-approves:
+
+    "$SWARM_HOME/bin/swarm-attention.sh" raise "<one-line reason; same as Decision>"
+
+When the operator responds and you unblock (work resumed, or you decided
+to proceed on a redirected path), clear it the same way:
+
+    "$SWARM_HOME/bin/swarm-attention.sh" clear
+
+The flag is integral to *blocked-and-waiting*, not a separate primitive:
+
+- **NOTIFY does NOT raise the flag.** Informational, not asking.
+- **ADVANCE NOTICE does NOT raise the flag.** Work is proceeding on other
+  tracks; the item becomes blocking only when work hits it. Raise the
+  flag at that moment, not preemptively.
+- **CTO-authority calls do NOT raise the flag.** If you didn't surface
+  it (because it's your call to make), the operator's phone doesn't
+  light up. That's the point.
+
+If you raise the flag and then realize the item is actually CTO-authority
+(not grave-AND-blocking), clear the flag and retract per §Core principle.
+The flag follows the substance, not the other way around.
+
+The widget renders attention from two sources differently: the CTO's
+flag ("the bot is asking you") is distinct from the watcher's auto-
+detected failure-state alerts ("the bot broke or got throttled"). Both
+matter; one is your call to raise, the other you can't suppress.
+
 ---
 
 ## Tie-in

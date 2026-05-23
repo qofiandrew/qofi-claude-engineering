@@ -55,6 +55,13 @@ case "$TOOL" in
     printf '%s' "$CMD" | grep -Eq '(curl|wget)[^|]*\|[[:space:]]*(sh|bash|zsh)'                          && deny "pipe-to-shell"
     printf '%s' "$CMD" | grep -Eqi '(npm[[:space:]]+publish|yarn[[:space:]]+publish|deploy|--prod|production)' && deny "publish/deploy/prod"
     printf '%s' "$CMD" | grep -Eq '(\.env|/\.ssh/|credential|secret|api[_-]?key|token)'                  && deny "touches secrets/credentials"
+    # The watcher's state dir ($STATE_DIR, default ~/.config/swarm/) holds the
+    # heartbeat state files AND the CTO-raised attention flags. The ONLY
+    # supported way for the CTO to touch it is via $SWARM_HOME/bin/swarm-
+    # attention.sh (narrowly allowlisted below). Direct redirects into the
+    # dir would bypass the helper's validation (channel resolution, length-
+    # cap, atomic write) and could corrupt watcher state. Block them.
+    printf '%s' "$CMD" | grep -Eq '>[[:space:]>]*("?\$HOME"?|~|/Users/[^/]+|/home/[^/]+)/\.config/swarm/' && deny "direct write to swarm state dir — use \"\$SWARM_HOME\"/bin/swarm-attention.sh"
     ;;
   Edit|Write|MultiEdit|NotebookEdit)
     case "$FILE" in
@@ -96,6 +103,15 @@ case "$TOOL" in
     # defer to the human.
     printf '%s' "$CMD" | grep -Eq '^[[:space:]]*git[[:space:]]+worktree[[:space:]]+(add|remove|list|prune)([[:space:]]|$)' && allow
     printf '%s' "$CMD" | grep -Eq '^[[:space:]]*(ls|cat|grep|rg|find|echo|pwd|head|tail|wc|which|mkdir|touch|node|npm[[:space:]]+(install|ci|run))([[:space:]]|$)' && allow
+    # CTO attention flag — the ONE scoped capability for writing into the
+    # watcher's state dir. Doctrine (templates/ESCALATION.md §Attention flag)
+    # pins the quoted-$SWARM_HOME form as canonical:
+    #     "$SWARM_HOME/bin/swarm-attention.sh" raise "<reason>"
+    # The regex also tolerates the env-quoted, unquoted, and absolute-path
+    # equivalents as belt-and-suspenders against shell-quoting drift. Only
+    # the three documented subcommands (raise|clear|status) match; anything
+    # else with this script path defers to a human.
+    printf '%s' "$CMD" | grep -Eq '^[[:space:]]*("\$SWARM_HOME/bin/swarm-attention\.sh"|"\$SWARM_HOME"/bin/swarm-attention\.sh|\$SWARM_HOME/bin/swarm-attention\.sh|/[^[:space:]"]+/bin/swarm-attention\.sh)[[:space:]]+(raise|clear|status)([[:space:]]|$)' && allow
     ;;
 esac
 
