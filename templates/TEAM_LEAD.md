@@ -250,6 +250,121 @@ If a genuinely new major spec decision surfaces mid-build — one not settled in
 confirmed spec — that is a **blocking escalation**: message the human, don't decide
 it yourself.
 
+## Onboarding comb-over (first task on existing repos)
+
+**Lifecycle fork.** On an existing repo (post-`swarm-onboard.sh`), this
+section replaces §*Lifecycle* steps 0–1. There is no design
+conversation; the repo already exists. Before any feature work, the
+CTO reconciles the mandated docs structure against the real code —
+the **comb-over** — so the rest of the doctrine (which assumes a
+docs-mirror-code substrate) is anchored to reality.
+
+This is judgment work. No script can reverse-engineer architecture
+from code; `swarm-onboard.sh` lays down doctrine + enforcement
+artifacts but explicitly does not fake the docs structure.
+
+### Ground truth is the code
+
+Docs reconcile to match the code, never the reverse. Onboarding
+documents what **is**. Never change code to match a stale doc
+during the comb-over — that's a §*Conflict handling* violation
+(`CLAUDE.md`) risking silent breakage of working behavior.
+
+### Three cases (per module)
+
+1. **No docs** — build the skeleton from the code: `modules/<module>.md`
+   with the contract surface OFFERED and the surfaces REQUIRED from
+   peers, inferred from actual imports / exports / calls.
+2. **Stale or wrong docs** — correct to current code behavior. The
+   code is canonical.
+3. **Doc-vs-code conflict that looks like a bug** — doc claims
+   behavior the code doesn't deliver. Do **not** silently document
+   the broken behavior. Surface as a suspected bug per `CLAUDE.md`
+   §*Conflict handling*. **Onboarding doubles as defect discovery.**
+
+### Monorepo awareness
+
+**Detect monorepo shape**: `apps/` with one or more subdirectories,
+**OR** `packages/` present. If either holds, build the **monorepo
+docs layout**:
+
+- **`apps/<app>/docs/`** per app — that app's `modules/<module>.md`,
+  app-scoped ADRs, app-local concerns. One docs tree per app.
+- **`docs/` at the repo root** — cross-app and project-wide
+  concerns: `PROJECT_SPEC.md`, shared ADRs governing multiple apps,
+  the build log.
+- **Shared packages** (e.g. a shared db package consumed by multiple
+  apps) are documented as their own modules with their own contract
+  surface. A shared db package is typically the **single owner** of
+  any shared schema per `CLAUDE.md` §*Data ownership*; apps consume
+  it via its contract, never by reaching into its tables. Document
+  the ownership rule explicitly in the package's
+  `modules/<package>.md`.
+
+**Never flatten a monorepo into a single `docs/` set** — that erases
+the app boundaries the rest of the doctrine relies on. (Per-app
+mechanical scoping is doctrine-only today — see
+§*CLAUDE_AGENT_APP (deferred fleet-wide refinement)* — but the
+layout requirement above is non-deferred and applies now.)
+
+For single-app repos (neither `apps/` nor `packages/`), the layout
+is flat: `modules/<module>.md` and `docs/adr/` at the repo root, as
+`swarm-onboard.sh` already provisions.
+
+### Incremental, in dependency order
+
+Do **not** attempt the comb-over in one massive pass. Walk
+module-by-module (and in a monorepo, app-by-app) in dependency order:
+shared packages first, then the apps that depend on them. Same rule
+§*Dependencies and integration order* enforces for feature work —
+applies equally to reverse-engineering.
+
+Each module's comb-over is a small completable unit: land its docs,
+then move on. A half-done comb-over that abandons mid-walk leaves
+the repo with a partially-satisfied docs-expectation — worse than
+not started, because future work will assume the docs are
+authoritative when they aren't.
+
+### Done condition
+
+The comb-over is done when:
+
+- Every module (in every app, in a monorepo) has a
+  `modules/<module>.md` that accurately reflects what the code
+  actually does — contract offered, surfaces required.
+- Every shared package is documented as a module with its contract
+  surface and ownership rule explicit.
+- `PROJECT_SPEC.md` §1–§4 (problem, users, scope, acceptance)
+  reflects the real product the existing code implements.
+- Any doc-vs-code conflicts that looked like bugs have been
+  surfaced per §*Conflict handling*.
+
+Only then does the lifecycle continue to step 2 (decompose) on
+actual feature work.
+
+## CLAUDE_AGENT_APP (deferred fleet-wide refinement)
+
+A known refinement to per-app scoping in monorepos: a
+`CLAUDE_AGENT_APP` env-var (or equivalent settings/hook check) that
+would mechanically enforce a teammate's "stay in your app" rule —
+refusing writes outside `apps/<configured-app>/`. **Today this is
+doctrine-only**: `CLAUDE.md` §*Scope & branches* and
+§*Module boundaries* tell teammates to stay in their app; the
+harness does not refuse if they don't.
+
+This is a **fleet-wide enforcement limitation**, not an
+onboarding-specific one — every swarm running against a monorepo
+inherits it. Future work would add the env-var check to a pre-tool
+hook (refusing Edit/Write/Bash-mutation paths outside the configured
+app) and to `swarm-add.sh` / per-teammate spawn (setting the env-var
+per teammate, scoping each to its assigned app).
+
+Until built: **per-app scoping is the CTO's judgment job.** Spawn
+each teammate with explicit instructions naming its app, review for
+out-of-app writes at the §*Lead review* step, and treat any
+out-of-app commit as a §*Conflict handling* surfacing — not silent
+acceptance.
+
 ## Worktree isolation + file-ownership decomposition (the core rule)
 
 **Each teammate works in its own git worktree on its own branch.** Not a

@@ -305,26 +305,66 @@ fi
 rm -rf "$SNAPSHOT_DIR"
 
 # ---------------------------------------------------------------------------
-# Docs-skeleton CTO bootstrap note.
+# Onboarding-comb-over CTO bootstrap note. The comb-over PROTOCOL itself
+# lives in TEAM_LEAD.md §*Onboarding comb-over* — reconciling docs to
+# code is judgment work, not scriptable. We just invoke it by name and
+# tailor one paragraph to monorepo vs single-app shape.
+#
+# Monorepo detection is a HINT for this message — the comb-over's
+# code-reading is authoritative if this hint guesses wrong.
+# Rule: apps/ with ≥1 subdir OR packages/ present.
 # ---------------------------------------------------------------------------
+is_monorepo=0
+if [ -d "$REPO/apps" ] && [ -n "$(find "$REPO/apps" -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null)" ]; then
+  is_monorepo=1
+fi
+[ -d "$REPO/packages" ] && is_monorepo=1
+
 cat <<EOF
 
 ====================================================================
 Onboarded: doctrine + enforcement are in place.
 
-NEXT STEP — the docs skeleton is NOT auto-generated. This codebase
-already exists; modules/<module>.md does not yet reflect the real
-structure. As the CTO's first task in this repo, reverse-engineer
-the docs skeleton from the existing code:
+NEXT STEP — the docs structure is NOT auto-generated. The CTO's
+mandated first task in this repo is the ONBOARDING COMB-OVER (see
+TEAM_LEAD.md §Onboarding comb-over). The comb-over reverse-engineers
+modules/<module>.md from the actual code, reconciles any stale docs
+to current code behavior, and surfaces doc-vs-code conflicts that
+look like bugs (instead of silently documenting broken behavior —
+onboarding doubles as defect discovery).
+EOF
 
-  - Survey the actual modules / packages / apps in this tree.
-  - For each, write modules/<module>.md (contract surface offered,
-    contracts required from peers) per CLAUDE.md §Modular design.
-  - Author PROJECT_SPEC.md §1-§4 against the system that exists.
+if [ "$is_monorepo" -eq 1 ]; then
+  cat <<EOF
 
-Onboarding ≠ greenfield. The doctrine you just stamped expects this
-docs structure to exist; the CTO bootstraps it from the code, not
-from a design conversation. See TEAM_LEAD.md.
+This repo looks like a MONOREPO (apps/ subdirs OR packages/ present).
+The comb-over builds the MONOREPO docs layout:
+
+  - apps/<app>/docs/ for each app — that app's modules/<module>.md
+    and app-scoped ADRs.
+  - docs/ at the repo root for cross-app / project-wide concerns
+    (PROJECT_SPEC.md, shared ADRs, build log).
+  - Shared packages documented as their own modules with contract
+    surface + data-ownership rule (typically single-owner of any
+    shared schema; consumed via contract, not by reaching into
+    tables).
+
+Do NOT flatten the monorepo into a single docs/ set.
+EOF
+else
+  cat <<EOF
+
+This repo looks like a single-app codebase. The comb-over builds
+the flat docs layout: modules/<module>.md at the repo root,
+docs/adr/ at the repo root.
+EOF
+fi
+
+cat <<EOF
+
+After the comb-over completes, continue at TEAM_LEAD.md §Lifecycle
+step 2 (Decompose) on feature work — there is no design conversation,
+the repo already exists.
 
 swarm-onboard does NOT register this repo with the swarm. When ready
 to spin up a Discord-facing swarm against it, run:
