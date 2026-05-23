@@ -1,0 +1,13 @@
+{
+  "name": "qofi-swarm",
+  "owner": {
+    "name": "qofiandrew"
+  },
+  "plugins": [
+    {
+      "name": "discord-b2b",
+      "source": "./bridge",
+      "description": "Discord bridge for the swarm — bot-to-bot messaging fork."
+    }
+  ]
+}

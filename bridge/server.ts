@@ -279,13 +279,24 @@ async function gate(msg: Message): Promise<GateResult> {
     ? msg.channel.parentId ?? msg.channelId
     : msg.channelId
   const policy = access.groups[channelId]
-  if (!policy) return { action: 'drop' }
+  if (!policy) {
+    process.stderr.write(
+      `discord: DROP no group for channel ${channelId} (sender ${senderId}, type ${msg.channel.type}, thread=${msg.channel.isThread()}); known groups: [${Object.keys(access.groups).join(', ') || '(none)'}]\n`,
+    )
+    return { action: 'drop' }
+  }
   const groupAllowFrom = policy.allowFrom ?? []
   const requireMention = policy.requireMention ?? true
   if (groupAllowFrom.length > 0 && !groupAllowFrom.includes(senderId)) {
+    process.stderr.write(
+      `discord: DROP sender ${senderId} not in group ${channelId} allowFrom [${groupAllowFrom.join(', ')}]\n`,
+    )
     return { action: 'drop' }
   }
   if (requireMention && !(await isMentioned(msg, access.mentionPatterns))) {
+    process.stderr.write(
+      `discord: DROP requireMention=true and no mention detected in channel ${channelId} from sender ${senderId}\n`,
+    )
     return { action: 'drop' }
   }
   return { action: 'deliver', access }
