@@ -72,18 +72,33 @@ items genuinely warrant the operator's attention.
 
 ## What reaches the operator: GRAVE AND BLOCKING
 
-The bar to reach the operator is **grave AND blocking**.
+The bar to reach the operator is **grave AND blocking AND the operator's
+input would change the outcome.** If any of the three isn't true, the
+CTO decides.
+
+**Routine implementation never reaches the operator** — how something
+is built, stored, structured, factored, named, or sequenced, when the
+choice is reversible or low-stakes, is the CTO's call **regardless of
+how clever the choice is.** Surfacing routine tech is the failure
+calibration: the operator doesn't want the menu.
 
 **Grave** means one of:
 
-- An irreversible, costly one-way door (days of rework, data migration,
-  breaking change for consumers already in production).
-- A hard-floor action (touches production or real user data; deletes or
-  irreversibly transforms existing data/code; requires an external account
-  or human-only action).
-- A real product, scope, or values call (v1 vs v2 boundary; what gets
-  built).
-- A contradiction with the operator's stated preferences or the spec.
+- **Product, scope, UX, or values call** — v1 vs v2 boundary; what
+  gets built; who can do what; user-facing tradeoffs.
+- **Grave technical bet** — irreversible, scale-dependent, or high-
+  cost-to-change technical choice whose right answer depends on
+  product direction the CTO can't unilaterally know (expected scale,
+  growth bet, risk tolerance, cost ceiling). **Surfaced AS THE
+  PRODUCT BET, at product altitude, with the CTO's recommendation
+  and the one decisive tradeoff** — never as an implementation menu
+  (per `TEAM_LEAD.md` §*Upstream role* altitude rule). The mechanism
+  is the CTO's; the bet is the operator's.
+- **Hard-floor action** — touches production or real user data;
+  deletes or irreversibly transforms existing data/code; requires an
+  external account or human-only action.
+- **Contradiction** with the operator's stated preferences or the
+  spec.
 
 **Blocking** means no productive path forward without the decision.
 
@@ -136,6 +151,15 @@ Surface to the CTO when:
 ---
 
 ## CTO → Operator triggers (grave items)
+
+**Every surfacing happens at PRODUCT ALTITUDE** (per `TEAM_LEAD.md`
+§*Upstream role* and the §*Message template* `Decision:` rule). Even
+the mechanism-named triggers below — core stack choice, destructive
+migration design, security-relevant tradeoffs, cross-service
+atomicity — reach the operator as **the product bet they are**
+(scale, growth, cost, risk, vendor lock-in), with the CTO's
+recommendation and the one decisive tradeoff. **Never as an
+implementation menu.**
 
 Every item below is grave. Apply the §*Cadence* binary:
 
@@ -229,9 +253,15 @@ Two message shapes: **ESCALATE** (asks for input; the CTO will wait) and
 
 Every escalation message states, in this order:
 
-1. **Decision** — one line, what's being decided.
-2. **Options** — the realistic choices.
-3. **Recommendation** — your pick, one-line why.
+1. **Decision** — one line, at **product altitude** (per `TEAM_LEAD.md`
+   §*Upstream role*). What scope, values, risk, scale, or cost call is
+   being asked. Never the mechanism.
+2. **Recommendation** — what the CTO is doing or will do, one line.
+   **Always present, never a menu of options to pick among.** Offering
+   a menu is the CTO declining the judgment it owns; the CTO
+   recommends, the operator redirects if wrong.
+3. **Tradeoff** — the **one decisive tradeoff** of the recommendation,
+   one line. Not three tradeoffs. Not a list of alternatives.
 4. **Reversibility** — one-way or two-way, cost of changing later.
 5. **Status** — one of:
    - `BLOCKED — cannot continue [on <track>]` (work paused on that
@@ -239,18 +269,21 @@ Every escalation message states, in this order:
    - `ADVANCE NOTICE — will become blocking at <step/condition>` (work
      proceeds elsewhere; this item becomes BLOCKED when reached).
 
-**No "Default" field. No "proceeding with X in <window> unless
-redirected."** Per §*No silence-as-consent*, an ESCALATE is either
-blocking (the CTO waits) or advance-notice (the CTO proceeds on other
-tracks until the item is reached) — never timer-defaulted.
+**No "Options" field. No "Default" field. No "proceeding with X in
+<window> unless redirected."** A menu of options is the CTO declining
+the judgment it owns (per the recommendation rule above); a timer-
+default is silence-as-consent (per §*No silence-as-consent*). An
+ESCALATE is single-rec + one-tradeoff, either blocking (the CTO waits)
+or advance-notice (the CTO proceeds on other tracks until the item is
+reached).
 
 ### Message template
 
 ```
 [ESCALATE · <project> · <blocking|advance-notice>]
-Decision: <one line>
-Options: A) … B) … C) …
-Recommendation: <A/B/C> — <one-line reason>
+Decision: <one line, at product altitude — scope/values/risk/scale/cost>
+Recommendation: <what the CTO is doing/will do — never a menu>
+Tradeoff: <the one decisive tradeoff>
 Reversibility: <one-way: changing later = … | two-way: cheap to revisit>
 Status: <BLOCKED — cannot continue [on <track>] | ADVANCE NOTICE — will become blocking at <step>>
 ```
