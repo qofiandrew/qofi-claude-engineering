@@ -168,6 +168,114 @@ pane_working() {
   printf '%s' "$out" | grep -qF 'esc to interrupt'
 }
 
+# pane_state SESSION TMUX_BIN
+#
+# A finer-grained variant of pane_working used by the active alerter in
+# swarm-watch.sh. Distinguishes FIVE pane situations so the watcher can
+# tell "the swarm is paused on a usage limit" apart from "the pane is in
+# an unknown / unparseable state" — the original alerting bug was that
+# both surface as `pane_working != 0` (idle), so a usage-throttled swarm
+# read as "ready · waiting for input" and produced DEAD SILENCE.
+#
+# Exit codes:
+#   0 — working      (footer contains "esc to interrupt")
+#   1 — at-prompt    (footer contains "← for agents", i.e. clean prompt)
+#   2 — paused-limit (capture contains a known Claude Code limit-message
+#                     substring — see SWARM_LIMIT_PATTERNS below)
+#   3 — unknown      (capture succeeded but matches none of the above —
+#                     scrolled, sub-UI, or a TUI state we don't recognize)
+#   4 — uncertain    (tmux missing, session absent, capture failed, empty)
+#
+# Side channel: when rc=2 (paused-limit) the matched limit-substring line
+# is written to $SWARM_PANE_STATE_DETAIL (a shell global). The caller may
+# read it to parse a reset time. Empty for any other return code.
+#
+# Limit substrings. These are the substrings Claude Code's TUI shows when
+# a usage cap is hit; they are stable enough across versions to be useful
+# matchers but specific enough that they don't appear in normal prompt
+# content. The set is overridable via SWARM_LIMIT_PATTERNS (newline- or
+# pipe-separated; each entry treated as a case-insensitive fixed string).
+#
+#   usage limit          — "Claude usage limit reached", "Approaching usage limit"
+#   5-hour limit         — "5-hour limit reached · resets at 11pm"
+#   limit reached        — generic suffix used across variants
+#   rate limit           — provider-side rate limit surface
+#   approaching usage    — early-warning variant
+#
+# Matching is case-insensitive (grep -i) and substring (grep -F). The
+# whole capture is grep'd, not just the footer — limit messages render at
+# various pane positions depending on the TUI's modal state.
+SWARM_PANE_STATE_DETAIL=""
+
+_swarm_default_limit_patterns() {
+  printf '%s\n' "usage limit"
+  printf '%s\n' "5-hour limit"
+  printf '%s\n' "limit reached"
+  printf '%s\n' "rate limit"
+  printf '%s\n' "approaching usage"
+}
+
+pane_state() {
+  local sess="$1" tmux_bin="${2:-tmux}"
+  SWARM_PANE_STATE_DETAIL=""
+  command -v "$tmux_bin" >/dev/null 2>&1 || return 4
+  local out
+  out="$("$tmux_bin" capture-pane -t "$sess" -p 2>/dev/null)" || return 4
+  [ -z "$out" ] && return 4
+
+  # Limit substrings checked FIRST: a session that just hit a cap may
+  # still have a lingering spinner verb above the cap message; the cap
+  # message wins (that's the actionable reality).
+  local patterns_raw="${SWARM_LIMIT_PATTERNS:-}"
+  local patterns
+  if [ -n "$patterns_raw" ]; then
+    # Operator override. Accept newline- OR pipe-separated entries.
+    patterns="$(printf '%s' "$patterns_raw" | tr '|' '\n')"
+  else
+    patterns="$(_swarm_default_limit_patterns)"
+  fi
+  local hit
+  hit="$(printf '%s' "$out" | grep -i -F -m1 -f <(printf '%s' "$patterns") 2>/dev/null)"
+  if [ -n "$hit" ]; then
+    # Trim ANSI / leading whitespace from the captured line for cleaner
+    # downstream parsing. Best-effort; the raw line is fine too.
+    hit="$(printf '%s' "$hit" | sed -e 's/\x1b\[[0-9;]*[A-Za-z]//g' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    SWARM_PANE_STATE_DETAIL="$hit"
+    return 2
+  fi
+
+  if printf '%s' "$out" | grep -qF 'esc to interrupt'; then
+    return 0
+  fi
+  if printf '%s' "$out" | grep -qF '← for agents'; then
+    return 1
+  fi
+  return 3
+}
+
+# parse_limit_reset DETAIL
+#
+# Best-effort: read the limit-message line captured by pane_state and
+# print a reset-time fragment to stdout (empty if nothing parseable).
+# Looks for "resets at <X>" / "reset at <X>" / "resets <X>", stopping at
+# the next bullet/pipe/period/newline. Used by the alerter to enrich the
+# Discord push with a concrete reset hint when Claude Code provides one.
+parse_limit_reset() {
+  local detail="$1"
+  [ -z "$detail" ] && return 0
+  printf '%s' "$detail" | python3 -c '
+import re, sys
+s = sys.stdin.read()
+m = re.search(r"reset(?:s)?\s+(?:at\s+)?([^·|.\n]+)", s, re.IGNORECASE)
+if m:
+    val = m.group(1).strip().rstrip(",;:")
+    # Cap to a reasonable length so weird captures cant blow up the alert.
+    if len(val) > 60:
+        val = val[:60] + "…"
+    print(val)
+' 2>/dev/null
+}
+
 # ---------------------------------------------------------------------------
 # 2) Manifest walker + per-class apply helpers.
 # ---------------------------------------------------------------------------

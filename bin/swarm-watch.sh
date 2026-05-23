@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# swarm-watch.sh — EXTERNAL multi-swarm liveness monitor.
+# swarm-watch.sh — EXTERNAL multi-swarm liveness monitor + active alerter.
 #
 # launchd fires this on an interval. It reads the SAME $SWARM_HOME/swarm.conf that
 # swarm-up.sh uses, and posts a per-channel heartbeat for EACH configured swarm,
@@ -11,8 +11,8 @@
 # swarm-up.sh does. The heartbeat for a swarm is posted by that swarm's own bot,
 # into that swarm's channel.
 #
-# Per-swarm state (pane content is the PRIMARY working signal; transcript
-# freshness disambiguates working-vs-stalled):
+# Per-swarm heartbeat state (pane content is the PRIMARY working signal;
+# transcript freshness disambiguates working-vs-stalled):
 #   no tmux session                     -> ⚪ down
 #   session, no transcript              -> 🟡 starting
 #   session, pane mid-turn, fresh       -> 🟢 working
@@ -34,6 +34,44 @@
 # The heartbeat is also PINNED to the channel after its first POST so it stays
 # visible as conversation accumulates. Subsequent ticks edit in place; the pin
 # is sticky on edits and is only re-applied on a (re)post.
+#
+# ACTIVE ALERTER (the reason "edits to a pinned message" wasn't enough).
+# The heartbeat is PASSIVE — Discord edits don't trigger a notification, so a
+# silently-failed swarm produces DEAD SILENCE in the operator's feed. The
+# overnight pain: a usage throttle paused work, the CTO (Claude making tool
+# calls) couldn't report its own throttle because it had no tool calls to
+# make, and the heartbeat just sat there edited to "ready". When the CTO is
+# down, NOTHING that depends on Claude can alert. So this script — a plain
+# shell process that already curls Discord directly with the bot token —
+# also POSTs a NEW alert message when the swarm transitions into a known-
+# bad state. The same direct-curl path that edits the heartbeat fires the
+# alert; it shares zero fate with the CTO/bridge/access.json.
+#
+# Alertable states (each posts ONE new message on transition into the
+# state; subsequent ticks in the same state are change-guarded silent):
+#   paused-limit  pane shows a known Claude Code limit substring
+#                 (usage limit / 5-hour limit / limit reached / rate limit /
+#                 approaching usage). Process alive, just capped.
+#   stalled       pane mid-turn ("esc to interrupt") but transcript stale —
+#                 hung tool, rate-limited mid-turn, or crashed. This is the
+#                 case the heartbeat already paints 🔴; alerting it actively
+#                 closes the same "Claude can't self-report" gap.
+#   silent        pane in unknown/uncertain state AND transcript stale
+#                 beyond SWARM_SILENCE_SECONDS. The case that bit the
+#                 operator — TUI in a state our matchers don't recognize,
+#                 nothing being produced, nobody alerting.
+#   down          tmux session is gone. Process dead.
+#
+# Recovery is silent: a bad → ok transition does NOT post (heartbeat
+# already returns to 🟢; channel-as-event-log stays readable). The
+# alerter does track ok so re-entering a bad state from ok will fire
+# a fresh alert.
+#
+# Trust root. The alerter assumes the WATCHER ITSELF is alive — that is
+# what makes it independent of the CTO. launchd's StartInterval=10 keeps
+# this script firing; if launchd or this binary dies, nothing alerts. The
+# alerter cannot detect its own death. Out of scope here; flagged so the
+# operator knows where the chain ends.
 #
 # Why external: a crashed/stuck swarm cannot report its own death. This shares no
 # fate with any swarm and has no terminal. It posts via the bot token to the
@@ -57,6 +95,17 @@ TMUX_BIN="${SWARM_TMUX_BIN:-tmux}"            # may need full path under launchd
 API="${SWARM_DISCORD_API:-https://discord.com/api/v10}"
 ENABLE_TYPING="${SWARM_ENABLE_TYPING:-0}"
 CURL_MAX_TIME="${SWARM_WATCH_CURL_TIMEOUT:-5}"
+# Active-alert thresholds. SILENCE_SECONDS is the transcript-staleness floor
+# under which we DON'T fire a "silent" alert — chosen meaningfully above
+# STALE_SECONDS (5m by default) so a briefly-quiet swarm only paints the
+# heartbeat's 🔴 STALLED and doesn't also push. Override in env if a fleet
+# has known longer healthy quiet windows.
+SILENCE_SECONDS="${SWARM_SILENCE_SECONDS:-900}"
+# Optional Discord mention prefix for active alerts. Empty by default —
+# Discord's new-message badge already fires on any POST to a channel the
+# operator is subscribed to. Set to "@here" (or a role mention) if the
+# default channel notification is not enough.
+ALERT_MENTION="${SWARM_ALERT_MENTION:-}"
 
 mkdir -p "$STATE_DIR"
 
@@ -160,6 +209,50 @@ post_heartbeat() {  # channel token content
   pin_message "$channel" "$token" "$newid"
 }
 
+# Active push-alert. Posts a NEW message (no edit, no pin) to the channel
+# when a swarm transitions into a known-bad state. Change-guarded against
+# $STATE_DIR/alert-$channel.state — the file holds the LAST state we
+# posted about. Transitions:
+#   ok           -> bad          POST + record bad
+#   bad-A        -> bad-B        POST + record bad-B  (state changed)
+#   bad          -> ok           record ok (no post — heartbeat already
+#                                returns to 🟢; bad-as-event-log stays
+#                                readable in the channel)
+#   ok           -> ok           no-op
+# The state file is created on first observation, so even on the very
+# first watcher run an immediate bad state fires exactly once.
+post_alert() {  # channel token state content
+  local channel="$1" token="$2" state="$3" content="$4"
+  local statefile="$STATE_DIR/alert-$channel.state"
+  local prior=""
+  [ -r "$statefile" ] && prior="$(tr -d '[:space:]' < "$statefile" 2>/dev/null)"
+  if [ "$prior" = "$state" ]; then
+    return 0
+  fi
+  # Only POST on transition INTO a bad state (or bad-to-different-bad).
+  # Bad-to-ok updates the state file but stays quiet.
+  if [ "$state" != "ok" ]; then
+    local body="$content"
+    [ -n "$ALERT_MENTION" ] && body="$ALERT_MENTION $content"
+    local payload; payload="$(json_content "$body")"
+    local code
+    code="$(curl --max-time "$CURL_MAX_TIME" -s -o /dev/null -w '%{http_code}' -X POST \
+      -H "Authorization: Bot $token" -H "Content-Type: application/json" \
+      -d "$payload" "$API/channels/$channel/messages")"
+    case "$code" in
+      200|201) ;;
+      *)
+        echo "swarm-watch: alert POST failed for channel $channel (HTTP $code, state=$state)" >&2
+        # On POST failure we do NOT update the state file — next tick
+        # will retry. This is the only place where we want to RE-attempt
+        # the same transition; cap-at-once relies on the post succeeding.
+        return 0
+        ;;
+    esac
+  fi
+  printf '%s' "$state" > "$statefile"
+}
+
 # Pin the heartbeat so it stays reachable via the channel's pin icon as the
 # conversation scrolls. Only called when (re)posting fresh; subsequent edits
 # don't re-pin. Failures are logged, never fatal.
@@ -208,19 +301,31 @@ grep -vE '^[[:space:]]*(#|$)' "$CONF" | while IFS='|' read -r name repo tokvar c
   tn="${activity##*|}"
   case "$a" in ''|*[!0-9]*) a="$SWARM_NO_TRANSCRIPT_AGE" ;; esac  # paranoia
 
+  # Alert-state token. Default ok; bumped by the branches below when the
+  # swarm is in a known-bad state. Held alongside the heartbeat status so
+  # the existing heartbeat-content rendering is left intact and we don't
+  # have to derive two parallel state machines from raw signals.
+  alert_state="ok"
+  alert_msg=""
+
   if [ "$alive" -eq 0 ]; then
     status="⚪ swarm down (no session)"; age="—"
+    alert_state="down"
+    alert_msg="⚪ swarm \`$name\` · DOWN — tmux session gone. Process dead; \`swarm-up.sh up $name\` to restart."
   elif [ "$a" -eq "$SWARM_NO_TRANSCRIPT_AGE" ]; then
     if [ "$alive" -eq 1 ]; then status="🟡 swarm starting (no transcript yet)"; else status="⚪ no active session"; fi
     age="—"
   else
     if [ "$a" -lt 60 ]; then age="${a}s"; else age="$(( a/60 ))m"; fi
-    # Pane content is the PRIMARY working signal. Transcript freshness
-    # disambiguates working-vs-stalled when the pane says mid-turn, and
-    # flavors the just-replied vs been-idle-a-while ready message.
-    pane_working "${PREFIX}-$name" "$TMUX_BIN"; pw=$?
+    # Pane state — the finer-grained pane_state replaces pane_working
+    # here because the alerter needs to distinguish "paused on a known
+    # limit" from "pane in unknown state". pane_working semantics are
+    # preserved via the 0/working and !=0/not-working split below; the
+    # extra cases (paused-limit / unknown / at-prompt) feed the alerter.
+    pane_state "${PREFIX}-$name" "$TMUX_BIN"; ps=$?
+    pane_detail="$SWARM_PANE_STATE_DETAIL"
     fresh=0; [ "$a" -le "$STALE_SECONDS" ] && fresh=1
-    if [ "$pw" -eq 0 ] && [ "$fresh" -eq 1 ]; then
+    if [ "$ps" -eq 0 ] && [ "$fresh" -eq 1 ]; then
       # Pane mid-turn AND transcript fresh — actually producing. If
       # teammates are the writers, surface the count so the heartbeat
       # distinguishes "lead is hot" from "lead in tool call, N teammates
@@ -232,21 +337,53 @@ grep -vE '^[[:space:]]*(#|$)' "$CONF" | while IFS='|' read -r name repo tokvar c
         status="🟢 swarm working"
       fi
       [ "$ENABLE_TYPING" = "1" ] && curl --max-time "$CURL_MAX_TIME" -s -X POST -H "Authorization: Bot $token" "$API/channels/$channel/typing" >/dev/null 2>&1 || true
-    elif [ "$pw" -eq 0 ] && [ "$fresh" -eq 0 ]; then
+    elif [ "$ps" -eq 0 ] && [ "$fresh" -eq 0 ]; then
       # Footer says "esc to interrupt" but no transcript write for
       # STALE_SECONDS+ — turn in flight from the TUI's view but nothing
       # is being produced. Rate-limited, hung tool, or crashed.
       status="🔴 swarm STALLED — turn in flight but no transcript writes (rate-limited, hung tool, or crashed)"
-    else
-      # Pane idle (pw=1) OR unreadable (pw=2) — at the prompt or
-      # uncertain. Both fail-safe to "ready"; never claim working off a
-      # transcript-fresh signal alone (the original false-working-at-idle
-      # bug). The fresh/stale distinction fires one transition at the
-      # STALE_SECONDS boundary, keeping the change-guard quiet otherwise.
+      alert_state="stalled"
+      alert_msg="🔴 swarm \`$name\` · STALLED — turn in flight (\"esc to interrupt\") but no transcript writes for ${age}. Hung tool, rate-limited mid-turn, or crashed. Investigate the tmux pane."
+    elif [ "$ps" -eq 2 ]; then
+      # Paused on a known Claude Code usage/rate limit. Process alive,
+      # just capped. This is the case the CTO can NOT self-report —
+      # no tool calls possible while throttled — so the watcher must.
+      reset_hint="$(parse_limit_reset "$pane_detail")"
+      if [ -n "$reset_hint" ]; then
+        status="🟡 swarm paused on usage limit (resets $reset_hint)"
+        alert_msg="🟡 swarm \`$name\` · PAUSED ON USAGE LIMIT — resets $reset_hint. Not a crash; work will resume at reset."
+      else
+        status="🟡 swarm paused on usage limit"
+        alert_msg="🟡 swarm \`$name\` · PAUSED ON USAGE LIMIT — reset time not parseable; check the tmux pane. Not a crash."
+      fi
+      alert_state="paused-limit"
+    elif [ "$ps" -eq 1 ]; then
+      # Pane at clean prompt ("← for agents"). Idle-at-prompt is a
+      # LEGITIMATE state — the operator hasn't sent a turn in N minutes.
+      # Never alert on this no matter how stale; fail-safe to "ready".
       if [ "$fresh" -eq 1 ]; then
         status="🟢 swarm ready · waiting for input (just replied)"
       else
         status="🟢 swarm ready · waiting for input"
+      fi
+    else
+      # ps=3 (unknown footer) or ps=4 (capture failed) — the pane is
+      # not readable as any known state. While transcript is fresh,
+      # treat as benign (something IS being written, the footer is
+      # just in a sub-UI). If transcript exceeds SILENCE_SECONDS — well
+      # above the heartbeat's 5m STALE — push a SILENT alert. This is
+      # the case that produced DEAD SILENCE overnight: TUI in a state
+      # we don't recognize, nothing being produced, no Claude to
+      # self-report.
+      if [ "$fresh" -eq 1 ]; then
+        status="🟢 swarm ready · waiting for input (just replied)"
+      else
+        status="🟢 swarm ready · waiting for input"
+      fi
+      if [ "$a" -gt "$SILENCE_SECONDS" ]; then
+        if [ "$a" -lt 3600 ]; then silence_age="$(( a/60 ))m"; else silence_age="$(( a/3600 ))h"; fi
+        alert_state="silent"
+        alert_msg="🔴 swarm \`$name\` · SILENT — no recognized pane state, no working signal, no known limit message, transcript stale ${silence_age}. The CTO can't self-report; investigate the tmux pane (\`tmux attach -t ${PREFIX}-$name\`)."
       fi
     fi
   fi
@@ -260,6 +397,11 @@ grep -vE '^[[:space:]]*(#|$)' "$CONF" | while IFS='|' read -r name repo tokvar c
   # rendered output.
   content="$status · $name"
   post_heartbeat "$channel" "$token" "$content"
+  # Active push-alert AFTER the heartbeat update. Order matters only for
+  # operator narrative — they see the heartbeat reflect the new state at
+  # the same tick as the alert. Both flow through the watcher's direct
+  # curl to Discord; neither depends on the swarm/CTO being responsive.
+  post_alert "$channel" "$token" "$alert_state" "$alert_msg"
 done
 
 exit 0
