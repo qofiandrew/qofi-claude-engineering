@@ -1,10 +1,17 @@
-# swarm.conf — one repo per line:  session_name | /path/to/repo | TOKEN_VAR_NAME
+# swarm.conf — one repo per line:  session_name | /path/to/repo | TOKEN_VAR_NAME | CHANNEL_ID | GUILD_ID
 # session_name: short, no spaces (becomes tmux session "swarm-<name>")
 # TOKEN_VAR_NAME: name of the env var in tokens.env holding that repo's bot token
+# CHANNEL_ID: Discord channel id (snowflake) this swarm is bound to. Find it in
+#   Discord with Developer Mode on: right-click the channel → "Copy Channel ID".
+# GUILD_ID: Discord guild (server) snowflake. Find it: right-click the SERVER icon
+#   (left sidebar) → "Copy Server ID". Used with CHANNEL_ID by the iOS widget to
+#   build discord://channels/<guild>/<channel> deep-links per the frozen
+#   swarm-status/v1 contract. Optional during transition (blank → emits null,
+#   widget falls back to opening the app); populate it as soon as you know it.
 #
-# acme     | /Users/you/code/acme        | BOT_ACME
-# beacon   | /Users/you/code/beacon       | BOT_BEACON
-# ledger   | /Users/you/code/ledger       | BOT_LEDGER
+# acme     | /Users/you/code/acme        | BOT_ACME    | 1234567890123456789 | 1111111111111111111
+# beacon   | /Users/you/code/beacon      | BOT_BEACON  | 2345678901234567890 | 1111111111111111111
+# ledger   | /Users/you/code/ledger      | BOT_LEDGER  | 3456789012345678901 | 2222222222222222222
 #
 # Keep this list short to start — one or two repos. A single Max pool won't feed
 # more than ~1–2 teams running concurrently.

@@ -5,11 +5,17 @@
 # swarm-up.sh uses, and posts a per-channel heartbeat for EACH configured swarm,
 # using that swarm's own bot token. ONE launchd job covers all swarms.
 #
-# swarm.conf line (pipe-separated, 4 fields):
-#     name | /path/to/repo | TOKEN_VAR | CHANNEL_ID
+# swarm.conf line (pipe-separated, 5 fields):
+#     name | /path/to/repo | TOKEN_VAR | CHANNEL_ID | GUILD_ID
 # Token resolved from $SWARM_HOME/tokens.env (TOKEN_VAR -> bot token), exactly as
 # swarm-up.sh does. The heartbeat for a swarm is posted by that swarm's own bot,
-# into that swarm's channel.
+# into that swarm's channel. GUILD_ID is the Discord guild (server) snowflake;
+# consumers use channel+guild_id to build `discord://channels/<guild>/<channel>`
+# deep-links. Blank GUILD_ID is tolerated (status emit serializes null per the
+# frozen swarm-status/v1 contract transition window) but consumers will degrade
+# gracefully (no deep-link). The 4-field legacy line shape is no longer
+# emitted by swarm-add but still parsed — channel becomes the last present
+# field and guild_id is treated as blank.
 #
 # Per-swarm heartbeat state (pane content is the PRIMARY working signal;
 # transcript freshness disambiguates working-vs-stalled):
@@ -284,56 +290,30 @@ pin_message() {  # channel token messageid
 STATUS_SWARMS_TMP="$STATE_DIR/status.swarms.tmp"
 : > "$STATUS_SWARMS_TMP"
 
-# Append one swarm's status JSON to the accumulator. needs_attention follows
-# the two-source rule: CTO-raised flag wins (with its reason); otherwise the
-# watcher's own bad-state assessment fires. The widget renders cto and
-# watcher sources differently (different urgencies).
-emit_status() {  # name channel state age_or_empty reset_or_empty
-  local name="$1" channel="$2" state="$3" age="$4" reset="$5"
+# Append one swarm's status JSON to the accumulator. Per-line build delegated
+# to bin/swarm-status-emit.py — a standalone helper so the wire shape can be
+# unit-tested against the frozen swarm-status/v1 schema examples without
+# standing up the whole watcher. Two-source needs_attention rule + compound-
+# reason format live in that script (single source of truth for the emit).
+emit_status() {  # name channel guild_id state age_or_empty reset_or_empty
+  local name="$1" channel="$2" guild_id="$3" state="$4" age="$5" reset="$6"
   local flagfile="$STATE_DIR/attention-$channel.flag"
   local cto_reason=""
   if [ -r "$flagfile" ]; then
     # Trim trailing newline; length-capped on write so we don't re-cap here.
     cto_reason="$(tr -d '\000-\037' < "$flagfile")"
   fi
-  python3 - "$name" "$channel" "$state" "$age" "$reset" "$cto_reason" <<'PY' >> "$STATUS_SWARMS_TMP"
-import json, sys
-name, channel, state, age, reset, cto_reason = sys.argv[1:7]
-out = {
-    "name": name,
-    "channel": channel,
-    "state": state,
-    "last_activity_age_seconds": int(age) if age else None,
-    "limit_reset_hint": reset if reset else None,
-}
-# Two-source needs_attention. CTO-raised wins because it's the authoritative
-# "I need you" signal — the watcher's failure-state assessment is the
-# safety net for when the CTO can't self-report (throttled, crashed).
-if cto_reason:
-    out["needs_attention"] = True
-    out["attention_source"] = "cto"
-    out["attention_reason"] = cto_reason
-elif state in ("stalled", "silent", "down", "paused-limit"):
-    out["needs_attention"] = True
-    out["attention_source"] = "watcher"
-    if state == "paused-limit" and reset:
-        out["attention_reason"] = "paused on usage limit (resets " + reset + ")"
-    else:
-        out["attention_reason"] = state
-else:
-    out["needs_attention"] = False
-    out["attention_source"] = None
-    out["attention_reason"] = None
-# One JSON object per line — the assembler reads line-delimited.
-sys.stdout.write(json.dumps(out) + "\n")
-PY
+  python3 "$(cd "$(dirname "$0")" && pwd)/swarm-status-emit.py" \
+    "$name" "$channel" "$guild_id" "$state" "$age" "$reset" "$cto_reason" \
+    >> "$STATUS_SWARMS_TMP"
 }
 
-grep -vE '^[[:space:]]*(#|$)' "$CONF" | while IFS='|' read -r name repo tokvar channel; do
+grep -vE '^[[:space:]]*(#|$)' "$CONF" | while IFS='|' read -r name repo tokvar channel guild_id; do
   name="$(echo "${name:-}" | xargs)"
   repo="$(echo "${repo:-}" | xargs)"
   tokvar="$(echo "${tokvar:-}" | xargs)"
   channel="$(echo "${channel:-}" | xargs)"
+  guild_id="$(echo "${guild_id:-}" | xargs)"
   [ -z "$name" ] && continue
   [ -z "$channel" ] && { echo "swarm-watch: $name has no CHANNEL_ID (4th field) — skipping" >&2; continue; }
 
@@ -483,7 +463,7 @@ grep -vE '^[[:space:]]*(#|$)' "$CONF" | while IFS='|' read -r name repo tokvar c
   # iOS-widget status fragment. emit_status reads the CTO's attention flag
   # file (if any) and writes one JSON line per swarm into the accumulator.
   # The assembler after the loop wraps the lines and writes status.json.
-  emit_status "$name" "$channel" "$status_state" "$age_secs_for_status" "$limit_reset_for_status"
+  emit_status "$name" "$channel" "$guild_id" "$status_state" "$age_secs_for_status" "$limit_reset_for_status"
 done
 
 # ---------------------------------------------------------------------------
@@ -552,6 +532,7 @@ for sw in s.get("swarms", []):
     parts.append("|".join([
         str(sw.get("name", "")),
         str(sw.get("channel", "")),
+        str(sw.get("guild_id") or ""),
         str(sw.get("state", "")),
         str(sw.get("needs_attention", "")),
         str(sw.get("attention_source") or ""),

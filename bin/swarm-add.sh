@@ -400,11 +400,15 @@ fi
 # 4b) swarm.conf -----------------------------------------------------------
 if [ ! -e "$CONF" ]; then
   cat > "$CONF" <<'EOF'
-# swarm.conf — one repo per line:  session_name | /path/to/repo | TOKEN_VAR_NAME | CHANNEL_ID
+# swarm.conf — one repo per line:  session_name | /path/to/repo | TOKEN_VAR_NAME | CHANNEL_ID | GUILD_ID
 # session_name: short, no spaces (becomes tmux session "swarm-<name>")
 # TOKEN_VAR_NAME: name of the env var in tokens.env holding that repo's bot token
 # CHANNEL_ID: Discord channel id this swarm is bound to (used by swarm-watch.sh
 #   for the per-channel heartbeat). Required even though swarm-up.sh does not use it.
+# GUILD_ID: Discord guild (server) snowflake. Used with CHANNEL_ID by the iOS
+#   widget to build discord://channels/<guild>/<channel> deep-links per the
+#   frozen swarm-status/v1 contract. Optional (blank → emits null, widget
+#   falls back to opening the app); fill it in as soon as you know it.
 #
 # Keep this list short to start — one or two repos. A single Max pool will not feed
 # more than ~1–2 teams running concurrently.
@@ -416,8 +420,12 @@ fi
 if [ "$STATE_CONF_PRESENT" -eq 1 ]; then
   echo "  SKIP swarm.conf append (row for '$NAME' already present)"
 else
-  printf '%s | %s | %s | %s\n' "$NAME" "$REPO" "$TOK_VAR" "$CHANNEL" >> "$CONF"
-  echo "  appended: '$NAME' -> swarm.conf"
+  # 5-field row. GUILD_ID is left blank — swarm-add doesn't yet prompt for it
+  # (a follow-up to this conformance change). The watcher emits null for an
+  # empty 5th column, which the swarm-status/v1 receiver tolerates during the
+  # transition window. Fill in by hand to unlock iOS-widget deep-links.
+  printf '%s | %s | %s | %s | \n' "$NAME" "$REPO" "$TOK_VAR" "$CHANNEL" >> "$CONF"
+  echo "  appended: '$NAME' -> swarm.conf  (GUILD_ID left blank — fill in by hand for deep-links)"
 fi
 
 # 4c) swarm-init (already idempotent via manifest) ------------------------
