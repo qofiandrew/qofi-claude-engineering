@@ -14,10 +14,23 @@
 set -uo pipefail
 cat >/dev/null   # drain stdin payload
 
-ROOT="${CLAUDE_PROJECT_DIR:-$PWD}"
-# Never hard-fail a teammate over a doc nudge if the environment is odd.
-cd "$ROOT" 2>/dev/null || exit 0
-git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0
+# Same worktree-topology fix as test-gate.sh — the teammate's actual
+# changes (which this hook inspects via `git status`) live in the worktree,
+# not the lead's main tree. Trusting $CLAUDE_PROJECT_DIR ran `git status`
+# in the lead's clean tree from every teammate invocation, false-ALLOWING
+# idle even when the teammate had modified source without touching docs.
+# See tests/test-hooks-worktree-resolution.sh.
+#
+# Preserves docs-check's existing fail-OPEN posture: any environment
+# oddity (no git, can't cd) silently exits 0 — this is a nudge, not a
+# hard gate. Both branches keep that behavior.
+if ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+  cd "$ROOT" || exit 0
+else
+  ROOT="${CLAUDE_PROJECT_DIR:-$PWD}"
+  cd "$ROOT" 2>/dev/null || exit 0
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0
+fi
 
 # Uncommitted changes (staged + unstaged), as porcelain paths.
 CHANGED="$(git status --porcelain 2>/dev/null | sed 's/^...//')"

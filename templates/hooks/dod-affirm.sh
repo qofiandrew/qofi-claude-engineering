@@ -29,7 +29,17 @@ set -uo pipefail
 
 EVENT="$(cat 2>/dev/null || true)"
 
-ROOT="${CLAUDE_PROJECT_DIR:-$PWD}"
+# Same worktree-topology fix as test-gate.sh — the teammate's HEAD commit
+# (where the [DoD-*] block should live) is on the worktree-<name> branch
+# in the teammate's worktree, NOT on whatever branch the lead's main tree
+# happens to have checked out. Trusting $CLAUDE_PROJECT_DIR read the lead's
+# HEAD from every teammate invocation, false-BLOCKING the teammate whose
+# own commit had the affirmation. See tests/test-hooks-worktree-resolution.sh.
+if ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+  :
+else
+  ROOT="${CLAUDE_PROJECT_DIR:-$PWD}"
+fi
 
 # Collect candidate text to search in: every string-valued field of the stdin
 # JSON event, joined with newlines. A parse failure (non-JSON stdin or empty

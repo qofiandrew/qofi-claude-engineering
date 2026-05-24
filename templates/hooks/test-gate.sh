@@ -14,8 +14,27 @@ set -uo pipefail
 # Consume the stdin payload (we don't need fields here, but must drain it).
 cat >/dev/null
 
-ROOT="${CLAUDE_PROJECT_DIR:-$PWD}"
-cd "$ROOT" || { echo "test-gate: cannot cd to project root ($ROOT)" >&2; exit 2; }
+# Resolve the work tree this hook is invoked against. In worktree topology
+# (TEAM_LEAD.md §*Pre-spawn provisioning*) the teammate works in
+# .claude/worktrees/<name>/ on its own branch — a first-class git work
+# tree, distinct from the lead's main repo. `git rev-parse --show-toplevel`
+# returns the toplevel of whichever work tree the subprocess is invoked
+# from, so the same call gives the right answer for both lead and teammates.
+#
+# Why not trust $CLAUDE_PROJECT_DIR alone (the original bug): that env var
+# is set once at Claude Code launch (to the lead's project dir) and does
+# not rebind per-teammate. Until this fix, the gate silently ran against
+# the lead's main tree from every teammate invocation — false-PASSING any
+# task whose tests broke only in the teammate's worktree (load-bearing
+# gate that wasn't gating), and false-FAILING tasks whose new tests
+# existed only in the worktree. See tests/test-hooks-worktree-resolution.sh
+# for the regression proof.
+if ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+  cd "$ROOT" || { echo "test-gate: cannot cd to git toplevel ($ROOT)" >&2; exit 2; }
+else
+  ROOT="${CLAUDE_PROJECT_DIR:-$PWD}"
+  cd "$ROOT" || { echo "test-gate: cannot cd to project root ($ROOT)" >&2; exit 2; }
+fi
 
 # Resolve the test command, in priority order:
 #   1) $CLAUDE_TEST_CMD  2) .claude/test-cmd file  3) auto-detect.
