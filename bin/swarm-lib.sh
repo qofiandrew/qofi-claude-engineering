@@ -6,8 +6,13 @@
 # (already required across the swarm scripts; see swarm-add, dod-affirm,
 # permission-gate).
 #
-# Three concerns live here:
+# Four concerns live here:
 #
+#   0. swarm_conf_parse_line()     — parse ONE swarm.conf row into the
+#                                    canonical fields. The single place the
+#                                    column schema/arity is defined, so every
+#                                    reader shares it and a future column can
+#                                    never silently corrupt an existing one.
 #   1. repo_activity()             — shared "is this swarm producing work?"
 #                                    signal for swarm-watch + swarm-typing.
 #   2. manifest_walk / apply       — the single-source-of-truth deployer
@@ -21,6 +26,77 @@
 #                                    settings.json. Additive, dedup-by-
 #                                    command, atomic write. Never clobbers
 #                                    foreign hook entries.
+
+# ---------------------------------------------------------------------------
+# 0) swarm.conf row parsing — ONE definition of the column schema.
+# ---------------------------------------------------------------------------
+#
+# swarm.conf rows are positional, pipe-delimited:
+#
+#     name | repo | tokvar | channel | guild_id
+#
+# The historical bug this section exists to kill: readers did their own
+# `IFS='|' read -r name repo tokvar channel` with a FIXED arity SHORTER than
+# the file's column count. Bash's last `read` variable absorbs every trailing
+# field INCLUDING the delimiter — so once the 5th (guild_id) column landed, a
+# 4-variable reader's `channel` silently became "<channel> | <guild_id>".
+# That broke swarm-attention (channel failed all-digits validation) and
+# swarm-typing (typing URL carried " | <guild>"). Each future column would
+# break the next reader the same way.
+#
+# The fix: parse a row HERE, once, splitting into the full known arity PLUS a
+# trailing catch-all (`_rest`). The last *named* field can therefore never
+# swallow an unknown future column — it lands in `_rest` and is ignored until
+# we name it. To add a column later: add it to the read below and expose a new
+# SWARM_CONF_F_* global. Readers that don't use it need no change and cannot
+# be corrupted by it.
+#
+# Results are returned in globals (bash 3.2 has no namerefs / assoc-array
+# return); a reader copies out only the fields it uses:
+#
+#   SWARM_CONF_F_NAME  SWARM_CONF_F_REPO  SWARM_CONF_F_TOKVAR
+#   SWARM_CONF_F_CHANNEL  SWARM_CONF_F_GUILD
+#
+# swarm_conf_parse_line returns non-zero for a comment/blank line so callers
+# can `swarm_conf_parse_line "$line" || continue`.
+
+SWARM_CONF_F_NAME=""
+SWARM_CONF_F_REPO=""
+SWARM_CONF_F_TOKVAR=""
+SWARM_CONF_F_CHANNEL=""
+SWARM_CONF_F_GUILD=""
+
+# _swarm_trim STRING — strip leading/trailing whitespace (pure bash, no
+# subprocess; safe in the per-row hot loops swarm-typing/swarm-watch run).
+_swarm_trim() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+# swarm_conf_parse_line RAW_LINE
+#   Populate SWARM_CONF_F_* from one raw swarm.conf line. Returns 1 (caller
+#   should `continue`) for blank or comment ('#') lines, 0 otherwise.
+swarm_conf_parse_line() {
+  local _line="$1" _trimmed
+  _trimmed="$(_swarm_trim "$_line")"
+  case "$_trimmed" in
+    ''|'#'*) return 1 ;;
+  esac
+  local _name _repo _tokvar _channel _guild _rest
+  # Full known arity + `_rest` catch-all so a row with MORE columns than the
+  # current schema cannot corrupt the last named field (see header).
+  IFS='|' read -r _name _repo _tokvar _channel _guild _rest <<EOF
+$_line
+EOF
+  SWARM_CONF_F_NAME="$(_swarm_trim "$_name")"
+  SWARM_CONF_F_REPO="$(_swarm_trim "$_repo")"
+  SWARM_CONF_F_TOKVAR="$(_swarm_trim "$_tokvar")"
+  SWARM_CONF_F_CHANNEL="$(_swarm_trim "$_channel")"
+  SWARM_CONF_F_GUILD="$(_swarm_trim "$_guild")"
+  return 0
+}
 
 # ---------------------------------------------------------------------------
 # 1) repo_activity — used by swarm-watch + swarm-typing + swarm-restart.

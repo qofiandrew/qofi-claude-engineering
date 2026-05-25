@@ -78,11 +78,14 @@ fi
 CONF="$SWARM_HOME/swarm.conf"
 [ -f "$CONF" ] || { echo "swarm-attention: $CONF missing — \$SWARM_HOME may be wrong" >&2; exit 1; }
 
+# shellcheck source=swarm-lib.sh
+. "$(cd "$(dirname "$0")" && pwd)/swarm-lib.sh"
+
 channel=""
-while IFS='|' read -r n r t c; do
-  n="$(printf '%s' "${n:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-  [ "$n" = "$name" ] || continue
-  channel="$(printf '%s' "${c:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+while IFS= read -r _line; do
+  swarm_conf_parse_line "$_line" || continue
+  [ "$SWARM_CONF_F_NAME" = "$name" ] || continue
+  channel="$SWARM_CONF_F_CHANNEL"
   break
 done < <(grep -vE '^[[:space:]]*(#|$)' "$CONF")
 

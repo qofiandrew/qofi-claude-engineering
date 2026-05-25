@@ -247,9 +247,10 @@ if [ -n "$POSITIONAL" ] && [ "$is_path" -eq 1 ]; then
 else
   # Either no arg (sync all in conf) or a swarm name filter.
   FILTER="${POSITIONAL:-}"
-  while IFS='|' read -r name repo tokvar channel; do
-    name="$(printf '%s' "${name:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-    repo="$(printf '%s' "${repo:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  while IFS= read -r _line; do
+    swarm_conf_parse_line "$_line" || continue
+    name="$SWARM_CONF_F_NAME"
+    repo="$SWARM_CONF_F_REPO"
     [ -z "$name" ] && continue
     if [ -n "$FILTER" ] && [ "$name" != "$FILTER" ]; then
       continue

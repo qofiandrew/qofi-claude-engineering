@@ -308,12 +308,13 @@ emit_status() {  # name channel guild_id state age_or_empty reset_or_empty
     >> "$STATUS_SWARMS_TMP"
 }
 
-grep -vE '^[[:space:]]*(#|$)' "$CONF" | while IFS='|' read -r name repo tokvar channel guild_id; do
-  name="$(echo "${name:-}" | xargs)"
-  repo="$(echo "${repo:-}" | xargs)"
-  tokvar="$(echo "${tokvar:-}" | xargs)"
-  channel="$(echo "${channel:-}" | xargs)"
-  guild_id="$(echo "${guild_id:-}" | xargs)"
+grep -vE '^[[:space:]]*(#|$)' "$CONF" | while IFS= read -r _line; do
+  swarm_conf_parse_line "$_line" || continue
+  name="$SWARM_CONF_F_NAME"
+  repo="$SWARM_CONF_F_REPO"
+  tokvar="$SWARM_CONF_F_TOKVAR"
+  channel="$SWARM_CONF_F_CHANNEL"
+  guild_id="$SWARM_CONF_F_GUILD"
   [ -z "$name" ] && continue
   [ -z "$channel" ] && { echo "swarm-watch: $name has no CHANNEL_ID (4th field) — skipping" >&2; continue; }
 

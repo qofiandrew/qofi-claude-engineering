@@ -84,10 +84,11 @@ session_alive() {  # name -> 0 alive, 1 absent, 2 tmux unknown
 echo "swarm-typing: starting (sleep=${SLEEP_SECONDS}s, stale=${STALE_SECONDS}s, conf=$CONF)" >&2
 # shellcheck disable=SC1090
 [ -f "$TOKENS" ] && . "$TOKENS"
-while IFS='|' read -r name repo tokvar channel; do
-  name="$(echo "${name:-}" | xargs)"
-  tokvar="$(echo "${tokvar:-}" | xargs)"
-  channel="$(echo "${channel:-}" | xargs)"
+while IFS= read -r _line; do
+  swarm_conf_parse_line "$_line" || continue
+  name="$SWARM_CONF_F_NAME"
+  tokvar="$SWARM_CONF_F_TOKVAR"
+  channel="$SWARM_CONF_F_CHANNEL"
   [ -z "$name" ] && continue
   if [ -z "$channel" ]; then
     echo "swarm-typing: $name has no CHANNEL_ID (4th field) — will skip" >&2
@@ -104,11 +105,12 @@ while :; do
   # shellcheck disable=SC1090
   [ -f "$TOKENS" ] && . "$TOKENS"
 
-  while IFS='|' read -r name repo tokvar channel; do
-    name="$(echo "${name:-}" | xargs)"
-    repo="$(echo "${repo:-}" | xargs)"
-    tokvar="$(echo "${tokvar:-}" | xargs)"
-    channel="$(echo "${channel:-}" | xargs)"
+  while IFS= read -r _line; do
+    swarm_conf_parse_line "$_line" || continue
+    name="$SWARM_CONF_F_NAME"
+    repo="$SWARM_CONF_F_REPO"
+    tokvar="$SWARM_CONF_F_TOKVAR"
+    channel="$SWARM_CONF_F_CHANNEL"
     [ -z "$name" ] && continue
     [ -z "$channel" ] && continue
 

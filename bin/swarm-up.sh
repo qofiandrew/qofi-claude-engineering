@@ -28,6 +28,8 @@ if [ -z "${SWARM_HOME:-}" ] || [ ! -d "${SWARM_HOME:-}/templates" ] || [ ! -f "$
 fi
 CONF="$SWARM_HOME/swarm.conf"
 TOKENS="$SWARM_HOME/tokens.env"
+# shellcheck source=swarm-lib.sh
+. "$(cd "$(dirname "$0")" && pwd)/swarm-lib.sh"   # swarm_conf_parse_line
 PREFIX="swarm"                              # tmux session name prefix (no ':' allowed)
 # Custom-marketplace channel plugin. Research-preview channels require the dev flag
 # (a marketplace you publish yourself is not on Anthropic's approved allowlist), and
@@ -103,13 +105,13 @@ cmd_up() {  # [name]
   # Used by swarm-attach.sh's attach-or-launch path so it doesn't drag
   # unrelated down swarms up as a side effect.
   local filter="${1:-}"
-  while IFS='|' read -r name repo tokvar channel; do
-    name="$(echo "${name:-}"     | xargs)"
+  while IFS= read -r _line; do
+    swarm_conf_parse_line "$_line" || continue
+    name="$SWARM_CONF_F_NAME"
     [ -z "$name" ] && continue
     [ -n "$filter" ] && [ "$name" != "$filter" ] && continue
-    repo="$(echo "${repo:-}"     | xargs)"
-    tokvar="$(echo "${tokvar:-}" | xargs)"
-    channel="$(echo "${channel:-}" | xargs)"   # consumed so it isn't merged into tokvar; used by swarm-watch.sh
+    repo="$SWARM_CONF_F_REPO"
+    tokvar="$SWARM_CONF_F_TOKVAR"
     launch_one "$name" "$repo" "$tokvar" || true
   done < <(grep -vE '^[[:space:]]*(#|$)' "$CONF")
 }
