@@ -220,11 +220,23 @@ EOF
 
 # swarm_manifest_targets_relative — print one target-path per line, for
 # `git add`. Avoids re-parsing the manifest in every caller.
+#
+# Skips operator-owned: sync NEVER writes those, so they must never be
+# auto-staged either — if the operator has dirty edits to their
+# product-vision.md and we're force-syncing past the dirty-tree refusal,
+# we must not sweep their edits into the sync commit. Always includes the
+# .claude/operator-owned-paths list (auto-stamped by manifest_apply itself,
+# outside the manifest walk) so its updates land in the sync commit.
 swarm_manifest_targets_relative() {
   local out=""
-  _collect() { out="${out}${3}
-"; }
+  _collect() {
+    case "$1" in operator-owned) return 0 ;; esac
+    out="${out}${3}
+"
+  }
   manifest_walk _collect >/dev/null || return $?
+  out="${out}.claude/operator-owned-paths
+"
   printf '%s' "$out"
 }
 

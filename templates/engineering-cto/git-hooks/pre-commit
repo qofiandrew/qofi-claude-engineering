@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SWARM-MANAGED pre-commit (managed by swarm-init.sh — do not edit by hand)
 #
-# Two enforcement layers on every `git commit`:
+# Three enforcement layers on every `git commit`:
 #
 #   (1) Docs-touched-per-commit — if any source file is staged, at least one
 #       doc/markdown file must also be staged. Enforces the §Documentation
@@ -20,6 +20,16 @@
 #       shapes (Discord/AWS/GitHub/Slack tokens, PEM private keys, JWTs) and
 #       block the commit if any match. Pattern-only; custom-formatted secrets
 #       won't be caught — that's the §Secrets doctrine's job.
+#
+#   (3) Operator-owned content (teammate worktrees only) — refuse to commit
+#       any path listed in .claude/operator-owned-paths when the commit is
+#       being made from a .claude/worktrees/<name>/ teammate tree. Pairs
+#       with the manifest's `operator-owned` class: the class guarantees
+#       swarm-init/sync never WRITE the file; this layer guarantees a
+#       teammate cannot accidentally STAGE the operator's edits into the
+#       integration branch. Outside teammate worktrees (operator/CTO main
+#       tree) this layer is silent — the human at the keyboard owns
+#       changes to operator content.
 #
 # Bypass: `git commit --no-verify` skips this hook. CLAUDE.md §Verification
 # already forbids that. We can't mechanically prevent it; we can only refuse
@@ -122,5 +132,43 @@ if [ "$FOUND_SECRET" -ne 0 ]; then
   } >&2
   exit 1
 fi
+
+# ---------------------------------------------------------------------------
+# Layer 3: operator-owned content (teammate worktrees only)
+# ---------------------------------------------------------------------------
+#
+# Pairs with the manifest's `operator-owned` class. The class guarantees
+# swarm-init/sync never WRITE these files. This layer guarantees a teammate
+# cannot accidentally STAGE them (during a sweep, a merge resolution, a
+# rename cleanup) and land them in the integration branch.
+#
+# Teammate-worktree detection: `git rev-parse --show-toplevel` ending in
+# `/.claude/worktrees/<name>`. Outside teammate worktrees this layer is
+# silent — the operator at the keyboard owns changes to their own content.
+
+TOPLEVEL="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+case "$TOPLEVEL" in
+  */.claude/worktrees/*)
+    OO_LIST="$TOPLEVEL/.claude/operator-owned-paths"
+    if [ -f "$OO_LIST" ]; then
+      while IFS= read -r oo_path; do
+        [ -z "$oo_path" ] && continue
+        if printf '%s\n' "$STAGED" | grep -qxF "$oo_path"; then
+          {
+            echo "pre-commit: BLOCKED — '$oo_path' is operator-owned content."
+            echo ""
+            echo "Teammate worktrees cannot commit operator-owned files. The"
+            echo "operator authors these in the main tree. If your work needs"
+            echo "a change to this content, escalate to the CTO."
+            echo ""
+            echo "Unstage the file and re-commit:"
+            echo "    git restore --staged '$oo_path'"
+          } >&2
+          exit 1
+        fi
+      done < "$OO_LIST"
+    fi
+    ;;
+esac
 
 exit 0

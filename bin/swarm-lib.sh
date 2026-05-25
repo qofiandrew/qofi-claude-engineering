@@ -389,6 +389,21 @@ if m:
 #
 # All paths the helpers print are RELATIVE to the target repo, for readability.
 
+# swarm_known_types — print the known archetype names, one per line.
+# A type passed to swarm-init --type / swarm-new --type / swarm-add --type
+# is validated against this list; an unknown type is refused so a typo
+# (--type cpoo) cannot silently misclassify the swarm. Update this list
+# when a new archetype is added under templates/.
+swarm_known_types() {
+  printf '%s\n' engineering-cto cpo company-brain
+}
+
+# swarm_type_is_known TYPE — return 0 iff TYPE is in swarm_known_types.
+swarm_type_is_known() {
+  local t="$1"
+  swarm_known_types | grep -qxF "$t"
+}
+
 # swarm_type_of REPO
 #
 # Resolve a repo's archetype from the .claude/swarm-type marker file.
@@ -701,6 +716,49 @@ manifest_apply_seed() {
   _swarm_copy "$src" "$tgt" "seeded"
 }
 
+manifest_apply_operator_owned() {
+  # operator-owned: per-repo content the OPERATOR authors (product vision,
+  # strategy doc, etc.). The CRITICAL difference from `seed`: --force does
+  # NOT re-seed. By design:
+  #   - init/onboard: write if absent (initial placeholder for the operator).
+  #   - sync: NEVER touch — operator-owned, not infra.
+  #   - init --force / SWARM_FORCE_SEED=1: IGNORED. Operator-authored
+  #     content is sacred; --force on init is for re-seeding infra
+  #     templates, never for clobbering operator content. To reset
+  #     operator content, the operator deletes the file by hand and
+  #     re-runs init.
+  #   - check: report MISSING informationally, NOT as drift.
+  #
+  # Paired with the staging protection in templates/<type>/git-hooks/
+  # pre-commit (Layer 3): the auto-stamped .claude/operator-owned-paths
+  # list is read by the hook to refuse teammate-worktree commits of any
+  # listed path, so a teammate cannot sweep an operator edit into the
+  # integration branch.
+  local src_rel="$1" tgt_rel="$2"
+  local src="$SWARM_HOME/templates/$src_rel"
+  local tgt="$SWARM_APPLY_REPO/$tgt_rel"
+  if [ ! -f "$src" ]; then
+    echo "  ERROR: template missing: $src_rel" >&2
+    SWARM_RESULT_FATAL=1
+    return 1
+  fi
+  if [ -e "$tgt" ]; then
+    # NO SWARM_FORCE_SEED branch — that is the whole point.
+    [ "$SWARM_APPLY_MODE" = "check" ] && echo "  OK:        $tgt_rel  (operator-owned)"
+    [ "$SWARM_APPLY_MODE" != "check" ] && [ "${SWARM_QUIET_UNCHANGED:-0}" -ne 1 ] && echo "  skip (operator-owned; exists): $tgt_rel"
+    return 0
+  fi
+  if [ "$SWARM_APPLY_MODE" = "check" ]; then
+    echo "  MISSING:   $tgt_rel  (operator-owned; not drift — sync won't fix; init/onboard would seed)"
+    return 0
+  fi
+  if [ "$SWARM_APPLY_MODE" = "sync" ]; then
+    [ "${SWARM_QUIET_UNCHANGED:-0}" -ne 1 ] && echo "  skip (operator-owned; sync does not seed): $tgt_rel"
+    return 0
+  fi
+  _swarm_copy "$src" "$tgt" "seeded (operator-owned)"
+}
+
 manifest_apply_seed_text() {
   # seed-text is per-repo content (e.g., .claude/test-cmd). Same policy as
   # seed: init/onboard seed if absent; sync never touches; check reports
@@ -974,19 +1032,97 @@ manifest_apply_gitignore() {
 _manifest_apply_one() {
   local behavior="$1" src="$2" tgt="$3"
   case "$behavior" in
-    refresh)   manifest_apply_refresh   "$src" "$tgt" ;;
-    compose)   manifest_apply_compose   "$src" "$tgt" ;;
-    seed)      manifest_apply_seed      "$src" "$tgt" ;;
-    seed-text) manifest_apply_seed_text "$src" "$tgt" ;;
-    settings)  manifest_apply_settings  "$src" "$tgt" ;;
-    git-hook)  manifest_apply_git_hook  "$src" "$tgt" ;;
-    gitignore) manifest_apply_gitignore "$src" "$tgt" ;;
+    refresh)        manifest_apply_refresh        "$src" "$tgt" ;;
+    compose)        manifest_apply_compose        "$src" "$tgt" ;;
+    seed)           manifest_apply_seed           "$src" "$tgt" ;;
+    seed-text)      manifest_apply_seed_text      "$src" "$tgt" ;;
+    operator-owned) manifest_apply_operator_owned "$src" "$tgt" ;;
+    settings)       manifest_apply_settings       "$src" "$tgt" ;;
+    git-hook)       manifest_apply_git_hook       "$src" "$tgt" ;;
+    gitignore)      manifest_apply_gitignore      "$src" "$tgt" ;;
     *)
       echo "  ERROR: unknown manifest behavior '$behavior' for $tgt" >&2
       SWARM_RESULT_FATAL=1
       return 1
       ;;
   esac
+}
+
+# _swarm_stamp_operator_owned_list REPO
+#
+# Maintain .claude/operator-owned-paths — a flat list of every operator-
+# owned target path in the current archetype's manifest, one per line.
+# Read by templates/<type>/git-hooks/pre-commit (Layer 3) to refuse
+# teammate-worktree commits of operator-authored content.
+#
+# Always reflects the current manifest exactly:
+#   - has entries → file written with current set (overwrites stale).
+#   - no entries → file removed (so removing operator-owned entries from
+#     the manifest does not leave a stale block-list behind).
+#   - check mode  → reports drift, no writes.
+#   - dry-run     → reports the would-be change, no writes.
+#
+# Called once at the end of manifest_apply so each init/sync/onboard
+# leaves the list in sync with the manifest.
+_swarm_stamp_operator_owned_list() {
+  local repo="$1"
+  local list_path="$repo/.claude/operator-owned-paths"
+  local list_path_rel=".claude/operator-owned-paths"
+  local tmp
+  tmp="$(mktemp -t swarm-oo.XXXXXX)" || return 1
+  : > "$tmp"
+  _collect_oo() {
+    case "$1" in
+      operator-owned) printf '%s\n' "$3" >> "$tmp" ;;
+    esac
+  }
+  manifest_walk _collect_oo >/dev/null
+
+  local has_entries=0
+  [ -s "$tmp" ] && has_entries=1
+
+  if [ "$SWARM_APPLY_MODE" = "check" ]; then
+    if [ "$has_entries" -eq 1 ]; then
+      if [ ! -f "$list_path" ] || ! cmp -s "$tmp" "$list_path"; then
+        echo "  DRIFT:     $list_path_rel  (operator-owned paths list)"
+        SWARM_RESULT_DRIFT=1
+      fi
+    elif [ -f "$list_path" ]; then
+      echo "  DRIFT:     $list_path_rel  (should be removed; no operator-owned entries)"
+      SWARM_RESULT_DRIFT=1
+    fi
+    rm -f "$tmp"
+    return 0
+  fi
+
+  if [ "$has_entries" -eq 0 ]; then
+    rm -f "$tmp"
+    if [ -f "$list_path" ]; then
+      if [ "${SWARM_DRY_RUN:-0}" -eq 1 ]; then
+        echo "  would remove: $list_path_rel  (no operator-owned entries)"
+      else
+        rm -f "$list_path"
+        echo "  removed: $list_path_rel  (no operator-owned entries)"
+      fi
+      SWARM_RESULT_CHANGED=1
+    fi
+    return 0
+  fi
+
+  if [ -f "$list_path" ] && cmp -s "$tmp" "$list_path"; then
+    rm -f "$tmp"
+    return 0
+  fi
+  if [ "${SWARM_DRY_RUN:-0}" -eq 1 ]; then
+    echo "  would write: $list_path_rel  (operator-owned paths)"
+    SWARM_RESULT_CHANGED=1
+    rm -f "$tmp"
+    return 0
+  fi
+  mkdir -p "$repo/.claude"
+  mv "$tmp" "$list_path"
+  echo "  wrote: $list_path_rel  (operator-owned paths)"
+  SWARM_RESULT_CHANGED=1
 }
 
 # manifest_apply REPO MODE [QUIET_UNCHANGED]
@@ -1014,6 +1150,10 @@ manifest_apply() {
   export SWARM_APPLY_REPO SWARM_APPLY_MODE SWARM_APPLY_TYPE
   manifest_walk _manifest_apply_one || return $?
   [ "$SWARM_RESULT_FATAL" -eq 1 ] && return 1
+  # Auto-stamp the operator-owned paths list (no-op if no entries; deletes
+  # the file if entries were removed from the manifest). MUST run after the
+  # walk so the list reflects the current manifest, never partial state.
+  _swarm_stamp_operator_owned_list "$repo"
   return 0
 }
 

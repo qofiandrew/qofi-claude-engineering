@@ -26,6 +26,10 @@
 #   --skip-walkthrough   skip the Discord-portal walkthrough (phase 1) —
 #                        for re-runs or operators who set up the Discord
 #                        side another way
+#   --type <name>        stamp the swarm as a specific archetype
+#                        (engineering-cto / cpo / company-brain). Default
+#                        is engineering-cto when omitted; no marker is
+#                        written. Threaded to swarm-init.
 #   -h, --help           this help
 #
 # Does NOT launch the swarm. Phase 6 prints the verification commands the
@@ -46,41 +50,66 @@ OWNER_ID="${SWARM_OWNER_DISCORD_ID:-1507069153335443608}"
 ACCESS="$HOME/.claude/channels/discord/access.json"
 PLUGIN_KEY="discord-b2b@qofi-swarm"
 
+SCRIPT_DIR_EARLY="$(cd "$(dirname "$0")" && pwd)"
+# Source the lib for swarm_type_is_known (used to validate --type before
+# any Discord-side side-effects).
+# shellcheck source=swarm-lib.sh
+. "$SCRIPT_DIR_EARLY/swarm-lib.sh"
+
 usage() {
-  sed -n '1,35p' "$0"
+  sed -n '1,39p' "$0"
   exit "${1:-0}"
 }
 
 # ---------------------------------------------------------------------------
 # Argument parsing — positional [name [repo [channel]]] + flags in any order.
+# --type takes a value (next arg, or --type=<val>); use while/shift so the
+# two-arg form works.
 # ---------------------------------------------------------------------------
 NAME=""
 REPO=""
 CHANNEL=""
 ROTATE_TOKEN=0
 SKIP_WALKTHROUGH=0
+TYPE=""
 POS_COUNT=0
 
-for arg in "$@"; do
-  case "$arg" in
-    --rotate-token)     ROTATE_TOKEN=1 ;;
-    --skip-walkthrough) SKIP_WALKTHROUGH=1 ;;
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --rotate-token)     ROTATE_TOKEN=1; shift ;;
+    --skip-walkthrough) SKIP_WALKTHROUGH=1; shift ;;
+    --type)
+      [ $# -ge 2 ] || { echo "swarm-add: --type requires a value" >&2; usage 1; }
+      TYPE="$2"; shift 2 ;;
+    --type=*)
+      TYPE="${1#--type=}"; shift ;;
     -h|--help)          usage 0 ;;
-    --*)                echo "swarm-add: unknown flag: $arg" >&2; usage 1 ;;
+    --*)                echo "swarm-add: unknown flag: $1" >&2; usage 1 ;;
     *)
       POS_COUNT=$((POS_COUNT + 1))
       case "$POS_COUNT" in
-        1) NAME="$arg" ;;
-        2) REPO="$arg" ;;
-        3) CHANNEL="$arg" ;;
-        *) echo "swarm-add: too many positional args (got '$arg' after name/repo/channel)" >&2; usage 1 ;;
+        1) NAME="$1" ;;
+        2) REPO="$1" ;;
+        3) CHANNEL="$1" ;;
+        *) echo "swarm-add: too many positional args (got '$1' after name/repo/channel)" >&2; usage 1 ;;
       esac
-      ;;
+      shift ;;
   esac
 done
 
 [ -z "$NAME" ] && { echo "swarm-add: missing <name>" >&2; usage 1; }
 [ -z "$REPO" ] && { echo "swarm-add: missing <repo_path>" >&2; usage 1; }
+
+if [ -n "$TYPE" ]; then
+  if ! swarm_type_is_known "$TYPE"; then
+    {
+      echo "swarm-add: unknown --type '$TYPE'"
+      echo "  known types:"
+      swarm_known_types | sed 's/^/    /'
+    } >&2
+    exit 1
+  fi
+fi
 
 # Name + repo validation.
 echo "$NAME" | grep -qE '^[a-zA-Z][a-zA-Z0-9_-]*$' || {
@@ -429,11 +458,19 @@ else
 fi
 
 # 4c) swarm-init (already idempotent via manifest) ------------------------
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# SCRIPT_DIR_EARLY was set at the top of the file (sourcing swarm-lib).
+SCRIPT_DIR="$SCRIPT_DIR_EARLY"
 echo ""
 echo "  running swarm-init.sh against $REPO"
 echo "  ----------------------------------------------------------------"
-"$SCRIPT_DIR/swarm-init.sh" "$REPO" | sed 's/^/    /'
+# Thread --type through to swarm-init so .claude/swarm-type gets stamped
+# before manifest_apply resolves the archetype. When TYPE is empty the
+# bare form preserves engineering-cto-default behavior.
+if [ -n "$TYPE" ]; then
+  "$SCRIPT_DIR/swarm-init.sh" "$REPO" --type "$TYPE" | sed 's/^/    /'
+else
+  "$SCRIPT_DIR/swarm-init.sh" "$REPO" | sed 's/^/    /'
+fi
 INIT_RC=${PIPESTATUS[0]}
 echo "  ----------------------------------------------------------------"
 if [ "$INIT_RC" -ne 0 ]; then

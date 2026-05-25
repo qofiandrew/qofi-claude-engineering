@@ -277,6 +277,8 @@ TPL_SHA="$(git -C "$SWARM_HOME" rev-parse --short HEAD 2>/dev/null || echo unkno
 
 # Stage manifest targets (only the ones that actually exist in the worktree
 # now). .git/hooks/pre-commit is outside the worktree; git ignores it.
+# operator-owned IS staged here (in onboard, the seed is part of the initial
+# commit) — distinct from sync, which never stages operator-owned content.
 _stage() {
   local behavior="$1" src="$2" tgt="$3"
   case "$behavior" in git-hook) return 0 ;; esac
@@ -284,6 +286,12 @@ _stage() {
   ( cd "$REPO" && git add -- "$tgt" 2>/dev/null || true )
 }
 manifest_walk _stage
+
+# Stage the auto-stamped operator-owned paths list (lives outside the
+# manifest walk; see _swarm_stamp_operator_owned_list in swarm-lib.sh).
+if [ -e "$REPO/.claude/operator-owned-paths" ]; then
+  ( cd "$REPO" && git add -- ".claude/operator-owned-paths" 2>/dev/null || true )
+fi
 
 STAGED="$(cd "$REPO" && git diff --cached --name-only 2>/dev/null)"
 if [ -z "$STAGED" ]; then

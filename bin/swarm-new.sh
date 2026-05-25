@@ -15,15 +15,19 @@
 # enabledPlugins verify, access.json.
 #
 # Usage:
-#   swarm-new.sh <name> [--public]
+#   swarm-new.sh <name> [--public] [--type <name>]
 #
 #   <name>     short, no spaces, [a-zA-Z][a-zA-Z0-9_-]*  (becomes both
 #              the GitHub repo name and, via swarm-add, the tmux session
 #              "swarm-<name>")
 #
 # Flags:
-#   --public   create the GitHub repo as public (default: private)
-#   -h, --help this help
+#   --public        create the GitHub repo as public (default: private)
+#   --type <name>   stamp the swarm as a specific archetype (engineering-cto /
+#                   cpo / company-brain). Default is engineering-cto when
+#                   omitted; no marker is written (back-compat). Threaded to
+#                   swarm-add → swarm-init for the actual stamp.
+#   -h, --help      this help
 #
 # Greenfield only — creates a brand-new repo at ~/qofirepos/<name>.
 # Wrapping an existing local directory is intentionally out of scope.
@@ -38,35 +42,58 @@ if [ -z "${SWARM_HOME:-}" ] || [ ! -d "${SWARM_HOME:-}/templates" ] || [ ! -f "$
   exit 1
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Source the lib for swarm_type_is_known (used to validate --type before
+# any GitHub side-effects).
+# shellcheck source=swarm-lib.sh
+. "$SCRIPT_DIR/swarm-lib.sh"
+
 usage() {
-  sed -n '1,33p' "$0"
+  sed -n '1,36p' "$0"
   exit "${1:-0}"
 }
 
 # ---------------------------------------------------------------------------
 # Argument parsing — positional [name] + flags in any order.
+# --type takes a value (next arg, or --type=<val>); convert to a
+# while/shift loop so that two-arg form works.
 # ---------------------------------------------------------------------------
 NAME=""
 VISIBILITY="--private"
-POS_COUNT=0
+TYPE=""
 
-for arg in "$@"; do
-  case "$arg" in
-    --public)   VISIBILITY="--public" ;;
-    --private)  VISIBILITY="--private" ;;
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --public)   VISIBILITY="--public"; shift ;;
+    --private)  VISIBILITY="--private"; shift ;;
+    --type)
+      [ $# -ge 2 ] || { echo "swarm-new: --type requires a value" >&2; usage 1; }
+      TYPE="$2"; shift 2 ;;
+    --type=*)
+      TYPE="${1#--type=}"; shift ;;
     -h|--help)  usage 0 ;;
-    --*)        echo "swarm-new: unknown flag: $arg" >&2; usage 1 ;;
+    --*)        echo "swarm-new: unknown flag: $1" >&2; usage 1 ;;
     *)
-      POS_COUNT=$((POS_COUNT + 1))
-      case "$POS_COUNT" in
-        1) NAME="$arg" ;;
-        *) echo "swarm-new: too many positional args (got '$arg' after name)" >&2; usage 1 ;;
-      esac
-      ;;
+      if [ -z "$NAME" ]; then NAME="$1"; else
+        echo "swarm-new: too many positional args (got '$1' after name)" >&2; usage 1
+      fi
+      shift ;;
   esac
 done
 
 [ -z "$NAME" ] && { echo "swarm-new: missing <name>" >&2; usage 1; }
+
+if [ -n "$TYPE" ]; then
+  if ! swarm_type_is_known "$TYPE"; then
+    {
+      echo "swarm-new: unknown --type '$TYPE'"
+      echo "  known types:"
+      swarm_known_types | sed 's/^/    /'
+    } >&2
+    exit 1
+  fi
+fi
 
 # Name validation mirrors swarm-add's rule. Check it BEFORE touching
 # GitHub so we never create a remote we'd then refuse to register.
@@ -80,7 +107,6 @@ SSH_ALIAS="github-company"
 REPO_PARENT="$HOME/qofirepos"
 REPO="$REPO_PARENT/$NAME"
 REMOTE_URL="git@${SSH_ALIAS}:${GH_OWNER}/${NAME}.git"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ---------------------------------------------------------------------------
 # Preflight — all side-effect-free. Any failure here aborts before we
@@ -254,4 +280,11 @@ echo ""
 echo "swarm-new: handing off to swarm-add for the Discord walkthrough"
 echo ""
 
-exec "$SCRIPT_DIR/swarm-add.sh" "$NAME" "$REPO"
+# Thread --type through to swarm-add (which threads it to swarm-init).
+# Build the arg list dynamically so the bare two-arg form still works
+# when --type is absent.
+if [ -n "$TYPE" ]; then
+  exec "$SCRIPT_DIR/swarm-add.sh" "$NAME" "$REPO" --type "$TYPE"
+else
+  exec "$SCRIPT_DIR/swarm-add.sh" "$NAME" "$REPO"
+fi
