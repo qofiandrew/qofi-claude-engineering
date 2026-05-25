@@ -444,14 +444,13 @@ provisioner enforces this). **Gitignored**: yes (`.gitignore:2`);
 `swarm-add` *and* the provisioner exit fatal if it's ever git-tracked
 (`bin/swarm-add.sh:386-394`).
 
-**Vault-agnostic.** Any vault works; **1Password is the lean**. You tell the
-provisioner how to fetch via `SWARM_VAULT_FETCH`, a command template with a
-`{}` placeholder for the secret's name:
-
-```sh
-export SWARM_VAULT_FETCH='op read op://Swarm/{}/credential'   # 1Password CLI
-# export SWARM_VAULT_FETCH='pass show swarm/{}'               # or `pass`, or any CLI
-```
+**1Password is the durable store; you are the manual conduit.** The default
+provisioning flow needs **no `op` CLI**: the script walks this machine's
+`swarm.conf` and shows a **silent prompt** for each token — you copy it from
+1Password and paste it (hidden, never echoed, never in scrollback, never on a
+command line). 1Password stays the source of truth across every machine; you
+just relay each machine's subset by hand. (An optional unattended path for
+power users is noted in §4.2.)
 
 **ANTHROPIC_API_KEY** must never be in `tokens.env` or anywhere the lead's
 shell sources — `swarm-up.sh` explicitly `unset`s it (line 74) so leads run
@@ -471,32 +470,37 @@ For this fleet that means vault items: `BOT_RESERVE_BACKEND_2`,
 `BOT_QOFI_IOS_APP`, plus the shared `SWARM_STATUS_SECRET` /
 `SWARM_STATUS_ENDPOINT` (§4.3).
 
-### 4.2 Provision THIS machine's tokens  `[M auth]` `[S pull]`
+### 4.2 Provision THIS machine's tokens  `[M]`
 
-`bin/swarm-provision-tokens.sh` walks **this machine's** `swarm.conf`,
-fetches each row's `TOKEN_VAR_NAME` from the vault, and writes a
-`chmod 600` `tokens.env` containing exactly that subset. It's atomic (a
-single failed fetch leaves any existing `tokens.env` untouched) and never
-echoes secret values.
+`bin/swarm-provision-tokens.sh` walks **this machine's** `swarm.conf` and, for
+each swarm's `TOKEN_VAR_NAME`, shows a **silent prompt**. Copy that secret
+from 1Password, paste, press Enter — nothing is echoed. It writes a
+`chmod 600` `tokens.env` containing exactly that subset, **atomically** (an
+empty or aborted paste leaves any existing `tokens.env` untouched) and never
+echoes a value.
 
 ```sh
-# authenticate to your vault first (interactive), e.g. for 1Password:
-eval "$(op signin)"
-export SWARM_VAULT_FETCH='op read op://Swarm/{}/credential'
-
-"$SWARM_HOME/bin/swarm-provision-tokens.sh" --status   # --status also pulls §4.3
-# preview without fetching/writing:
+"$SWARM_HOME/bin/swarm-provision-tokens.sh" --status   # prompts for each bot
+                                                       # token + the shared §4.3 secret
+# preview which vars it will ask for, without prompting or writing:
 "$SWARM_HOME/bin/swarm-provision-tokens.sh" --dry-run
 ```
 
-The subset is driven by `swarm.conf`, so a token only lands here if a swarm
+The subset is driven by `swarm.conf`, so a token is only requested if a swarm
 row references it — the stale `BOT_TEST_ERPO` from the old machine simply
-**doesn't get provisioned** (no row, no token). Verify:
+**isn't prompted for** (no row, no token). Verify:
 
 ```sh
 ls -l "$SWARM_HOME/tokens.env"                          # -rw------- (600)
 git -C "$SWARM_HOME" status --short tokens.env          # MUST print nothing (gitignored)
 ```
+
+> **Optional — unattended automation (power user).** Set `SWARM_VAULT_FETCH`
+> to a `{}`-templated fetch command and the script fetches non-interactively
+> instead of prompting — e.g. with the 1Password CLI:
+> `export SWARM_VAULT_FETCH='op read op://Swarm/{}/credential'`. Unset (the
+> default), you get the manual paste flow above. Either way the same
+> safeguards apply: `chmod 600`, atomic, git-tracked refusal, no value echoed.
 
 ### 4.3 iOS-widget status feed — `SWARM_STATUS_SECRET` / `SWARM_STATUS_ENDPOINT`  `[M]`
 
@@ -511,9 +515,9 @@ export SWARM_STATUS_SECRET="..."
 
 These are **shared, not per-swarm**: the *same* secret goes on every machine
 that posts the feed, and it must **match what the ingest endpoint expects**.
-So it's not re-mintable per machine — store it in the vault and let
-`--status` pull it (above), and when you rotate it, rotate it on **both**
-the vault/machines and the server together. Both required: endpoint without
+So it's not re-mintable per machine — keep it in 1Password and provision it
+with `--status` (above), which prompts you to paste it, and when you rotate
+it, rotate it on **both** the machines and the server together. Both required: endpoint without
 secret allows spoofed POSTs; secret without endpoint has nowhere to send. If
 either is unset, the local `status.json` is still written but no POST is made.
 
