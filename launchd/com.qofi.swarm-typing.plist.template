@@ -1,4 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- TEMPLATE — do NOT load this file directly and do NOT commit a rendered copy.
+     launchd does not expand $VARS or ~ in plist paths, so the absolute paths
+     below are filled in PER MACHINE by bin/swarm-launchd-install.sh, which
+     substitutes three placeholders into the path fields below:
+        SWARM_HOME -> $SWARM_HOME          (this repo's path on this host)
+        HOME       -> $HOME                (this user's home)
+        TMUX_BIN   -> $(command -v tmux)   (/opt/homebrew on Apple Silicon,
+                                            /usr/local on Intel)
+     and writes the result to ~/Library/LaunchAgents/com.qofi.swarm-typing.plist.
+     This keeps the repo username/host-agnostic — every mini renders its own. -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -11,7 +21,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>/Users/aschettino/qofirepos/qofi-claude-engineering/bin/swarm-typing.sh</string>
+    <string>@@SWARM_HOME@@/bin/swarm-typing.sh</string>
   </array>
 
   <!-- Start at load, run forever, relaunch on exit. KeepAlive cannot detect
@@ -28,24 +38,25 @@
   <integer>10</integer>
 
   <key>StandardOutPath</key>
-  <string>/Users/aschettino/.config/swarm/typing.log</string>
+  <string>@@HOME@@/.config/swarm/typing.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/aschettino/.config/swarm/typing.err</string>
+  <string>@@HOME@@/.config/swarm/typing.err</string>
 
   <!-- Same env shape as swarm-watch's plist (swarm.conf + tokens.env live in
        SWARM_HOME). Bot tokens are NOT here — they live in tokens.env. -->
   <key>EnvironmentVariables</key>
   <dict>
     <key>SWARM_HOME</key>
-    <string>/Users/aschettino/qofirepos/qofi-claude-engineering</string>
+    <string>@@SWARM_HOME@@</string>
     <key>CLAUDE_PROJECTS_DIR</key>
-    <string>/Users/aschettino/.claude/projects</string>
+    <string>@@HOME@@/.claude/projects</string>
     <key>SWARM_STALE_SECONDS</key>
     <string>300</string>
-    <!-- launchd has a minimal PATH; give tmux's absolute path explicitly.
-         Apple Silicon Homebrew is /opt/homebrew/bin/tmux; Intel is /usr/local/bin/tmux. -->
+    <!-- launchd has a minimal PATH; give tmux's absolute path explicitly. The
+         installer fills this from `command -v tmux` (Apple Silicon
+         /opt/homebrew/bin/tmux; Intel /usr/local/bin/tmux). -->
     <key>SWARM_TMUX_BIN</key>
-    <string>/opt/homebrew/bin/tmux</string>
+    <string>@@TMUX_BIN@@</string>
   </dict>
 </dict>
 </plist>

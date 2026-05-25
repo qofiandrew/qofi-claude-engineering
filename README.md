@@ -148,10 +148,10 @@ For a swarm named `foo`, sourcing the aliases file gives:
 
 | Process | Cadence | Does |
 | --- | --- | --- |
-| `bin/swarm-watch.sh` (via `launchd/com.qofi.swarm-watch.plist`) | one-shot, `StartInterval=90s` | Reads `swarm.conf`, posts a per-channel heartbeat for each swarm with one of five statuses: ⚪ down · 🟡 starting · 🟢 working · 🟢 ready · waiting for input · 🔴 STALLED. Pins the message on first post; edits in place after. Uses each swarm's own bot token. |
-| `bin/swarm-typing.sh` (via `launchd/com.qofi.swarm-typing.plist`) | persistent, `KeepAlive=true`, internal loop ~8s | Keeps a Discord typing bubble visible for each swarm that is currently WORKING (matches the watcher's 🟢 working predicate). `curl --max-time 5` on every call so a stuck Discord request can't wedge the loop. |
+| `bin/swarm-watch.sh` (via `launchd/com.qofi.swarm-watch.plist.template`) | one-shot, `StartInterval=90s` | Reads `swarm.conf`, posts a per-channel heartbeat for each swarm with one of five statuses: ⚪ down · 🟡 starting · 🟢 working · 🟢 ready · waiting for input · 🔴 STALLED. Pins the message on first post; edits in place after. Uses each swarm's own bot token. |
+| `bin/swarm-typing.sh` (via `launchd/com.qofi.swarm-typing.plist.template`) | persistent, `KeepAlive=true`, internal loop ~8s | Keeps a Discord typing bubble visible for each swarm that is currently WORKING (matches the watcher's 🟢 working predicate). `curl --max-time 5` on every call so a stuck Discord request can't wedge the loop. |
 
-Install the launchd jobs with `launchctl bootstrap gui/$(id -u) launchd/com.qofi.*.plist` (or `launchctl load -w` on older macOS). Logs land in `~/.config/swarm/{watch,typing}.{log,err}`.
+Install the launchd jobs with `bin/swarm-launchd-install.sh` — it renders the committed `launchd/*.plist.template` files (substituting `$SWARM_HOME`, `$HOME`, and the tmux path) into `~/Library/LaunchAgents/` and bootstraps them. Re-run it after editing a template or moving `$SWARM_HOME`. Logs land in `~/.config/swarm/{watch,typing}.{log,err}`.
 
 ## 4. Standing up a swarm
 

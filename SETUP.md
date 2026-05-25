@@ -179,10 +179,11 @@ for JSON), GNU coreutils, brew bash. **`node`/`npm` are NOT swarm-system
 dependencies** — bun is the bridge runtime. (Node is only relevant
 per-product; see §1.5.)
 
-> **Apple Silicon vs Intel.** All paths in `launchd/*.plist` and the
-> existing repo assume Apple Silicon (`/opt/homebrew/bin/tmux`). On
-> Intel that's `/usr/local/bin/tmux` — you'll edit the two plists in §6
-> before loading them. Verify with `which tmux`.
+> **Apple Silicon vs Intel.** The default Homebrew prefix is
+> `/opt/homebrew` on Apple Silicon, `/usr/local` on Intel. You don't hand-
+> edit anything for this: the launchd installer (§6) fills the tmux path
+> from `command -v tmux` at install time, so either architecture just
+> works. Verify your tmux with `which tmux`.
 
 ### Install + preflight  `[S]`
 
@@ -427,52 +428,77 @@ SETUP]`
 
 ---
 
-## 4. Secrets — `tokens.env`
+## 4. Secrets — `tokens.env` from a vault
+
+**The model.** Bot tokens live in a **secrets vault** — the durable source
+of truth, provisionable to any number of machines. `tokens.env` is a
+**per-machine, least-privilege derivative**: it holds exactly the tokens
+for the swarms *this* machine runs, and nothing else. You don't hand-author
+it and you don't transfer it between Macs — you **regenerate it from the
+vault** on each machine. That makes `tokens.env` disposable; anything that
+must survive a machine belongs in the vault, not here.
 
 **Location**: `$SWARM_HOME/tokens.env`. **Format**: one `export
-BOT_<NAME>="..."` line per swarm. **Permissions**: `chmod 600`.
-**Gitignored**: yes, verified in `.gitignore:2`. `swarm-add` exits
-fatal if you ever managed to add this file to git tracking (see
-`bin/swarm-add.sh:386-394`).
+BOT_<NAME>="..."` line per swarm. **Permissions**: `chmod 600` (the
+provisioner enforces this). **Gitignored**: yes (`.gitignore:2`);
+`swarm-add` *and* the provisioner exit fatal if it's ever git-tracked
+(`bin/swarm-add.sh:386-394`).
 
-For a **brand-new** swarm you do not create this file by hand —
-`swarm-add.sh` Phase 3 captures each bot token via a **silent prompt**
-(no terminal echo, no scrollback, no command-line argument). Never paste
-a bot token onto a command line or into chat — once it shows in
-scrollback or history, treat it as leaked and rotate.
+**Vault-agnostic.** Any vault works; **1Password is the lean**. You tell the
+provisioner how to fetch via `SWARM_VAULT_FETCH`, a command template with a
+`{}` placeholder for the secret's name:
 
-**ANTHROPIC_API_KEY** must not live in `tokens.env` or anywhere the
-lead's shell sources — `swarm-up.sh` explicitly `unset`s it (line 74)
-so leads run on your **Max** pool, not metered API. The example file
-`tokens.env.example` includes this warning.
+```sh
+export SWARM_VAULT_FETCH='op read op://Swarm/{}/credential'   # 1Password CLI
+# export SWARM_VAULT_FETCH='pass show swarm/{}'               # or `pass`, or any CLI
+```
 
-### 4.1 Migrating existing secrets to the new Mac  `[M]`  `[VERIFY ON SETUP]`
+**ANTHROPIC_API_KEY** must never be in `tokens.env` or anywhere the lead's
+shell sources — `swarm-up.sh` explicitly `unset`s it (line 74) so leads run
+on your **Max** pool, not metered API.
 
-On a fresh machine you're re-standing-up **existing** swarms
-(`BOT_RESERVE_BACKEND_2`, `BOT_QOFI_IOS_APP`). Get their tokens onto the
-new Mac by **one** of these — never via the repo, chat, email, or
-terminal scrollback:
+### 4.1 Store each bot token in the vault (once per bot)  `[M]`
 
-- **Option A — re-mint (rotates; cleanest if decommissioning the old Mac).**
-  On the new Mac run `swarm-add <name> <repo> --skip-walkthrough` per
-  swarm; in the Discord Developer Portal hit **Reset Token** for each
-  bot and paste the new value into `swarm-add`'s silent prompt.
-  *Pro:* no secret ever leaves a device; old tokens are invalidated.
-  *Con:* resetting a token **immediately kills that bot on the old Mac** —
-  only do this when you're cutting over for good.
+A token first **enters** the system through `swarm-add.sh` Phase 3's
+**silent prompt** (no echo, no scrollback, no command-line arg) when you
+mint a brand-new bot. Immediately also **save that token to the vault**
+under the name `BOT_<NAME>` (matching the `TOKEN_VAR_NAME` column in
+`swarm.conf`). The vault is the durable backing store; `swarm-add` is just
+the first entry point. Never paste a token into chat or a command line —
+once it's in scrollback or history, treat it as leaked and rotate.
 
-- **Option B — secure direct transfer (keeps both Macs working).**
-  **AirDrop** `tokens.env` Mac→Mac (peer-to-peer, no cloud), or move it
-  via a password manager / `scp` over SSH. Then on the new Mac:
-  ```sh
-  chmod 600 "$SWARM_HOME/tokens.env"
-  git -C "$SWARM_HOME" status --short tokens.env   # MUST print nothing (gitignored)
-  ```
+For this fleet that means vault items: `BOT_RESERVE_BACKEND_2`,
+`BOT_QOFI_IOS_APP`, plus the shared `SWARM_STATUS_SECRET` /
+`SWARM_STATUS_ENDPOINT` (§4.3).
 
-While migrating, **prune the stale `BOT_TEST_ERPO`** line — it's a
-leftover test bot, not a live swarm.
+### 4.2 Provision THIS machine's tokens  `[M auth]` `[S pull]`
 
-### 4.2 iOS-widget status feed — `SWARM_STATUS_SECRET` / `SWARM_STATUS_ENDPOINT`  `[M]`
+`bin/swarm-provision-tokens.sh` walks **this machine's** `swarm.conf`,
+fetches each row's `TOKEN_VAR_NAME` from the vault, and writes a
+`chmod 600` `tokens.env` containing exactly that subset. It's atomic (a
+single failed fetch leaves any existing `tokens.env` untouched) and never
+echoes secret values.
+
+```sh
+# authenticate to your vault first (interactive), e.g. for 1Password:
+eval "$(op signin)"
+export SWARM_VAULT_FETCH='op read op://Swarm/{}/credential'
+
+"$SWARM_HOME/bin/swarm-provision-tokens.sh" --status   # --status also pulls §4.3
+# preview without fetching/writing:
+"$SWARM_HOME/bin/swarm-provision-tokens.sh" --dry-run
+```
+
+The subset is driven by `swarm.conf`, so a token only lands here if a swarm
+row references it — the stale `BOT_TEST_ERPO` from the old machine simply
+**doesn't get provisioned** (no row, no token). Verify:
+
+```sh
+ls -l "$SWARM_HOME/tokens.env"                          # -rw------- (600)
+git -C "$SWARM_HOME" status --short tokens.env          # MUST print nothing (gitignored)
+```
+
+### 4.3 iOS-widget status feed — `SWARM_STATUS_SECRET` / `SWARM_STATUS_ENDPOINT`  `[M]`
 
 `qofi-ios-app`'s status widget is fed by `swarm-watch.sh`, which POSTs
 `$STATE_DIR/status.json` to an ingest endpoint when **both** of these are
@@ -483,14 +509,36 @@ export SWARM_STATUS_ENDPOINT="https://swarm-status.up.railway.app/ingest"
 export SWARM_STATUS_SECRET="..."
 ```
 
-Both required: endpoint-without-secret allows spoofed POSTs;
-secret-without-endpoint has nowhere to send. If either is unset, the local
-`status.json` is still written but no network call is made.
+These are **shared, not per-swarm**: the *same* secret goes on every machine
+that posts the feed, and it must **match what the ingest endpoint expects**.
+So it's not re-mintable per machine — store it in the vault and let
+`--status` pull it (above), and when you rotate it, rotate it on **both**
+the vault/machines and the server together. Both required: endpoint without
+secret allows spoofed POSTs; secret without endpoint has nowhere to send. If
+either is unset, the local `status.json` is still written but no POST is made.
 
-**`SWARM_STATUS_SECRET` cannot be re-minted unilaterally** — it must match
-what the ingest endpoint expects. **Transfer it** (Option B above), or
-rotate it on **both** the Mac and the server together. Treat it as
-bot-token-tier: `chmod 600`, never on a command line, never in chat.
+### 4.4 Sharding across multiple minis  `[design — read before n=2]`
+
+> **Today (n=1): one mini runs ALL swarms.** It holds every token, every
+> `swarm.conf` row matches a local token, and there are **zero
+> skip-warnings**. The shared committed `swarm.conf` + "tokens are the
+> boundary" model is **trivially correct at n=1** — nothing to build this
+> afternoon.
+>
+> **At n≥2 this needs revisiting — a known PRE-`n=2` DESIGN TASK, not built
+> now.** When swarms are split across minis, the current setup leans on an
+> *implicit* boundary: a machine acts on a `swarm.conf` row only if it
+> happens to hold that row's token (`swarm-watch.sh:325` skips un-tokened
+> rows). That has two problems at scale: (a) every mini's `watch.err` fills
+> with skip-warnings for the swarms it *doesn't* run, and (b) there's no
+> **explicit, reviewable record of the shard layout** — which mini owns
+> which swarms. Before the second mini lands, design an **explicit
+> per-machine swarm-assignment mechanism** (e.g. a per-host `swarm.conf`, or
+> a host→swarms map the watcher/provisioner both read) so assignment is
+> declared, not inferred from "whichever tokens happen to be here." The
+> vault + per-machine `tokens.env` subset (§4.2) is already the right
+> secrets primitive for that future — it's only the *assignment record*
+> that's missing.
 
 ### How to get a Discord bot token  `[VERIFY ON SETUP]`
 
@@ -549,62 +597,36 @@ They share `$SWARM_HOME/swarm.conf` and post per-channel heartbeats
 using each swarm's own bot token from `tokens.env`. They do **not**
 depend on a logged-in shell — they run from system boot.
 
-### 6.1 Edit the plists — they hard-code paths  `[M→S]`
+### 6.1 Generate + install the agents  `[S]`
 
-launchd doesn't read your shell profile, so the plists use **absolute
-paths**. Critically, **both plists hard-code `/Users/aschettino` in 6+
-places each** — the script path, `SWARM_HOME`, `CLAUDE_PROJECTS_DIR`,
-`SWARM_STATE_DIR`, and both log paths — plus `SWARM_TMUX_BIN`.
-
-> **Simplest option: name the mini's macOS account `aschettino`.** If the
-> new Mac's username is `aschettino`, every hard-coded path resolves
-> as-shipped and you edit **nothing** here except (on Intel) the tmux
-> path. Worth deciding deliberately at OS-install time — it makes this
-> whole step a no-op.
-
-If the username **differs**, substitute it in both plists before
-symlinking:
+launchd does **not** expand `$VARS` or `~` in plist path strings — every
+path must be an absolute literal. So the repo commits the agents as
+**templates** (`launchd/*.plist.template`) with `@@SWARM_HOME@@` /
+`@@HOME@@` / `@@TMUX_BIN@@` placeholders, and `bin/swarm-launchd-install.sh`
+renders them **per machine** at install time. The repo carries **zero**
+hardcoded `/Users/<name>` paths — username- and host-agnostic by
+construction, so every mini in the fleet just renders its own.
 
 ```sh
-sed -i '' "s#/Users/aschettino#$HOME#g" "$SWARM_HOME"/launchd/*.plist
+"$SWARM_HOME/bin/swarm-launchd-install.sh"
 ```
 
-Then confirm the remaining values:
+That one command:
+- substitutes `$SWARM_HOME`, `$HOME`, and `$(command -v tmux)` into both
+  templates (so **Apple Silicon vs Intel tmux is automatic** — no manual
+  path edit),
+- writes real plists to `~/Library/LaunchAgents/com.qofi.*.plist`,
+- creates `~/.config/swarm` for the logs,
+- validates each rendered plist (`plutil -lint`) and refuses to load a
+  malformed one,
+- `bootout`s any previous copy and `bootstrap`s the fresh one (falling back
+  to `launchctl load -w` on older macOS).
 
-```sh
-grep -nE 'SWARM_HOME|CLAUDE_PROJECTS_DIR|SWARM_TMUX_BIN|StandardOut|StandardError|swarm-(watch|typing).sh' \
-  "$SWARM_HOME"/launchd/*.plist
-```
+It's idempotent — **re-run it** after editing a template or moving
+`$SWARM_HOME`, and it re-renders + reloads. No symlinks, no hand-editing,
+no username decision.
 
-- `SWARM_TMUX_BIN` must match `which tmux` — `/opt/homebrew/bin/tmux` on
-  Apple Silicon, `/usr/local/bin/tmux` on Intel. (The `sed` above only
-  fixes the username, not the Homebrew prefix; on Intel, change the tmux
-  path by hand.)
-
-### 6.2 Make the log/state dir  `[S]`
-
-```sh
-mkdir -p ~/.config/swarm ~/Library/LaunchAgents
-```
-
-### 6.3 Symlink the plists into `~/Library/LaunchAgents/`  `[S]`
-
-```sh
-ln -sf "$SWARM_HOME/launchd/com.qofi.swarm-watch.plist"  ~/Library/LaunchAgents/
-ln -sf "$SWARM_HOME/launchd/com.qofi.swarm-typing.plist" ~/Library/LaunchAgents/
-```
-
-### 6.4 Load  `[S]`
-
-```sh
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.qofi.swarm-watch.plist
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.qofi.swarm-typing.plist
-```
-
-(On older macOS that errors on `bootstrap`, fall back to
-`launchctl load -w <plist>`.)
-
-**Verify**:
+### 6.2 Verify  `[S]`
 
 ```sh
 launchctl list | grep com.qofi
@@ -738,9 +760,11 @@ when something is wrong.
   Discord but the bridge MCP never spawns; every Discord tool call
   fails silently. `swarm-add` Phase 5 is the canonical detect-and-fix.
   See `bin/swarm-add.sh:463-548`.
-- **Plist username/path drift.** The plists hard-code `/Users/aschettino`
-  and `/opt/homebrew/bin/tmux`. Different username → `sed` substitution
-  in §6.1 (or name the account `aschettino`). Intel → fix the tmux path.
+- **launchd plists are generated, not committed.** The repo ships
+  `launchd/*.plist.template`; `bin/swarm-launchd-install.sh` renders the
+  real plists per machine (§6.1). If you edit a template or move
+  `$SWARM_HOME`, **re-run the installer** to re-render + reload. Never
+  hand-edit or commit a rendered `~/Library/LaunchAgents/com.qofi.*.plist`.
 - **Stale-shell aliases.** Per-swarm aliases are generated at
   source-time from `swarm.conf`. After `swarm-add`, open a new terminal
   or `source ~/.zshrc` to pick up the new alias.
