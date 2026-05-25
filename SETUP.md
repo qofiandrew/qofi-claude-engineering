@@ -32,6 +32,51 @@ Marker conventions:
 
 ---
 
+## 0.1. STOP — two "think you're done when you're not" traps
+
+These were the **#1 and #2 time-sinks on this mini's first standup**.
+Both produce a swarm that looks healthy in Discord and does nothing. Read
+them now; they reframe what "done" means in §8 and §9.
+
+### Trap A — `swarm-up` ≠ `swarm-add`
+
+They are NOT interchangeable. `swarm-up` **launches** (spins up tmux,
+starts claude, brings the bot online). `swarm-add` **configures** (stamps
+doctrine into the repo, appends the channel's group to `access.json`,
+sets `enabledPlugins["discord-b2b@qofi-swarm"]=true` in the repo's
+`.claude/settings.json`). A swarm that's been `up`-ed but never `add`-ed
+shows the bot **online** in Discord and **ignores every message** —
+because the bridge MCP never spawns (Trap C / §3.4) and the ACL has no
+group for the channel (§3.5). This was the single biggest time-sink
+today: three silent half-launches before the gates in `swarm-up.sh`
+existed. **Per swarm, run `swarm-add` once even if `swarm-up` already
+brought it online.** (§8 enforces this; the new `swarm-up` preflight
+gates §0.1.4 below now hard-refuse without it.)
+
+### Trap B — `requireMention: true` (silence ≠ broken)
+
+The default bridge ACL sets `requireMention: true` on every per-channel
+group (`bin/swarm-add.sh:436-461` Phase 4d). The bot will appear **online**
+and **ignore every message** in the channel until you **@-mention it
+directly**. This is correct behavior, not a failure mode — but it looks
+identical to "the bot is broken" on first standup. If you typed in the
+channel and nothing happened, @-mention the bot first; only THEN start
+debugging. Flip the flag in `~/.claude/channels/discord/access.json`
+under `groups.<channel-id>.requireMention` if you want passive listening.
+
+### Trap C — preflight gates in `swarm-up`
+
+`swarm-up.sh launch_one()` now hard-refuses (exit 1) before launching if
+the swarm isn't fully configured: missing `enabledPlugins`, missing
+`access.json` group for the channel, or missing doctrine
+(`CLAUDE.md`/`ESCALATION.md`/`TEAM_LEAD.md`). The remediation it prints
+is always the same: `bin/swarm-add.sh <name> <repo> --skip-walkthrough`.
+The "I know what I'm doing" bypass is `SWARM_UP_SKIP_SANITY=1`. These
+gates exist specifically to turn today's silent half-launches into loud
+refusals.
+
+---
+
 ## 0.5. GitHub identity & toolchain from zero  ← do this FIRST on bare metal
 
 A fresh Mac mini has no Xcode tools, no Homebrew, no git identity, no
@@ -303,6 +348,27 @@ nothing works" on a fresh machine. The `swarm-add.sh` Phase 5 check
 exists specifically because of one botched standup (`reserve-backend-2`)
 where this was wrong. Walk it carefully.
 
+### 3.0 STOP — do §3.2 + §3.3 BEFORE §8
+
+`/plugin marketplace add` (§3.2) and `/plugin install discord-b2b@qofi-swarm`
+(§3.3) are run **inside a `claude` session** — not in the terminal. In
+a fast standup it's easy to scroll past, run the §8 swarm-add, and
+launch a swarm whose lead never has the bridge plugin available. The
+bot will show **online** in Discord and every Discord tool call from
+the lead will fail silently — exactly the failure mode of §3.4. There
+is no second chance: once a swarm is `swarm-up`-ed without the plugin
+installed for the user, the only fix is to install the plugin from
+inside any claude session and then `swarm-restart` the swarm.
+
+**Confirm the plugin is installed before reaching §8.** One-liner:
+
+```sh
+python3 -c 'import json,os;p=os.path.expanduser("~/.claude/plugins/installed_plugins.json");print("OK" if "discord-b2b@qofi-swarm" in json.load(open(p)).get("plugins",{}) else "MISSING — do §3.3 first")' 2>/dev/null || echo "MISSING — do §3.2 + §3.3 first"
+```
+
+If that prints anything other than `OK`, **stop and complete §3.2 +
+§3.3 before going further**.
+
 ### 3.1 `~/.claude` layout (created by Claude Code on first login)
 
 After your first `claude` login, Claude Code creates this structure:
@@ -420,6 +486,17 @@ machine, holds Discord IDs).
 (`bin/swarm-add.sh:436-461`) creates it on first standup with sensible
 defaults (`dmPolicy: "pairing"`, your owner ID in `allowFrom`), and
 appends a per-channel group entry on every subsequent `swarm-add`.
+
+> **`requireMention: true` — silent by default, not broken.** Each
+> per-channel group is created with `requireMention: true`. The bot
+> shows **online** in Discord and **ignores every message in the
+> channel** until you **@-mention it directly** — and that silence
+> looks identical to "the bot is broken." It's working correctly. If
+> you want passive listening, edit the group entry in
+> `~/.claude/channels/discord/access.json` and set
+> `requireMention: false`; the bridge re-reads the file at message
+> dispatch time, no restart needed. Today this confused us twice on
+> the qofi-ios-app swarm before we remembered to @-mention.
 
 You will need **your Discord user ID** when `swarm-add` prompts for
 `OWNER_ID`: in Discord, User Settings → Advanced → enable Developer
@@ -677,6 +754,18 @@ have its alias.
 
 ## 8. Your first swarm  `[M]`
 
+> **`swarm-add` is NON-OPTIONAL per swarm — even if `swarm-up` already
+> launched a session for it.** `swarm-up.sh launch_one()` only spins up
+> tmux + claude + the bot; **only `swarm-add`** does Phase 4d
+> (`access.json` group), Phase 4c (doctrine stamp), and Phase 5
+> (`enabledPlugins["discord-b2b@qofi-swarm"]=true` in the repo's
+> `.claude/settings.json`). A swarm that's been `up`-ed but never
+> `add`-ed shows the bot online and ignores every message. The
+> preflight gates in `swarm-up.sh` (§0.1.4) now hard-refuse this case
+> with the exact remediation: `bin/swarm-add.sh <name> <repo>
+> --skip-walkthrough`. Run it once per swarm, the first time, no matter
+> which entry point initially created the session.
+
 Two entry points. Pick by what the target repo already has — the
 README §4 covers the choice in depth; this is the minimum to land your
 first swarm.
@@ -806,6 +895,17 @@ when something is wrong.
   row whose `TOKEN_VAR_NAME` doesn't resolve to anything in
   `tokens.env` is skipped with a warning to `~/.config/swarm/watch.err`.
   Check there if a swarm's heartbeat never appears.
+- **Branch reality on a fresh-machine clone (multi-branch swarms).**
+  A product repo's live work may not be on `main` — `qofi-ios-app` runs
+  on `dev`, and on a fresh clone `origin/main` may not exist at all.
+  If you `swarm-onboard` (or `swarm-add`) on the freshly-cloned default
+  branch without checking, you can stamp doctrine onto a phantom empty
+  `main` that nobody else uses. After cloning a product repo, **always
+  `git -C <repo> fetch && git -C <repo> branch -a`** to see what's
+  actually there; if the swarm runs on `dev` (or a release branch),
+  `git -C <repo> checkout dev && git -C <repo> pull` BEFORE stamping.
+  This cost time today on `qofi-ios-app` — the doctrine commit landed
+  on an unused branch and the swarm read no doctrine on startup.
 - **In-process teammates die on restart.** When you `swarm-restart`
   (cycles the tmux session), the CTO rebuilds from disk but any
   teammates that hadn't committed yet are gone. The WORKING safety

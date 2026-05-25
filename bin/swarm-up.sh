@@ -51,8 +51,104 @@ _wait_for() {  # session pattern timeout
 # shellcheck disable=SC1090
 [ -f "$TOKENS" ] && . "$TOKENS"
 
-launch_one() {  # name repo tokvar
-  local name="$1" repo="$2" tokvar="$3"
+# _preflight_check NAME REPO CHANNEL
+#
+# Hard-refuse to launch a swarm that hasn't been fully configured. Three
+# cheap-read gates run sequentially; first failure prints a one-line
+# remediation pointing at swarm-add and returns 1. All three pass → 0.
+#
+# Background: this mini's first standup produced three silent half-launches
+# where swarm-up brought the bot online but swarm-add had never run for the
+# repo. The bot looked healthy in Discord and ignored everything because
+# (a) enabledPlugins["discord-b2b@qofi-swarm"] wasn't true so the bridge
+# MCP never spawned, (b) access.json had no group for the channel so the
+# ACL silently dropped traffic, and (c) the doctrine triad wasn't stamped
+# so the CTO had no operating manual. The gates below detect each of those
+# states from disk before we burn a tmux session + claude start on a swarm
+# that can't do work.
+#
+# Gate (a): repo's .claude/settings.json has
+#           enabledPlugins["discord-b2b@qofi-swarm"] === true
+# Gate (b): ~/.claude/channels/discord/access.json has a groups.<CHANNEL>
+#           entry. Skipped (with a notice) if CHANNEL is empty — that's
+#           a legacy 3-col swarm.conf row, not a misconfig.
+# Gate (c): repo has all three of CLAUDE.md / ESCALATION.md / TEAM_LEAD.md
+#           at the top level (doctrine stamp).
+#
+# Override: SWARM_UP_SKIP_SANITY=1 in the caller's env bypasses all three
+# (the "I know what I'm doing" case — e.g., bringing up a swarm for the
+# first time inside a test harness, or intentionally launching a non-
+# Discord-backed lead).
+_preflight_check() {
+  local name="$1" repo="$2" channel="$3"
+  local sess="${PREFIX}-${name}"
+  local remediation="run: bin/swarm-add.sh $name $repo --skip-walkthrough"
+
+  # Gate (a) — enabledPlugins.
+  local settings="$repo/.claude/settings.json"
+  if [ ! -f "$settings" ]; then
+    echo "  ERROR: $sess: $repo/.claude/settings.json missing — $remediation" >&2
+    echo "         (gate: enabledPlugins; bypass with SWARM_UP_SKIP_SANITY=1)" >&2
+    return 1
+  fi
+  if ! python3 - "$settings" <<'PY' >/dev/null 2>&1
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        s = json.load(f)
+except Exception:
+    sys.exit(1)
+ep = s.get("enabledPlugins") or {}
+sys.exit(0 if ep.get("discord-b2b@qofi-swarm") is True else 1)
+PY
+  then
+    echo "  ERROR: $sess: enabledPlugins[\"discord-b2b@qofi-swarm\"] not true in $settings — $remediation" >&2
+    echo "         (gate: enabledPlugins; bypass with SWARM_UP_SKIP_SANITY=1)" >&2
+    return 1
+  fi
+
+  # Gate (b) — access.json group for this swarm's channel.
+  local access="$HOME/.claude/channels/discord/access.json"
+  if [ -z "$channel" ]; then
+    echo "  NOTE:  $sess: no channel in swarm.conf — skipping access.json gate" >&2
+  elif [ ! -f "$access" ]; then
+    echo "  ERROR: $sess: $access missing — $remediation" >&2
+    echo "         (gate: access.json; bypass with SWARM_UP_SKIP_SANITY=1)" >&2
+    return 1
+  else
+    if ! python3 - "$access" "$channel" <<'PY' >/dev/null 2>&1
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        a = json.load(f)
+except Exception:
+    sys.exit(1)
+groups = a.get("groups") or {}
+sys.exit(0 if sys.argv[2] in groups else 1)
+PY
+    then
+      echo "  ERROR: $sess: access.json has no groups.$channel entry — $remediation" >&2
+      echo "         (gate: access.json; bypass with SWARM_UP_SKIP_SANITY=1)" >&2
+      return 1
+    fi
+  fi
+
+  # Gate (c) — doctrine stamp.
+  local missing=""
+  for f in CLAUDE.md ESCALATION.md TEAM_LEAD.md; do
+    [ -f "$repo/$f" ] || missing="$missing $f"
+  done
+  if [ -n "$missing" ]; then
+    echo "  ERROR: $sess: doctrine missing in $repo —$missing — $remediation" >&2
+    echo "         (gate: doctrine-stamp; bypass with SWARM_UP_SKIP_SANITY=1)" >&2
+    return 1
+  fi
+
+  return 0
+}
+
+launch_one() {  # name repo tokvar [channel]
+  local name="$1" repo="$2" tokvar="$3" channel="${4:-}"
   local sess="${PREFIX}-${name}"
   if tmux has-session -t "$sess" 2>/dev/null; then
     echo "  running: $sess"; return 0
@@ -60,6 +156,18 @@ launch_one() {  # name repo tokvar
   [ -d "$repo" ] || { echo "  ERROR: repo not found: $repo" >&2; return 1; }
   local token="${!tokvar:-}"
   [ -z "$token" ] && { echo "  ERROR: no token in \$$tokvar (check tokens.env)" >&2; return 1; }
+
+  # ---- preflight gates ---------------------------------------------------
+  # Refuse to launch a swarm that hasn't been fully configured. Each gate
+  # is a cheap read; collectively they turn the three silent half-launches
+  # we hit on this mini's first standup into loud refusals with one
+  # remediation: re-run swarm-add. Bypass for the "I know what I'm doing"
+  # case via SWARM_UP_SKIP_SANITY=1.
+  if [ "${SWARM_UP_SKIP_SANITY:-0}" != "1" ]; then
+    if ! _preflight_check "$name" "$repo" "$channel"; then
+      return 1
+    fi
+  fi
 
   echo "  launching: $sess  ($repo)"
   tmux new-session -d -s "$sess" -c "$repo"
@@ -113,7 +221,8 @@ cmd_up() {  # [name]
     [ -n "$filter" ] && [ "$name" != "$filter" ] && continue
     repo="$SWARM_CONF_F_REPO"
     tokvar="$SWARM_CONF_F_TOKVAR"
-    launch_one "$name" "$repo" "$tokvar" || true
+    channel="$SWARM_CONF_F_CHANNEL"
+    launch_one "$name" "$repo" "$tokvar" "$channel" || true
   done < <(grep -vE '^[[:space:]]*(#|$)' "$CONF")
 }
 
