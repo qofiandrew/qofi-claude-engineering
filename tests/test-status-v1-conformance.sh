@@ -3,7 +3,7 @@
 # against the FROZEN swarm-status/v1 contract.
 #
 # Source of truth for the wire shape:
-#   ../ios-swarm-status-widget/docs/contracts/swarm-status-v1.md
+#   ../qofi-ios-app/docs/contracts/swarm-status-v1.md
 #   (frozen 2026-05-23, version v1)
 #
 # Why this exists: the emit logic produces what the receiver validates. Drift
@@ -115,7 +115,7 @@ phase81() {
 
 # §8.1 second swarm — ready (idle waiting). state=ready, age=412, no CTO.
 phase81_ready() {
-  local j; j="$(emit "ios-swarm-status-widget" "1507882161535975654" "1507070014971314287" "ready" "412" "" "")"
+  local j; j="$(emit "qofi-ios-app" "1507882161535975654" "1507070014971314287" "ready" "412" "" "")"
   assert_expr "§8.1-ready needs_attention=false"  "$j" "o['needs_attention']"   "False"
   assert_expr "§8.1-ready state=ready"            "$j" "o['state']"             "'ready'"
   assert_expr "§8.1-ready attention_source=null"  "$j" "o['attention_source']"  "None"
