@@ -3,10 +3,11 @@
 # Usage: swarm-init.sh /path/to/repo [--force]
 #
 # Source of truth is $SWARM_HOME/templates (default ~/claude-swarm/templates),
-# whose contents are enumerated in templates/manifest.tsv. swarm-init,
-# swarm-sync, and swarm-onboard all consume that single manifest via
-# manifest_apply in swarm-lib.sh, so the three commands cannot diverge on
-# what "fully stamped" means.
+# whose contents are enumerated in templates/<type>/manifest.tsv — the per-
+# archetype manifest dispatched to by swarm_type_of() (default 'engineering-
+# cto'). swarm-init, swarm-sync, and swarm-onboard all consume the manifest
+# for the target's archetype via manifest_apply in swarm-lib.sh, so the three
+# commands cannot diverge on what "fully stamped" means.
 #
 # init-mode policy:
 #   - refresh-class artifacts (CLAUDE.md, TEAM_LEAD.md, ESCALATION.md,

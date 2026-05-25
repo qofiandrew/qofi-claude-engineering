@@ -22,7 +22,8 @@
 #     "$SWARM_HOME/bin/swarm-attention.sh" status
 #
 # Doctrine pins the quoted-$SWARM_HOME form as canonical (see
-# templates/ESCALATION.md §Attention flag). The permission-gate regex also
+# templates/_base/ESCALATION.md §Attention flag — the section composes into
+# every archetype's stamped ESCALATION.md). The permission-gate regex also
 # tolerates the unquoted and absolute-path equivalents as belt-and-
 # suspenders against shell-quoting drift.
 #

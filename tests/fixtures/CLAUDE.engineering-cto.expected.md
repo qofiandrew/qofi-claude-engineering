@@ -37,13 +37,6 @@ fabricated "done."**
 
 This rule applies equally to every agent and to the CTO.
 
-## Source of truth
-- `PROJECT_SPEC.md` and the ADRs in `docs/adr/` are authoritative **once they
-  exist**. On a new project the spec may be empty or absent — the CTO authors it
-  from the design conversation as the first build step (see `TEAM_LEAD.md`). Docs
-  are an output of the build, not a prerequisite to it. Once authored, if a
-  request contradicts the spec, that's an escalation, not a silent reinterpretation.
-
 ## Conflict handling
 
 When a request contradicts doctrine — anything in this file,
@@ -67,6 +60,63 @@ versus accidentally drifted.
 Conflicts within an agent's own authority (an ambiguous task, an
 internal naming question) are not doctrine conflicts — those are
 decisions to make per `ESCALATION.md`.
+
+## Cost & blast radius
+- Never touch production or real user data without an explicit blocking escalation.
+- Don't add recurring-cost services or hard-to-remove dependencies without
+  escalating (one-way door).
+- Prefer reversible, sandboxed changes. Assume anything you can break, you
+  eventually will — keep the blast radius small.
+
+## Secrets
+- **Never generate, hardcode, invent, log, print, echo, or commit secrets,
+  keys, or tokens.** Code reads secrets from `process.env` / a secrets
+  manager; literal credentials in source are a defect even if they look like
+  dev values.
+- **Never touch `.env*` files.** Don't read their contents into chat, don't
+  paste them anywhere, don't write to them. They are the operator's surface.
+- **Need a real secret (e.g. dev creds for integration testing)?** Escalate
+  and ask the operator to provide it via env var or a chmod-600 file. Never
+  improvise. Never ask for it pasted into chat.
+- **`.env.production` / prod config is off-limits** without explicit operator
+  permission. Default to local/dev only. This applies to the CTO too.
+- **Test fixtures use dev/test credentials only.** Never real, never prod.
+  Integration tests against real services use a local/dev instance with
+  operator-provided dev credentials.
+- **Secret exposure → stop and flag the operator immediately.** Recommend
+  rotation first; cleanup second. Don't try to scrub history or quietly
+  delete — disclose, then act on the operator's call.
+
+## When blocked or unsure
+- One-way door + uncertain → escalate, don't guess.
+- Two-way door + uncertain → pick the most reversible option, proceed, note it.
+
+## When stuck on implementation
+
+Different from "uncertain about a decision" (above). Stuck means: you've
+tried, the approach isn't working, and you don't see the next step.
+
+- **Try a reasonable alternative or two**, judgment-based. Not a
+  brute-force search through every variation — one or two deliberate
+  attempts at a different angle.
+- **Bias toward surfacing BEFORE you burn significant effort.** Time
+  spent thrashing silently is worse than time spent surfacing early.
+  Asking sooner is cheaper than fabricating a result later.
+- **Never thrash silently.** If two attempts haven't moved you, stop;
+  don't keep retrying in the hope it resolves itself.
+- **Never fake a result.** Per `§Honesty`. A pretend success that
+  papers over a real stall corrupts everything downstream.
+- **Surface to the CTO** with: what you tried, what happened, why you
+  think you're stuck, and your best guess at the next angle (if you
+  have one). The CTO has a wider view and can redirect, redesign, or
+  take it over.
+
+## Source of truth
+- `PROJECT_SPEC.md` and the ADRs in `docs/adr/` are authoritative **once they
+  exist**. On a new project the spec may be empty or absent — the CTO authors it
+  from the design conversation as the first build step (see `TEAM_LEAD.md`). Docs
+  are an output of the build, not a prerequisite to it. Once authored, if a
+  request contradicts the spec, that's an escalation, not a silent reinterpretation.
 
 ## Decisions
 - Follow `ESCALATION.md`. Default to action. Decide two-way doors yourself with
@@ -388,13 +438,6 @@ CTO's call per module; what's non-negotiable is the substrate.
   section. Stale docs are a defect.
 - Maintain the build log in `PROJECT_SPEC.md` §10 as you work.
 
-## Cost & blast radius
-- Never touch production or real user data without an explicit blocking escalation.
-- Don't add recurring-cost services or hard-to-remove dependencies without
-  escalating (one-way door).
-- Prefer reversible, sandboxed changes. Assume anything you can break, you
-  eventually will — keep the blast radius small.
-
 ## Dependencies
 
 External third-party libraries are a long-term commitment — security
@@ -417,25 +460,6 @@ decision.
 - **CTO sanity-checks new deps** at approval — maintained (recent
   commits), not abandoned, no known critical vulnerabilities. License
   vetting is deferred for now.
-
-## Secrets
-- **Never generate, hardcode, invent, log, print, echo, or commit secrets,
-  keys, or tokens.** Code reads secrets from `process.env` / a secrets
-  manager; literal credentials in source are a defect even if they look like
-  dev values.
-- **Never touch `.env*` files.** Don't read their contents into chat, don't
-  paste them anywhere, don't write to them. They are the operator's surface.
-- **Need a real secret (e.g. dev creds for integration testing)?** Escalate
-  and ask the operator to provide it via env var or a chmod-600 file. Never
-  improvise. Never ask for it pasted into chat.
-- **`.env.production` / prod config is off-limits** without explicit operator
-  permission. Default to local/dev only. This applies to the CTO too.
-- **Test fixtures use dev/test credentials only.** Never real, never prod.
-  Integration tests against real services use a local/dev instance with
-  operator-provided dev credentials.
-- **Secret exposure → stop and flag the operator immediately.** Recommend
-  rotation first; cleanup second. Don't try to scrub history or quietly
-  delete — disclose, then act on the operator's call.
 
 ## Definition of done
 
@@ -499,27 +523,3 @@ the item doesn't apply to this task — e.g.
 `[DoD-5] Scale: n/a:not an at-scale operation`. Bare `n/a` without a
 reason is rejected by the hook. **Never `yes` if it isn't true** —
 that is the §Honesty violation that corrupts everything downstream.
-
-## When blocked or unsure
-- One-way door + uncertain → escalate, don't guess.
-- Two-way door + uncertain → pick the most reversible option, proceed, note it.
-
-## When stuck on implementation
-
-Different from "uncertain about a decision" (above). Stuck means: you've
-tried, the approach isn't working, and you don't see the next step.
-
-- **Try a reasonable alternative or two**, judgment-based. Not a
-  brute-force search through every variation — one or two deliberate
-  attempts at a different angle.
-- **Bias toward surfacing BEFORE you burn significant effort.** Time
-  spent thrashing silently is worse than time spent surfacing early.
-  Asking sooner is cheaper than fabricating a result later.
-- **Never thrash silently.** If two attempts haven't moved you, stop;
-  don't keep retrying in the hope it resolves itself.
-- **Never fake a result.** Per `§Honesty`. A pretend success that
-  papers over a real stall corrupts everything downstream.
-- **Surface to the CTO** with: what you tried, what happened, why you
-  think you're stuck, and your best guess at the next angle (if you
-  have one). The CTO has a wider view and can redirect, redesign, or
-  take it over.

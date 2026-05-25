@@ -68,7 +68,8 @@ launch_one() {  # name repo tokvar
   # token value never appears on the command line / pane scrollback.
   # Export SWARM_HOME into the pane so the CTO can invoke
   # "$SWARM_HOME/bin/swarm-attention.sh" portably (the canonical form pinned
-  # in templates/ESCALATION.md §Attention flag). The helper self-locates as
+  # in templates/_base/ESCALATION.md §Attention flag — composed into every
+  # archetype's ESCALATION.md). The helper self-locates as
   # belt-and-suspenders, but the env var makes the doctrine form work
   # without hardcoding the host path.
   tmux send-keys -t "$sess" "unset ANTHROPIC_API_KEY; export SWARM_HOME='$SWARM_HOME'; set -a; . '$TOKENS'; export DISCORD_BOT_TOKEN=\"\$$tokvar\"; set +a" C-m

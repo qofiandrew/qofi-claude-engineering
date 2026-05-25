@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test-permission-gate-attention.sh — regression tests for the swarm-attention
-# allow/deny rules added to templates/hooks/permission-gate.sh.
+# allow/deny rules added to templates/engineering-cto/hooks/permission-gate.sh.
 #
 # Why this exists: the helper is the CTO's ONE scoped capability for writing
 # into the watcher's state dir. If the regex drifts from the canonical
@@ -18,7 +18,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-GATE="$SCRIPT_DIR/../templates/hooks/permission-gate.sh"
+GATE="$SCRIPT_DIR/../templates/engineering-cto/hooks/permission-gate.sh"
 
 if [ ! -x "$GATE" ]; then
   # The hook is invoked via `bash "$..."` in settings.json, so executable is
@@ -130,7 +130,7 @@ assert defer "$(decide Bash '"$SWARM_HOME/bin/swarm-attention" raise "x"')" \
 
 # Chained commands. The new helper allowlist is `^`-anchored, so a chain
 # hiding the helper after `&&` does NOT match the new rule. The pre-existing
-# `echo` allowlist (templates/hooks/permission-gate.sh:98) does still allow
+# `echo` allowlist (templates/engineering-cto/hooks/permission-gate.sh:98) does still allow
 # any command-chain whose leading word is `echo`, but that's a pre-existing
 # scope, not a regression from this commit. The protection that matters is
 # that a chain hiding a REDIRECT into ~/.config/swarm/ is caught by the new

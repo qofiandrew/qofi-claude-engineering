@@ -1,0 +1,53 @@
+# swarm manifest — single source of truth for what an `engineering-cto`
+# swarm contains. Consumed by swarm-init.sh, swarm-sync.sh, and
+# swarm-onboard.sh via manifest_walk in swarm-lib.sh, so first-stamp,
+# upgrade, and onboard cannot diverge. Add a new artifact in ONE place: here.
+#
+# Per-type dispatch: at apply time, swarm_type_of() resolves a repo's
+# archetype from its .claude/swarm-type marker (default 'engineering-cto')
+# and the manifest at templates/<type>/manifest.tsv is consumed.
+#
+# Format: behavior | template-path | target-path
+#   - lines starting with '#' and blank lines are ignored
+#   - fields are pipe-delimited, leading/trailing whitespace per field is trimmed
+#   - template-path is relative to $SWARM_HOME/templates/
+#     (except seed-text, where this field is the literal text to seed)
+#   - target-path is relative to the target repo
+#     (except gitignore, where this field is .gitignore itself; the
+#     template-path is the line we ensure is present in it)
+#
+# Behavior classes (each implemented as manifest_apply_<class> in swarm-lib.sh):
+#
+#   refresh     overwrite unconditionally (idempotent if cmp-equal); doctrine
+#               and enforcement files that encode the operating contract
+#   compose     concatenate '+'-joined sources LITERALLY (no separator
+#               injected) into a tmp file, then refresh semantics against
+#               the target. Each non-final source MUST end with at least
+#               one '\n' so the seam is well-formed (see _base/README.md
+#               for the trailing-newline invariant).
+#   seed        copy only if absent in target; per-repo content the operator
+#               (or CTO) authors after stamping. --force in init re-seeds.
+#   seed-text   write literal text from template-path field into target, only
+#               if absent. Same semantics as seed but for tiny inline content.
+#   settings    structured-merge swarm hook registrations + env + permissions
+#               into the existing settings.json. Never clobber; additive +
+#               dedup-by-command. See manifest_apply_settings.
+#   git-hook    marker-aware: install if absent or existing has SWARM-MANAGED
+#               marker; otherwise refuse (warn in init/sync, refuse with
+#               COLLISION in onboard unless --force-precommit).
+#   gitignore   append the line in template-path to .gitignore idempotently.
+#
+# behavior   | template-path                                                                                            | target-path
+compose      | engineering-cto/CLAUDE.preamble.md+_base/CLAUDE.md+engineering-cto/CLAUDE.md                              | CLAUDE.md
+compose      | engineering-cto/ESCALATION.preamble.md+_base/ESCALATION.md+engineering-cto/ESCALATION.md                  | ESCALATION.md
+refresh      | engineering-cto/TEAM_LEAD.md                                                                              | TEAM_LEAD.md
+seed         | engineering-cto/PROJECT_SPEC.template.md                                                                  | PROJECT_SPEC.md
+seed         | engineering-cto/ADR.template.md                                                                           | docs/adr/ADR.template.md
+refresh      | engineering-cto/hooks/test-gate.sh                                                                        | .claude/hooks/test-gate.sh
+refresh      | engineering-cto/hooks/docs-check.sh                                                                       | .claude/hooks/docs-check.sh
+refresh      | engineering-cto/hooks/permission-gate.sh                                                                  | .claude/hooks/permission-gate.sh
+refresh      | engineering-cto/hooks/dod-affirm.sh                                                                       | .claude/hooks/dod-affirm.sh
+settings     | engineering-cto/settings.example.json                                                                     | .claude/settings.json
+git-hook     | engineering-cto/git-hooks/pre-commit                                                                      | .git/hooks/pre-commit
+gitignore    | .claude/worktrees/                                                                                        | .gitignore
+seed-text    | npm test --silent                                                                                         | .claude/test-cmd

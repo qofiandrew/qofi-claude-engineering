@@ -244,7 +244,7 @@ shell at all. `[VERIFY ON SETUP]`
   ~1–2 concurrent teams on one Max pool, which bounds lead memory — start
   conservative, raise only if a container demands it.
 - **Node** `[M]` — `brew install node` **only** if a product repo's
-  test-gate runs node (`templates/hooks/permission-gate.sh` whitelists
+  test-gate runs node (`templates/engineering-cto/hooks/permission-gate.sh` whitelists
   `node --test` / `npm test` for product gates). The swarm system itself
   never needs it; bun is the bridge runtime.
 
@@ -286,7 +286,7 @@ Then open a new terminal (or `source ~/.zshrc`).
 
 ```sh
 echo "$SWARM_HOME"                              # the path above
-ls "$SWARM_HOME/templates/manifest.tsv"          # exists
+ls "$SWARM_HOME/templates/engineering-cto/manifest.tsv"  # exists (default archetype)
 "$SWARM_HOME/bin/swarm-up.sh" status             # prints "(no swarm sessions running)"
 ```
 

@@ -20,7 +20,8 @@
 #                                    swarm-onboard. ALL three commands share
 #                                    these helpers; per-mode policy is in
 #                                    flags passed via env, not duplicated
-#                                    logic. See templates/manifest.tsv.
+#                                    logic. See templates/<type>/manifest.tsv
+#                                    (per-archetype dispatch via swarm_type_of).
 #   3. settings_merge_swarm()      — structured merge of swarm hook
 #                                    registrations into an existing
 #                                    settings.json. Additive, dedup-by-
@@ -356,8 +357,10 @@ if m:
 # 2) Manifest walker + per-class apply helpers.
 # ---------------------------------------------------------------------------
 #
-# The manifest lives at $SWARM_HOME/templates/manifest.tsv. Each non-comment
-# line is "behavior | src | tgt". See that file for what each behavior means.
+# The manifest lives at $SWARM_HOME/templates/<type>/manifest.tsv where <type>
+# is the swarm's archetype (resolved by swarm_type_of from .claude/swarm-type,
+# default 'engineering-cto'). Each non-comment line is "behavior | src | tgt".
+# See that file for what each behavior means.
 #
 # Consumers call manifest_apply REPO MODE with environment flags set; mode
 # selects per-class policy (init / sync / onboard / check). Each class has
@@ -386,15 +389,40 @@ if m:
 #
 # All paths the helpers print are RELATIVE to the target repo, for readability.
 
-# Resolve and verify the manifest file. Refuses to run if it's missing.
+# swarm_type_of REPO
+#
+# Resolve a repo's archetype from the .claude/swarm-type marker file.
+# Returns the type name on stdout. Defaults to 'engineering-cto' when the
+# marker is absent or empty — so existing swarms (which were stamped
+# before the per-type dispatch existed) keep getting engineering-cto
+# doctrine without requiring a marker write. Whitespace stripped.
+swarm_type_of() {
+  local repo="$1"
+  local marker="$repo/.claude/swarm-type"
+  if [ -f "$marker" ]; then
+    local t
+    t="$(head -n 1 "$marker" 2>/dev/null | tr -d '[:space:]')"
+    if [ -n "$t" ]; then
+      printf '%s\n' "$t"
+      return 0
+    fi
+  fi
+  printf '%s\n' "engineering-cto"
+}
+
+# Resolve and verify the manifest file for a given archetype. Refuses
+# (caller-side) to run if it's missing — caller checks file existence
+# after this returns.
 swarm_manifest_path() {
-  printf '%s\n' "$SWARM_HOME/templates/manifest.tsv"
+  local type="${1:-engineering-cto}"
+  printf '%s\n' "$SWARM_HOME/templates/$type/manifest.tsv"
 }
 
 manifest_walk() {
   local cb="$1"
+  local type="${SWARM_APPLY_TYPE:-engineering-cto}"
   local mf
-  mf="$(swarm_manifest_path)"
+  mf="$(swarm_manifest_path "$type")"
   if [ ! -f "$mf" ]; then
     echo "swarm-lib: manifest not found at $mf — aborting" >&2
     return 2
@@ -506,11 +534,137 @@ _swarm_is_doctrine() {
   return 1
 }
 
+# _compose_to_tmp SRC_LIST OUT_PATH
+#
+# Concatenate '+'-joined template sources LITERALLY (no separator injected)
+# into OUT_PATH. Each source path is resolved under $SWARM_HOME/templates/.
+#
+# Asserts the trailing-newline invariant (see templates/_base/README.md):
+# every non-final source MUST end with at least one '\n'. A fragment
+# stripped of its trailing newline would run into the next fragment's
+# first byte at concat time (e.g., "...content## Heading" instead of
+# "...content\n## Heading"), silently corrupting the composed output.
+# Failing loudly here is the defense.
+#
+# Returns 0 on success, non-zero on any error (missing source, invariant
+# violation, write failure). Caller responsible for cleaning up OUT_PATH
+# on failure.
+_compose_to_tmp() {
+  local src_list="$1" out_path="$2"
+  : > "$out_path" || return 1
+  local OLD_IFS="$IFS"
+  IFS='+'
+  set -- $src_list
+  IFS="$OLD_IFS"
+  local total=$#
+  local i=0 src
+  for src in "$@"; do
+    i=$((i + 1))
+    local src_path="$SWARM_HOME/templates/$src"
+    if [ ! -f "$src_path" ]; then
+      echo "compose: source missing: $src" >&2
+      return 1
+    fi
+    if [ "$i" -lt "$total" ]; then
+      local last_byte
+      last_byte="$(tail -c 1 "$src_path" 2>/dev/null | xxd -p 2>/dev/null)"
+      if [ "$last_byte" != "0a" ]; then
+        echo "compose: source '$src' lacks trailing newline (last byte 0x$last_byte)" >&2
+        echo "compose: violates templates/_base/README.md trailing-newline invariant" >&2
+        return 1
+      fi
+    fi
+    cat "$src_path" >> "$out_path" || return 1
+  done
+  return 0
+}
+
 _swarm_is_hook() {
   case "$1" in
     .claude/hooks/*) return 0 ;;
   esac
   return 1
+}
+
+manifest_apply_compose() {
+  local src_list="$1" tgt_rel="$2"
+  local tgt="$SWARM_APPLY_REPO/$tgt_rel"
+  local tmp
+  tmp="$(mktemp -t swarm-compose.XXXXXX)" || {
+    echo "  ERROR: mktemp failed for compose: $tgt_rel" >&2
+    SWARM_RESULT_FATAL=1
+    return 1
+  }
+  if ! _compose_to_tmp "$src_list" "$tmp"; then
+    echo "  ERROR: compose failed for $tgt_rel" >&2
+    SWARM_RESULT_FATAL=1
+    rm -f "$tmp"
+    return 1
+  fi
+
+  if [ ! -e "$tgt" ]; then
+    if [ "$SWARM_APPLY_MODE" = "check" ]; then
+      echo "  MISSING:   $tgt_rel  (compose)"
+      SWARM_RESULT_DRIFT=1
+      rm -f "$tmp"
+      return 0
+    fi
+    if [ "${SWARM_DRY_RUN:-0}" -eq 1 ]; then
+      echo "  would write: $tgt_rel  (composed)"
+      SWARM_RESULT_CHANGED=1
+      rm -f "$tmp"
+      return 0
+    fi
+    local dir
+    dir="$(dirname "$tgt")"
+    [ -d "$dir" ] || mkdir -p "$dir"
+    mv "$tmp" "$tgt"
+    echo "  wrote: $tgt_rel  (composed)"
+    SWARM_RESULT_CHANGED=1
+    return 0
+  fi
+  if cmp -s "$tmp" "$tgt"; then
+    [ "$SWARM_APPLY_MODE" = "check" ] && echo "  OK:        $tgt_rel"
+    [ "$SWARM_APPLY_MODE" != "check" ] && [ "${SWARM_QUIET_UNCHANGED:-0}" -ne 1 ] && echo "  unchanged: $tgt_rel"
+    rm -f "$tmp"
+    return 0
+  fi
+  case "$SWARM_APPLY_MODE" in
+    check)
+      echo "  OUTDATED:  $tgt_rel"
+      SWARM_RESULT_DRIFT=1
+      rm -f "$tmp"
+      ;;
+    onboard)
+      if [ "${SWARM_FORCE_DOCS:-0}" -eq 1 ] && _swarm_is_doctrine "$tgt_rel"; then
+        if [ "${SWARM_DRY_RUN:-0}" -eq 1 ]; then
+          echo "  would overwrite (--force-docs): $tgt_rel"
+          SWARM_RESULT_CHANGED=1
+          rm -f "$tmp"
+        else
+          mv "$tmp" "$tgt"
+          echo "  overwrote (--force-docs): $tgt_rel  (composed)"
+          SWARM_RESULT_CHANGED=1
+        fi
+      else
+        echo "  COLLISION: $tgt_rel  (composed differs from existing)"
+        SWARM_RESULT_COLLISIONS="$SWARM_RESULT_COLLISIONS
+compose:$tgt_rel"
+        rm -f "$tmp"
+      fi
+      ;;
+    init|sync)
+      if [ "${SWARM_DRY_RUN:-0}" -eq 1 ]; then
+        echo "  would update: $tgt_rel  (composed)"
+        SWARM_RESULT_CHANGED=1
+        rm -f "$tmp"
+      else
+        mv "$tmp" "$tgt"
+        echo "  updated: $tgt_rel  (composed)"
+        SWARM_RESULT_CHANGED=1
+      fi
+      ;;
+  esac
 }
 
 manifest_apply_seed() {
@@ -676,7 +830,7 @@ manifest_apply_git_hook() {
   # no docs-touch gate). When seen on a pre-commit, that's an intentional
   # opt-out from the standard hook — preserve it; do NOT overwrite back to
   # the standard variant on sync / init / onboard. See
-  # templates/git-hooks/pre-commit-anti-secret-only.
+  # templates/engineering-cto/git-hooks/pre-commit-anti-secret-only.
   local variant_marker='SWARM-MANAGED pre-commit (anti-secret-only'
   if [ ! -e "$tgt" ]; then
     if [ "$SWARM_APPLY_MODE" = "check" ]; then
@@ -821,6 +975,7 @@ _manifest_apply_one() {
   local behavior="$1" src="$2" tgt="$3"
   case "$behavior" in
     refresh)   manifest_apply_refresh   "$src" "$tgt" ;;
+    compose)   manifest_apply_compose   "$src" "$tgt" ;;
     seed)      manifest_apply_seed      "$src" "$tgt" ;;
     seed-text) manifest_apply_seed_text "$src" "$tgt" ;;
     settings)  manifest_apply_settings  "$src" "$tgt" ;;
@@ -850,12 +1005,13 @@ manifest_apply() {
   esac
   SWARM_APPLY_REPO="$repo"
   SWARM_APPLY_MODE="$mode"
+  SWARM_APPLY_TYPE="$(swarm_type_of "$repo")"
   SWARM_RESULT_CHANGED=0
   SWARM_RESULT_DRIFT=0
   SWARM_RESULT_COLLISIONS=""
   SWARM_RESULT_FOREIGN_PRECOMMIT=0
   SWARM_RESULT_FATAL=0
-  export SWARM_APPLY_REPO SWARM_APPLY_MODE
+  export SWARM_APPLY_REPO SWARM_APPLY_MODE SWARM_APPLY_TYPE
   manifest_walk _manifest_apply_one || return $?
   [ "$SWARM_RESULT_FATAL" -eq 1 ] && return 1
   return 0
@@ -872,7 +1028,7 @@ manifest_check() {
 # settings_merge_swarm TARGET TEMPLATE [--check]
 #
 # Reads TARGET (existing repo .claude/settings.json) and TEMPLATE
-# ($SWARM_HOME/templates/settings.example.json), produces a merged object,
+# ($SWARM_HOME/templates/<type>/settings.example.json), produces a merged object,
 # and atomically writes it back to TARGET. Foreign hook entries (anything
 # whose command does NOT reference $CLAUDE_PROJECT_DIR/.claude/hooks/) are
 # preserved. Swarm hooks are deduplicated by command path — running this

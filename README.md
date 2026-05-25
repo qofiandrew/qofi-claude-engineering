@@ -200,7 +200,7 @@ invocation paths):
 | Hook **registrations** | `<repo>/.claude/settings.json` (the `hooks` block) | next session start | Claude Code reads `settings.json` at session start. A registration change requires the lead to restart. |
 | Doctrine | `<repo>/CLAUDE.md` · `TEAM_LEAD.md` · `ESCALATION.md` | next session start | The lead reads these into context at session start. New content does not reach a running lead until the session is cycled. |
 | Git pre-commit | `<repo>/.git/hooks/pre-commit` | next commit | Git reads the hook fresh on every commit. No restart needed. |
-| Manifest itself | `templates/manifest.tsv` | next `swarm-sync` / `swarm-init` / `swarm-onboard` run | The scripts read it at invocation time. |
+| Manifest itself | `templates/<archetype>/manifest.tsv` (default `engineering-cto`) | next `swarm-sync` / `swarm-init` / `swarm-onboard` run | The scripts read the per-archetype manifest at invocation time. |
 
 The exact text appears in `bin/swarm-sync.sh`'s end-of-run reminder:
 
@@ -242,11 +242,21 @@ completes (sync takes time; status may have changed in the interval).
 
 ## 6. The manifest
 
-[`templates/manifest.tsv`](./templates/manifest.tsv) is the single source of
-truth for what a fully-stamped repo contains. `swarm-init.sh`, `swarm-sync.sh`,
-and `swarm-onboard.sh` all consume it via `manifest_walk` in `swarm-lib.sh`,
-so first-stamp / upgrade / onboard cannot diverge. To add a new artifact to
-every swarm: add the line to `manifest.tsv` — that's it.
+[`templates/engineering-cto/manifest.tsv`](./templates/engineering-cto/manifest.tsv)
+is the single source of truth for what a fully-stamped `engineering-cto`
+swarm contains. (Future archetypes — `cpo`, `company-brain` — get their own
+manifests under `templates/<archetype>/`; `swarm_type_of` in `swarm-lib.sh`
+resolves the target's archetype from `.claude/swarm-type`, default
+`engineering-cto`.) `swarm-init.sh`, `swarm-sync.sh`, and `swarm-onboard.sh`
+all consume the resolved manifest via `manifest_walk` in `swarm-lib.sh`, so
+first-stamp / upgrade / onboard cannot diverge. To add a new artifact to
+every `engineering-cto` swarm: add the line to that archetype's manifest.
+
+Doctrine files (`CLAUDE.md`, `ESCALATION.md`) are composed at stamp time
+from `_base/` (universal spine) plus the archetype's overlay fragments —
+the `compose` behavior in the manifest cats `+`-joined sources literally.
+See [`templates/_base/README.md`](./templates/_base/README.md) for the
+mechanism and the trailing-newline invariant.
 
 Each line is `behavior | template-path | target-path`. There are six
 behavior classes (each implemented as `manifest_apply_<class>` in
@@ -414,7 +424,10 @@ Anything else falls through to the gray-zone defer (operator decides).
 
 ### Probabilistic (judgment doctrine; hooks CAN'T enforce these)
 
-These live in `templates/CLAUDE.md` and `templates/TEAM_LEAD.md`. They're
+These live in `templates/_base/CLAUDE.md` (universal spine) +
+`templates/engineering-cto/CLAUDE.md` (engineering overlay) +
+`templates/engineering-cto/TEAM_LEAD.md` (single-file, engineering-only).
+They're
 real rules — the CTO is responsible for catching violations at review —
 but they're not mechanically enforced and an agent can violate them in
 the moment.
@@ -469,7 +482,7 @@ the moment.
 - **`SWARM_HOME` uses the anti-secret-only pre-commit variant.** The
   standard pre-commit's docs-touch leg would misfire on routine tooling
   commits (e.g. `bin/swarm-*.sh` edits with no doc change), so this repo
-  installs `templates/git-hooks/pre-commit-anti-secret-only` instead.
+  installs `templates/engineering-cto/git-hooks/pre-commit-anti-secret-only` instead.
   The variant carries a distinct marker (`SWARM-MANAGED pre-commit
   (anti-secret-only — tooling/source repo variant)`); `swarm-lib.sh`
   recognizes it and refuses to clobber it back to the standard hook.

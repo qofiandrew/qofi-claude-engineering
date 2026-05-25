@@ -37,7 +37,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-HOOKS_DIR="$SCRIPT_DIR/../templates/hooks"
+HOOKS_DIR="$SCRIPT_DIR/../templates/engineering-cto/hooks"
 
 PASS=0
 FAIL=0
