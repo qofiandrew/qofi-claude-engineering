@@ -620,7 +620,9 @@ the steps below. If any step fails, see TROUBLESHOOTING at the end.
          races and the prompt is still waiting when you attach, clear it:
              tmux send-keys -t swarm-$NAME Enter
        - The Claude UI renders; the footer shows "auto mode"
-       - The initial brief lands (Read TEAM_LEAD.md / CLAUDE.md / ...)
+       - The archetype-appropriate initial brief lands (per
+         swarm_launch_brief — engineering-cto reads TEAM_LEAD/CLAUDE/...,
+         cpo reads CLAUDE/CONVERSATION/EVALUATION/...)
        - In Discord, the bot's status flips ONLINE in the server member list
 
   4) Smoke-test the channel. In #<your-channel>, @mention the bot:

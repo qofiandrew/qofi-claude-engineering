@@ -53,19 +53,22 @@ _wait_for() {  # session pattern timeout
 
 # _preflight_check NAME REPO CHANNEL
 #
-# Hard-refuse to launch a swarm that hasn't been fully configured. Three
+# Hard-refuse to launch a swarm that hasn't been fully configured. Four
 # cheap-read gates run sequentially; first failure prints a one-line
-# remediation pointing at swarm-add and returns 1. All three pass → 0.
+# remediation pointing at swarm-add and returns 1. All four pass → 0.
 #
-# Background: this mini's first standup produced three silent half-launches
-# where swarm-up brought the bot online but swarm-add had never run for the
-# repo. The bot looked healthy in Discord and ignored everything because
+# Background: this mini's first standup produced silent half-launches
+# where swarm-up brought the bot online but swarm-add had never run for
+# the repo (or the env block was missing). The bot looked healthy in
+# Discord and ignored everything because
 # (a) enabledPlugins["discord-b2b@qofi-swarm"] wasn't true so the bridge
 # MCP never spawned, (b) access.json had no group for the channel so the
-# ACL silently dropped traffic, and (c) the doctrine triad wasn't stamped
-# so the CTO had no operating manual. The gates below detect each of those
-# states from disk before we burn a tmux session + claude start on a swarm
-# that can't do work.
+# ACL silently dropped traffic, (c) the doctrine triad wasn't stamped so
+# the CTO had no operating manual, and (d) the env block lacked
+# CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 so the lead launched but could
+# not spawn teammates — same silent-failure shape as the other three.
+# The gates below detect each of those states from disk before we burn a
+# tmux session + claude start on a swarm that can't do work.
 #
 # Gate (a): repo's .claude/settings.json has
 #           enabledPlugins["discord-b2b@qofi-swarm"] === true
@@ -74,8 +77,12 @@ _wait_for() {  # session pattern timeout
 #           a legacy 3-col swarm.conf row, not a misconfig.
 # Gate (c): repo has all three of CLAUDE.md / ESCALATION.md / TEAM_LEAD.md
 #           at the top level (doctrine stamp).
+# Gate (d): repo's .claude/settings.json has
+#           env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS === "1". Without it,
+#           Agent Teams (teammate spawning) is silently disabled — the
+#           lead runs but the team never materializes.
 #
-# Override: SWARM_UP_SKIP_SANITY=1 in the caller's env bypasses all three
+# Override: SWARM_UP_SKIP_SANITY=1 in the caller's env bypasses all four
 # (the "I know what I'm doing" case — e.g., bringing up a swarm for the
 # first time inside a test harness, or intentionally launching a non-
 # Discord-backed lead).
@@ -133,14 +140,45 @@ PY
     fi
   fi
 
-  # Gate (c) — doctrine stamp.
+  # Gate (c) — doctrine stamp. The required-doctrine set is per-archetype
+  # (swarm_required_doctrine in swarm-lib.sh); engineering-cto needs the
+  # full triad, cpo needs only CLAUDE+ESCALATION, future types extend the
+  # data-driven dispatch there. Unknown / future markers fall back to the
+  # engineering triad — a misclassified swarm is REFUSED here with a
+  # clear "TEAM_LEAD.md missing" error rather than silently launching
+  # with no doctrine.
+  local repo_type
+  repo_type="$(swarm_type_of "$repo")"
   local missing=""
-  for f in CLAUDE.md ESCALATION.md TEAM_LEAD.md; do
+  local f
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
     [ -f "$repo/$f" ] || missing="$missing $f"
-  done
+  done < <(swarm_required_doctrine "$repo_type")
   if [ -n "$missing" ]; then
-    echo "  ERROR: $sess: doctrine missing in $repo —$missing — $remediation" >&2
+    echo "  ERROR: $sess: doctrine missing in $repo (type=$repo_type) —$missing — $remediation" >&2
     echo "         (gate: doctrine-stamp; bypass with SWARM_UP_SKIP_SANITY=1)" >&2
+    return 1
+  fi
+
+  # Gate (d) — Agent Teams experimental flag in the env block. Without
+  # this, claude launches but teammate spawning is silently disabled —
+  # the lead boots, Discord shows it online, and the team that
+  # TEAM_LEAD.md instructs the CTO to spawn never materializes. Same
+  # silent-failure shape as (a)/(b)/(c); same loud-refuse treatment.
+  if ! python3 - "$settings" <<'PY' >/dev/null 2>&1
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        s = json.load(f)
+except Exception:
+    sys.exit(1)
+env = s.get("env") or {}
+sys.exit(0 if env.get("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS") == "1" else 1)
+PY
+  then
+    echo "  ERROR: $sess: missing CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 in .claude/settings.json — Agent Teams (teammate spawning) will be silently disabled. Re-run swarm-add, or add the env block." >&2
+    echo "         (gate: agent-teams-env; bypass with SWARM_UP_SKIP_SANITY=1)" >&2
     return 1
   fi
 
@@ -204,7 +242,14 @@ launch_one() {  # name repo tokvar [channel]
   # Send the brief, then submit. A trailing C-m on the same send-keys call gets
   # absorbed into the input (treated as part of the paste) and does NOT fire
   # submission — observed empirically. Send text and Enter as separate calls.
-  tmux send-keys -t "$sess" "Read TEAM_LEAD.md, ESCALATION.md, CLAUDE.md and PROJECT_SPEC.md. You are the team lead (CTO) for this repo; operate per TEAM_LEAD.md. The human will hold a product design conversation with you over Discord and the spec may be empty for now — do NOT build during the conversation. When the human says to build, first author PROJECT_SPEC.md and the one-way-door ADRs from the conversation, confirm them with the human, then decompose and spawn the team. Keep the docs reconciled with the implementation as it proceeds, and message the human for any major spec decision."
+  # The brief itself is per-archetype (swarm_launch_brief in swarm-lib.sh) —
+  # engineering-cto and cpo have fundamentally different roles, so each
+  # gets the orientation that matches its doctrine. Unknown markers fall
+  # back to the engineering brief (a known-good orientation).
+  local brief_type brief
+  brief_type="$(swarm_type_of "$repo")"
+  brief="$(swarm_launch_brief "$brief_type")"
+  tmux send-keys -t "$sess" "$brief"
   sleep 1
   tmux send-keys -t "$sess" Enter
 }

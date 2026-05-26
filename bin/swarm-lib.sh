@@ -425,6 +425,53 @@ swarm_type_of() {
   printf '%s\n' "engineering-cto"
 }
 
+# swarm_required_doctrine TYPE
+#
+# Emit the doctrine filenames (relative to the swarm repo root, one per
+# line) that swarm-up's gate (c) must see stamped before it agrees to
+# launch a swarm of this type. The list is INTENTIONALLY data-driven
+# per archetype so adding a new type means adding a case here, not
+# reopening swarm-up.sh.
+#
+# Unknown / future types FALL THROUGH to the engineering-cto triad
+# (CLAUDE.md + ESCALATION.md + TEAM_LEAD.md). This is the fail-safe
+# direction: a swarm with a misclassified or future marker still gets
+# refused (with a clear "TEAM_LEAD.md missing" error) rather than
+# silently launching a swarm whose doctrine never landed.
+swarm_required_doctrine() {
+  case "$1" in
+    cpo)
+      printf '%s\n' CLAUDE.md ESCALATION.md
+      ;;
+    engineering-cto|*)
+      printf '%s\n' CLAUDE.md ESCALATION.md TEAM_LEAD.md
+      ;;
+  esac
+}
+
+# swarm_launch_brief TYPE
+#
+# Emit the initial brief swarm-up's launch_one() sends into the tmux
+# pane right after `claude` finishes booting. The brief is the agent's
+# first instruction set and frames its role; engineering-cto and cpo
+# have fundamentally different roles, so each archetype owns its own
+# brief.
+#
+# Unknown / future types fall through to engineering-cto for the same
+# fail-safe reason as swarm_required_doctrine: a misclassified swarm
+# at least gets the engineering brief (a known-good orientation),
+# rather than launching with no instructions at all.
+swarm_launch_brief() {
+  case "$1" in
+    cpo)
+      printf '%s' "Read CLAUDE.md, ESCALATION.md, CONVERSATION.md, EVALUATION.md, SURFACING.md, MEMORY.md, READINESS_BAR.md. You are the CPO for this product-vision repo; operate per CLAUDE.md. The operator will hold the product conversation with you over Discord. You write into products/<product>/<facet>.md via the refine → ratify → write protocol in MEMORY.md. Do NOT act as an engineering team lead and do NOT execute engineering work — that is the CTOs' lane."
+      ;;
+    engineering-cto|*)
+      printf '%s' "Read TEAM_LEAD.md, ESCALATION.md, CLAUDE.md and PROJECT_SPEC.md. You are the team lead (CTO) for this repo; operate per TEAM_LEAD.md. The human will hold a product design conversation with you over Discord and the spec may be empty for now — do NOT build during the conversation. When the human says to build, first author PROJECT_SPEC.md and the one-way-door ADRs from the conversation, confirm them with the human, then decompose and spawn the team. Keep the docs reconciled with the implementation as it proceeds, and message the human for any major spec decision."
+      ;;
+  esac
+}
+
 # Resolve and verify the manifest file for a given archetype. Refuses
 # (caller-side) to run if it's missing — caller checks file existence
 # after this returns.

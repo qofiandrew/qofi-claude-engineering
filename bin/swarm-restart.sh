@@ -140,8 +140,8 @@ swarm-restart: REFUSED — swarm '$NAME' is currently WORKING.
   Restarting will kill the tmux session. In-process teammates are
   RAM-only and do NOT survive a relaunch — uncommitted teammate
   progress is gone. The lead itself rebuilds from disk on relaunch
-  (CLAUDE.md, TEAM_LEAD.md, PROJECT_SPEC.md, committed worktree-<name>
-  branches), but anything a teammate hadn't committed is lost.
+  (its stamped doctrine + any committed branches per the archetype),
+  but anything not yet committed is lost.
 
   Either wait for the swarm to idle (>${STALE_SECONDS}s without a
   transcript write — swarm-status + the watcher's heartbeat are
