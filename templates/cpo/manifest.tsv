@@ -1,0 +1,58 @@
+# swarm manifest — single source of truth for what a `cpo` swarm contains.
+# Consumed by swarm-init.sh, swarm-sync.sh, and swarm-onboard.sh via
+# manifest_walk in swarm-lib.sh, so first-stamp, upgrade, and onboard cannot
+# diverge. Add a new artifact in ONE place: here.
+#
+# Per-type dispatch: at apply time, swarm_type_of() resolves a repo's archetype
+# from its .claude/swarm-type marker; for a cpo swarm the marker is 'cpo' and
+# this file is the consumed manifest.
+#
+# Format: behavior | template-path | target-path
+#   - lines starting with '#' and blank lines are ignored
+#   - fields are pipe-delimited, leading/trailing whitespace per field is trimmed
+#   - template-path is relative to $SWARM_HOME/templates/
+#   - target-path is relative to the target repo
+#     (except gitignore, where this field is .gitignore itself; the
+#     template-path is the line we ensure is present in it)
+#
+# Cpo-specific design notes:
+#   - The cpo swarm directory IS the operator's product-vision repo. Doctrine
+#     (CLAUDE/ESCALATION/CONVERSATION/EVALUATION/SURFACING/MEMORY/READINESS_BAR
+#     and product-template/) is refreshed centrally. Operator-owned content
+#     (products/, stress-test-log/) is seeded once and never touched by sync
+#     or --force.
+#   - The permission-gate ALLOWS git push (the cpo's function is pushing its
+#     own vision repo so the operator can read it). This diverges from
+#     engineering-cto, which denies push. Both compose against the same
+#     _base safety floor.
+#   - No TEAM_LEAD, no PROJECT_SPEC/ADR, no test-gate / docs-check /
+#     dod-affirm, no pre-commit hook, no test-cmd — the cpo is a single
+#     conversational agent, not a team-of-engineers building software.
+#
+# behavior        | template-path                                                                                                | target-path
+compose           | cpo/CLAUDE.preamble.md+_base/CLAUDE.md+cpo/CLAUDE.md                                                          | CLAUDE.md
+compose           | cpo/ESCALATION.preamble.md+_base/ESCALATION.md+cpo/ESCALATION.md                                              | ESCALATION.md
+refresh           | cpo/CONVERSATION.md                                                                                           | CONVERSATION.md
+refresh           | cpo/EVALUATION.md                                                                                             | EVALUATION.md
+refresh           | cpo/SURFACING.md                                                                                              | SURFACING.md
+refresh           | cpo/MEMORY.md                                                                                                 | MEMORY.md
+refresh           | cpo/READINESS_BAR.md                                                                                          | READINESS_BAR.md
+refresh           | cpo/product-template/README.md                                                                                | product-template/README.md
+refresh           | cpo/product-template/_meta.md                                                                                 | product-template/_meta.md
+refresh           | cpo/product-template/vision.md                                                                                | product-template/vision.md
+refresh           | cpo/product-template/function.md                                                                              | product-template/function.md
+refresh           | cpo/product-template/users.md                                                                                 | product-template/users.md
+refresh           | cpo/product-template/requirements.md                                                                          | product-template/requirements.md
+refresh           | cpo/product-template/scale.md                                                                                 | product-template/scale.md
+refresh           | cpo/product-template/constraints.md                                                                           | product-template/constraints.md
+refresh           | cpo/product-template/operability.md                                                                           | product-template/operability.md
+refresh           | cpo/product-template/reliability.md                                                                           | product-template/reliability.md
+refresh           | cpo/product-template/quality-bar.md                                                                           | product-template/quality-bar.md
+refresh           | cpo/product-template/security.md                                                                              | product-template/security.md
+refresh           | cpo/product-template/roadmap.md                                                                               | product-template/roadmap.md
+refresh           | cpo/product-template/decisions/README.md                                                                      | product-template/decisions/README.md
+compose           | _base/hooks/permission-gate-prelude.sh+cpo/hooks/permission-gate-policy.sh+_base/hooks/permission-gate-tail.sh | .claude/hooks/permission-gate.sh
+operator-owned    | cpo/products/.keep                                                                                            | products/.keep
+operator-owned    | cpo/stress-test-log/.keep                                                                                     | stress-test-log/.keep
+settings          | cpo/settings.example.json                                                                                     | .claude/settings.json
+gitignore         | .claude/worktrees/                                                                                            | .gitignore

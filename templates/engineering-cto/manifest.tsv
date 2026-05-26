@@ -55,7 +55,7 @@ seed         | engineering-cto/PROJECT_SPEC.template.md                         
 seed         | engineering-cto/ADR.template.md                                                                           | docs/adr/ADR.template.md
 refresh      | engineering-cto/hooks/test-gate.sh                                                                        | .claude/hooks/test-gate.sh
 refresh      | engineering-cto/hooks/docs-check.sh                                                                       | .claude/hooks/docs-check.sh
-refresh      | engineering-cto/hooks/permission-gate.sh                                                                  | .claude/hooks/permission-gate.sh
+compose      | _base/hooks/permission-gate-prelude.sh+engineering-cto/hooks/permission-gate-policy.sh+_base/hooks/permission-gate-tail.sh | .claude/hooks/permission-gate.sh
 refresh      | engineering-cto/hooks/dod-affirm.sh                                                                       | .claude/hooks/dod-affirm.sh
 settings     | engineering-cto/settings.example.json                                                                     | .claude/settings.json
 git-hook     | engineering-cto/git-hooks/pre-commit                                                                      | .git/hooks/pre-commit

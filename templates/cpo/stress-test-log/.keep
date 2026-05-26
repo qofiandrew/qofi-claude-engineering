@@ -1,0 +1,10 @@
+This directory holds the cpo's drift audit log — a compact record of past
+verdicts (item / risk / confidence / register / outcome) so the operator (or a
+review) can verify the cpo hasn't quietly reclassified dangerous items as
+routine over time. See MEMORY.md §drift audit and EVALUATION.md §failure modes.
+
+One file per audit slice, named `YYYY-MM-DD-<slug>.md`. Append-only by nature
+(past verdicts are evidence). Compact: one row per verdict, not full reasoning.
+
+This `.keep` file marks the directory as operator-owned at the manifest layer:
+swarm-init seeds it once; sync and --force never touch it.

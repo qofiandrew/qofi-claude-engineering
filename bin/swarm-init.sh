@@ -128,7 +128,21 @@ if [ "$rc" -ne 0 ]; then
   exit "$rc"
 fi
 
-cat <<'EOF'
+RESOLVED_TYPE="$(swarm_type_of "$REPO")"
+case "$RESOLVED_TYPE" in
+  cpo)
+    cat <<'EOF'
+
+Done. This repo is now an operator-owned product-vision store driven by the
+cpo agent. The cpo holds the conversation with you over Discord; you think
+out loud about products and the cpo refines your stream into clean specs
+under products/<product>/<facet>.md, with decisions captured in
+products/<product>/decisions/. See CLAUDE.md (the entry doctrine) and
+MEMORY.md (the write protocol) for what the cpo will and won't touch.
+EOF
+    ;;
+  *)
+    cat <<'EOF'
 
 Done. The lead launched against this repo will hold the design conversation
 with you over Discord; when you say 'go build,' it authors PROJECT_SPEC.md
@@ -136,3 +150,5 @@ and the one-way-door ADRs from the conversation, confirms with you, then
 decomposes and spawns. The stamped PROJECT_SPEC.md is a placeholder until
 then — see TEAM_LEAD.md.
 EOF
+    ;;
+esac

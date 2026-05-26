@@ -1,0 +1,25 @@
+{
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
+  "teammateMode": "in-process",
+  "enabledPlugins": {
+    "discord-b2b@qofi-swarm": true
+  },
+  "permissions": {
+    "allow": ["mcp__plugin_discord-b2b_discord__reply"]
+  },
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/permission-gate.sh\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -75,6 +75,24 @@ compose_check "CLAUDE.md" "tests/fixtures/CLAUDE.engineering-cto.expected.md" \
 compose_check "ESCALATION.md" "tests/fixtures/ESCALATION.engineering-cto.expected.md" \
   engineering-cto/ESCALATION.preamble.md _base/ESCALATION.md engineering-cto/ESCALATION.md
 
+# The permission-gate hook also composes (since the cpo archetype landed and
+# pushed the prelude/policy/tail split into _base + per-archetype). Round-trip
+# byte-identity for both archetypes' composed hooks.
+compose_check "engineering-cto permission-gate.sh" "tests/fixtures/permission-gate.engineering-cto.expected.sh" \
+  _base/hooks/permission-gate-prelude.sh engineering-cto/hooks/permission-gate-policy.sh _base/hooks/permission-gate-tail.sh
+
+echo ""
+echo "==> Round-trip: compose(cpo fragments) ≡ frozen fixtures"
+
+compose_check "cpo CLAUDE.md" "tests/fixtures/CLAUDE.cpo.expected.md" \
+  cpo/CLAUDE.preamble.md _base/CLAUDE.md cpo/CLAUDE.md
+
+compose_check "cpo ESCALATION.md" "tests/fixtures/ESCALATION.cpo.expected.md" \
+  cpo/ESCALATION.preamble.md _base/ESCALATION.md cpo/ESCALATION.md
+
+compose_check "cpo permission-gate.sh" "tests/fixtures/permission-gate.cpo.expected.sh" \
+  _base/hooks/permission-gate-prelude.sh cpo/hooks/permission-gate-policy.sh _base/hooks/permission-gate-tail.sh
+
 echo ""
 echo "==> Single-file refresh artifacts (no compose) ≡ frozen fixtures"
 for spec in \

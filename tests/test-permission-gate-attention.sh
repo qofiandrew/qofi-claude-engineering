@@ -18,17 +18,28 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-GATE="$SCRIPT_DIR/../templates/engineering-cto/hooks/permission-gate.sh"
+TEMPLATES="$SCRIPT_DIR/../templates"
 
-if [ ! -x "$GATE" ]; then
-  # The hook is invoked via `bash "$..."` in settings.json, so executable is
-  # not strictly required; readable is. But chmod +x is a convention worth
-  # flagging if it's missing.
-  if [ ! -r "$GATE" ]; then
-    echo "test: cannot read $GATE" >&2
+# The engineering-cto permission-gate hook is now COMPOSED from three
+# fragments (per templates/engineering-cto/manifest.tsv) — the same compose
+# path swarm-init/sync drive. We exercise the composed result, not any
+# fragment in isolation, so this test stays faithful to what a real stamped
+# repo actually executes.
+GATE="$(mktemp -t permission-gate-attention-test.XXXXXX)" || { echo "mktemp failed"; exit 1; }
+cleanup_gate() { rm -f "$GATE"; }
+trap cleanup_gate EXIT INT TERM
+
+for fragment in \
+  _base/hooks/permission-gate-prelude.sh \
+  engineering-cto/hooks/permission-gate-policy.sh \
+  _base/hooks/permission-gate-tail.sh
+do
+  if [ ! -r "$TEMPLATES/$fragment" ]; then
+    echo "test: cannot read $TEMPLATES/$fragment" >&2
     exit 1
   fi
-fi
+  cat "$TEMPLATES/$fragment" >> "$GATE"
+done
 
 PASS=0
 FAIL=0

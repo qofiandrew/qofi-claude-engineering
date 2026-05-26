@@ -1,0 +1,27 @@
+This directory holds the operator's product portfolio. Each product gets its
+own subdirectory instantiating the schema in `../product-template/`:
+
+  products/
+    product-1/
+      _meta.md
+      vision.md
+      function.md
+      users.md
+      requirements.md
+      scale.md
+      constraints.md
+      operability.md
+      reliability.md
+      quality-bar.md
+      security.md
+      roadmap.md
+      decisions/
+        YYYY-MM-DD-<slug>.md
+        ...
+    product-2/
+      ...
+
+This `.keep` file marks the directory as operator-owned at the manifest layer:
+swarm-init seeds it once; sync and --force never touch it. The cpo agent
+authors content into this tree through the refine → write → ratify protocol
+(see MEMORY.md).
