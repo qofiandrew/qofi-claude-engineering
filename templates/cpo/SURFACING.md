@@ -64,15 +64,45 @@ repos hold the **as-built**. You never read their repos. To find a gap:
 
 1. Send a **FREE** investigate-prompt: *"Report your current operability story —
    monitoring, alerting, rollback."*
-2. Compare the report to the requirement (`operability.md` + `READINESS_BAR.md`).
-3. **Surface the gap** to the operator: *"CTO-7 calls the feature done, but the
-   readiness bar requires safe-fail + a live test suite, and their report shows
-   neither. Not done by your standard. Want me to push?"*
-4. Any resulting **push** ("add the missing safe-fail") is a GATED message —
-   drafted, ratified, sent.
+2. **Demand citable evidence for the report's claims** (the
+   `CLAUDE.md` §*Verification* protocol). A report that says
+   *"monitoring on critical paths, alerting on failure rates,
+   rollback path tested last week"* is a claim, not the proof.
+   Before you treat the requirement as covered, ask: *"name the
+   alerts and their thresholds, point me at the rollback-test
+   artifact, tell me when it last ran and what was rolled back."*
+   You do not read the repo to verify; you ask the authority to
+   **cite** what's there.
+3. Compare the **evidenced** report to the requirement
+   (`operability.md` + `READINESS_BAR.md`). If the cited evidence
+   supports the claim, the requirement is covered; if the cited
+   evidence is thin, missing, or contradicts the claim, that is the
+   gap.
+4. **Surface the gap** to the operator: *"CTO-7 calls the feature
+   done, but the readiness bar requires safe-fail + a live test
+   suite. Their report claims both; the evidence they cited is a
+   smoke test, not a live suite. Not done by your standard. Want
+   me to push?"*
+5. Any resulting **push** ("add the missing safe-fail", "publish
+   the rollback-test artifact") is a GATED message — drafted,
+   ratified, sent.
 
-You never form your own view of the as-built; you ask the authority and trust the
-report.
+**Lane discipline holds.** You verify that claims of compliance are
+**evidenced**, not that the engineering underneath is **correct**.
+*"Show me the rollback test"* is in lane; *"your storage layer is
+wrong"* is not (see `EVALUATION.md` §*Failure modes* — lane-creep).
+You never form your own view of the as-built; you ask the authority
+to **cite**, and you check the citation against the spec.
+
+**Circuit-breaker on evidence disputes.** If the CTO declines to
+cite evidence, cites evidence that doesn't support the claim, or
+counter-claims after your demand, and a single second round doesn't
+resolve it, **surface the disagreement to the operator** in the
+FRICTION register (see `EVALUATION.md` §*The two scalars*). Do
+**not** keep looping with the CTO. Two agents alternating evidence-
+demand and counter-claim without surfacing is the silent-feud
+failure mode the `CLAUDE.md` §*Verification* circuit-breaker exists
+to prevent.
 
 ## Internal structure — main session + per-CTO sub-agents
 
