@@ -776,11 +776,21 @@ manifest_apply_operator_owned() {
   #     re-runs init.
   #   - check: report MISSING informationally, NOT as drift.
   #
+  # SUBTREE SEMANTICS. An entry whose target is `<dir>/.keep` declares the
+  # WHOLE `<dir>/` subtree operator-owned, not just the .keep marker. The
+  # .keep file is the seed anchor; the protected unit is the directory.
+  # An entry whose target is a real file (no `.keep` basename) protects
+  # exactly that path. The pre-walk in manifest_apply collects these as
+  # SWARM_OO_PREFIXES / SWARM_OO_FILES and refuses any other manifest
+  # entry that would write under a protected prefix or onto a protected
+  # file — so a future `refresh | ... | products/foo.md` is a fatal
+  # manifest defect, not a silent clobber.
+  #
   # Paired with the staging protection in templates/<type>/git-hooks/
   # pre-commit (Layer 3): the auto-stamped .claude/operator-owned-paths
-  # list is read by the hook to refuse teammate-worktree commits of any
-  # listed path, so a teammate cannot sweep an operator edit into the
-  # integration branch.
+  # list contains the canonical form (prefix entries end in `/`; exact
+  # entries do not) and the hook prefix-matches `/`-suffixed lines so a
+  # teammate cannot stage a file anywhere under an operator-owned subtree.
   local src_rel="$1" tgt_rel="$2"
   local src="$SWARM_HOME/templates/$src_rel"
   local tgt="$SWARM_APPLY_REPO/$tgt_rel"
@@ -1076,8 +1086,24 @@ manifest_apply_gitignore() {
 }
 
 # Dispatch one manifest line to the right helper.
+#
+# Before dispatch, refuse any non-operator-owned entry whose target falls
+# under an operator-owned subtree prefix (or exactly matches an operator-
+# owned file). This enforces the doctrine "products/ is operator-owned"
+# against every other class: a stray `refresh | ... | products/foo.md`
+# is rejected as a fatal manifest defect, never silently honored.
 _manifest_apply_one() {
   local behavior="$1" src="$2" tgt="$3"
+  if [ "$behavior" != "operator-owned" ] && _swarm_target_in_oo_subtree "$tgt"; then
+    echo "  ERROR: manifest entry '$behavior | $src | $tgt' targets operator-owned content (refused)" >&2
+    echo "         operator-owned subtrees + files in this manifest:" >&2
+    local p
+    for p in $SWARM_OO_PREFIXES $SWARM_OO_FILES; do
+      echo "           $p" >&2
+    done
+    SWARM_RESULT_FATAL=1
+    return 1
+  fi
   case "$behavior" in
     refresh)        manifest_apply_refresh        "$src" "$tgt" ;;
     compose)        manifest_apply_compose        "$src" "$tgt" ;;
@@ -1095,12 +1121,74 @@ _manifest_apply_one() {
   esac
 }
 
+# _swarm_oo_canonical TGT_REL — print the canonical operator-owned form
+# of a manifest target. A target whose basename is `.keep` declares the
+# WHOLE parent directory operator-owned, so it canonicalizes to
+# `<dir>/` (subtree prefix, trailing slash). Any other target
+# canonicalizes to itself (exact file). This is the single rule both
+# the prefix collector (manifest_apply) and the paths-list stamper
+# (_swarm_stamp_operator_owned_list) consume — keeping the in-memory
+# refusal set and the on-disk pre-commit contract in lockstep.
+_swarm_oo_canonical() {
+  local tgt_rel="$1"
+  case "$tgt_rel" in
+    */.keep|.keep)
+      local dir
+      dir="${tgt_rel%.keep}"
+      [ -z "$dir" ] && dir="./"
+      printf '%s' "$dir"
+      ;;
+    *)
+      printf '%s' "$tgt_rel"
+      ;;
+  esac
+}
+
+# _swarm_target_in_oo_subtree TGT_REL — return 0 if TGT_REL falls under
+# any operator-owned prefix (canonical form ending in `/`) or exactly
+# equals any operator-owned file (canonical form without `/`). Reads
+# SWARM_OO_PREFIXES + SWARM_OO_FILES, populated by manifest_apply's
+# pre-walk.
+_swarm_target_in_oo_subtree() {
+  local tgt_rel="$1" p
+  for p in $SWARM_OO_FILES; do
+    [ "$tgt_rel" = "$p" ] && return 0
+  done
+  for p in $SWARM_OO_PREFIXES; do
+    case "$tgt_rel" in
+      "$p"*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# _swarm_collect_oo_prefixes — manifest_walk callback that populates
+# SWARM_OO_PREFIXES (space-separated subtree prefixes, each ending in `/`)
+# and SWARM_OO_FILES (space-separated exact-file paths). Called in the
+# pre-walk before _manifest_apply_one so the dispatcher's refusal set is
+# fully known by the time any entry is processed.
+_swarm_collect_oo_prefixes() {
+  local behavior="$1" tgt="$3"
+  [ "$behavior" = "operator-owned" ] || return 0
+  local canon
+  canon="$(_swarm_oo_canonical "$tgt")"
+  case "$canon" in
+    */)  SWARM_OO_PREFIXES="$SWARM_OO_PREFIXES $canon" ;;
+    *)   SWARM_OO_FILES="$SWARM_OO_FILES $canon" ;;
+  esac
+}
+
 # _swarm_stamp_operator_owned_list REPO
 #
 # Maintain .claude/operator-owned-paths — a flat list of every operator-
-# owned target path in the current archetype's manifest, one per line.
-# Read by templates/<type>/git-hooks/pre-commit (Layer 3) to refuse
-# teammate-worktree commits of operator-authored content.
+# owned target in the current archetype's manifest, one per line, in
+# CANONICAL form: a `<dir>/.keep` manifest entry stamps as `<dir>/` (the
+# whole directory, subtree-prefix form, trailing slash); any other
+# operator-owned entry stamps as itself (exact-file form). Read by
+# templates/<type>/git-hooks/pre-commit (Layer 3) which prefix-matches
+# `/`-suffixed lines and exact-matches the rest, so a teammate cannot
+# stage anything under an operator-owned subtree or onto an exact
+# operator-owned file.
 #
 # Always reflects the current manifest exactly:
 #   - has entries → file written with current set (overwrites stale).
@@ -1120,7 +1208,7 @@ _swarm_stamp_operator_owned_list() {
   : > "$tmp"
   _collect_oo() {
     case "$1" in
-      operator-owned) printf '%s\n' "$3" >> "$tmp" ;;
+      operator-owned) _swarm_oo_canonical "$3" >> "$tmp"; printf '\n' >> "$tmp" ;;
     esac
   }
   manifest_walk _collect_oo >/dev/null
@@ -1194,7 +1282,14 @@ manifest_apply() {
   SWARM_RESULT_COLLISIONS=""
   SWARM_RESULT_FOREIGN_PRECOMMIT=0
   SWARM_RESULT_FATAL=0
+  # Pre-walk: collect operator-owned prefixes + exact files so the
+  # dispatcher can refuse any other manifest entry that would write into
+  # an operator-owned subtree (the doctrine "products/ is sacred"
+  # enforced across every class, every --force flag).
+  SWARM_OO_PREFIXES=""
+  SWARM_OO_FILES=""
   export SWARM_APPLY_REPO SWARM_APPLY_MODE SWARM_APPLY_TYPE
+  manifest_walk _swarm_collect_oo_prefixes >/dev/null || return $?
   manifest_walk _manifest_apply_one || return $?
   [ "$SWARM_RESULT_FATAL" -eq 1 ] && return 1
   # Auto-stamp the operator-owned paths list (no-op if no entries; deletes

@@ -15,11 +15,21 @@
 #   (c) swarm-sync (even with --force past the dirty-tree refusal) leaves
 #       the file BYTE-UNCHANGED and never auto-stages it
 #   (d) the auto-stamped .claude/operator-owned-paths list matches the
-#       manifest's operator-owned entries
+#       manifest's operator-owned entries in CANONICAL form (subtree
+#       prefixes end in `/`; exact-file entries do not)
 #   (e) removing operator-owned entries from the manifest causes the list
 #       to be deleted on next apply (no stale block-list)
 #   (f) the pre-commit hook (Layer 3) blocks a teammate-worktree commit
-#       that stages an operator-owned path
+#       that stages an operator-owned path (exact-file form)
+#   (g) SUBTREE semantics: an entry whose target is `<dir>/.keep` declares
+#       the whole `<dir>/` subtree operator-owned. Operator-authored files
+#       under that subtree (`<dir>/<slug>/facet.md`) survive --force re-seed
+#       AND sync byte-unchanged. The stamped list contains `<dir>/`.
+#   (h) the manifest dispatcher REFUSES any non-OO entry whose target falls
+#       under an operator-owned subtree prefix (a stray
+#       `refresh | ... | products/foo.md` is a fatal manifest defect)
+#   (i) the pre-commit hook prefix-matches subtree entries (a teammate
+#       worktree commit of a file ANYWHERE under an OO subtree is blocked)
 #
 # Strategy: isolated SWARM_HOME (mktemp) with a minimal test archetype that
 # contains a single operator-owned entry. No pollution of the real
@@ -55,13 +65,21 @@ touch "$FAKE_HOME/swarm.conf"
 
 cat > "$FAKE_HOME/templates/test-oo/manifest.tsv" <<'EOF'
 # minimal test archetype for operator-owned protection
+# Two operator-owned entries cover both canonical forms:
+#   - exact-file:   docs/product-vision.md   (non-.keep target)
+#   - subtree:      products/                (declared by products/.keep)
 operator-owned | test-oo/vision-template.md | docs/product-vision.md
+operator-owned | test-oo/products-keep      | products/.keep
 gitignore      | .claude/worktrees/         | .gitignore
 EOF
 
 cat > "$FAKE_HOME/templates/test-oo/vision-template.md" <<'EOF'
 # Product Vision (operator authors this)
 Placeholder seeded by swarm-init. The operator replaces this body.
+EOF
+
+cat > "$FAKE_HOME/templates/test-oo/products-keep" <<'EOF'
+products/ is operator-owned (subtree).
 EOF
 
 # ---------------------------------------------------------------------------
@@ -172,19 +190,22 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "==> (d) .claude/operator-owned-paths is stamped + matches the manifest"
+echo "==> (d) .claude/operator-owned-paths is stamped + matches the manifest (canonical form)"
 
 if [ -f "$REPO/.claude/operator-owned-paths" ]; then
   pass "operator-owned-paths list exists"
 else
   fail "operator-owned-paths list MISSING"
 fi
-EXPECT="docs/product-vision.md"
+# Canonical form: .keep entries collapse to the parent subtree (trailing
+# slash); exact-file entries stamp as themselves. Order follows manifest
+# order.
+EXPECT="$(printf 'docs/product-vision.md\nproducts/\n')"
 ACTUAL="$(cat "$REPO/.claude/operator-owned-paths" 2>/dev/null)"
 if [ "$ACTUAL" = "$EXPECT" ]; then
-  pass "operator-owned-paths content == $EXPECT"
+  pass "operator-owned-paths content matches canonical form (exact + subtree)"
 else
-  fail "operator-owned-paths content mismatch: got '$ACTUAL', want '$EXPECT'"
+  fail "operator-owned-paths content mismatch: got '$(printf '%s' "$ACTUAL" | tr '\n' '|')', want '$(printf '%s' "$EXPECT" | tr '\n' '|')'"
 fi
 
 # ---------------------------------------------------------------------------
@@ -202,13 +223,14 @@ else
   pass "operator-owned-paths removed on next apply (no stale block-list)"
 fi
 
-# Restore the entry for the staging-exclusion test below.
+# Restore both entries for the staging-exclusion + subtree tests below.
 cat > "$FAKE_HOME/templates/test-oo/manifest.tsv" <<'EOF'
 operator-owned | test-oo/vision-template.md | docs/product-vision.md
+operator-owned | test-oo/products-keep      | products/.keep
 gitignore      | .claude/worktrees/         | .gitignore
 EOF
 manifest_apply "$REPO" sync >/dev/null
-git -C "$REPO" add .claude/operator-owned-paths 2>/dev/null
+git -C "$REPO" add .claude/operator-owned-paths products/.keep 2>/dev/null
 git -C "$REPO" commit -q -m "restamp operator-owned-paths" >/dev/null 2>&1 || true
 
 # ---------------------------------------------------------------------------
@@ -267,6 +289,123 @@ if [ -n "$WT_PATH" ]; then
     pass "main-tree commits of operator-owned content are NOT blocked"
   else
     fail "main-tree commit of operator-owned content was blocked (false positive)"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "==> (g) subtree semantics: file at products/<slug>/<facet>.md survives --force AND sync"
+
+# The operator authors content UNDER the operator-owned subtree (the
+# realistic CPO case: products/swarm-system/vision.md). The .keep file is
+# only the seed anchor; the doctrine says the whole `products/` subtree is
+# operator-owned. If --force or sync clobber a file deep in that subtree,
+# the gap this fix exists to close has regressed.
+mkdir -p "$REPO/products/swarm-system"
+cat > "$REPO/products/swarm-system/vision.md" <<'SUBTREE_EOF'
+# swarm-system vision (operator-authored under products/)
+This file lives at products/<slug>/<facet>.md — a SUBTREE path, not the
+.keep anchor. It must survive every swarm operation byte-unchanged.
+SUBTREE_EOF
+git -C "$REPO" add products/swarm-system/vision.md
+git -C "$REPO" commit -q -m "operator authors products/swarm-system/vision.md"
+
+SUB_ORIG_SHA="$(shasum "$REPO/products/swarm-system/vision.md" | awk '{print $1}')"
+
+SWARM_FORCE_SEED=1 manifest_apply "$REPO" init >/dev/null
+SUB_NEW_SHA="$(shasum "$REPO/products/swarm-system/vision.md" | awk '{print $1}')"
+if [ "$SUB_ORIG_SHA" = "$SUB_NEW_SHA" ]; then
+  pass "products/swarm-system/vision.md byte-unchanged after manifest_apply init --force (subtree-protected)"
+else
+  fail "products/swarm-system/vision.md CHANGED after --force re-seed (subtree leak)"
+fi
+unset SWARM_FORCE_SEED
+
+manifest_apply "$REPO" sync >/dev/null
+SUB_NEW_SHA="$(shasum "$REPO/products/swarm-system/vision.md" | awk '{print $1}')"
+if [ "$SUB_ORIG_SHA" = "$SUB_NEW_SHA" ]; then
+  pass "products/swarm-system/vision.md byte-unchanged after manifest_apply sync (subtree-protected)"
+else
+  fail "products/swarm-system/vision.md CHANGED after sync (subtree leak)"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "==> (h) dispatcher REFUSES a non-OO entry that targets a path under an OO subtree"
+
+# A stray `refresh | template | products/foo.md` is a manifest defect: the
+# whole point of the operator-owned subtree class is that nothing else in
+# the manifest may write under it. The dispatcher must refuse on apply.
+cat > "$FAKE_HOME/templates/test-oo/refresh-target.md" <<'EOF'
+# would-be refresh into products/foo.md
+EOF
+
+cat > "$FAKE_HOME/templates/test-oo/manifest.tsv" <<'EOF'
+operator-owned | test-oo/vision-template.md | docs/product-vision.md
+operator-owned | test-oo/products-keep      | products/.keep
+refresh        | test-oo/refresh-target.md  | products/foo.md
+gitignore      | .claude/worktrees/         | .gitignore
+EOF
+
+REFUSE_OUT="$(manifest_apply "$REPO" sync 2>&1)"
+REFUSE_RC=$?
+if [ "$REFUSE_RC" -ne 0 ] && printf '%s' "$REFUSE_OUT" | grep -q 'targets operator-owned content'; then
+  pass "dispatcher refused refresh entry under products/ (subtree violation)"
+else
+  fail "dispatcher did NOT refuse refresh under products/ (rc=$REFUSE_RC, out=$REFUSE_OUT)"
+fi
+
+# Crucially: the operator's subtree file must remain byte-unchanged even
+# though the dispatcher returned an error — refusal is fail-loud + safe.
+SUB_NEW_SHA="$(shasum "$REPO/products/swarm-system/vision.md" | awk '{print $1}')"
+if [ "$SUB_ORIG_SHA" = "$SUB_NEW_SHA" ]; then
+  pass "operator subtree file unchanged after refused dispatch"
+else
+  fail "operator subtree file CHANGED while dispatcher was refusing (worst case)"
+fi
+# Also: products/foo.md (the refused target) must NOT have been written.
+if [ ! -e "$REPO/products/foo.md" ]; then
+  pass "refused target products/foo.md was never written"
+else
+  fail "refused target products/foo.md was written despite refusal"
+fi
+
+# Restore clean manifest for the next test.
+cat > "$FAKE_HOME/templates/test-oo/manifest.tsv" <<'EOF'
+operator-owned | test-oo/vision-template.md | docs/product-vision.md
+operator-owned | test-oo/products-keep      | products/.keep
+gitignore      | .claude/worktrees/         | .gitignore
+EOF
+manifest_apply "$REPO" sync >/dev/null
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "==> (i) pre-commit hook prefix-matches subtree entries (teammate cannot stage anything under products/)"
+
+# The hook is still installed from (f). Create a fresh teammate worktree
+# (the one from (f) is left in a state we don't want to depend on).
+WT2_NAME="bob"
+WT2_PATH="$REPO/.claude/worktrees/$WT2_NAME"
+git -C "$REPO" worktree add -q -b "worktree-$WT2_NAME" "$WT2_PATH" >/dev/null 2>&1 || {
+  fail "could not create second teammate worktree (skipping subtree hook test)"
+  WT2_PATH=""
+}
+
+if [ -n "$WT2_PATH" ]; then
+  # Teammate tries to commit a NEW file under the OO subtree (not
+  # products/.keep itself — a file under it). The pre-commit hook must
+  # prefix-match products/ and BLOCK.
+  mkdir -p "$WT2_PATH/products/swarm-system"
+  echo "# teammate sneaking edit into products/<slug>/vision.md" > "$WT2_PATH/products/swarm-system/teammate-edit.md"
+  git -C "$WT2_PATH" add products/swarm-system/teammate-edit.md
+  # Layer 1 (docs-touched) is satisfied — the staged file is .md.
+
+  HOOK_OUT="$(git -C "$WT2_PATH" commit -m "teammate edits subtree" 2>&1)"
+  HOOK_RC=$?
+  if [ "$HOOK_RC" -ne 0 ] && printf '%s' "$HOOK_OUT" | grep -q 'operator-owned content' && printf '%s' "$HOOK_OUT" | grep -q 'products/'; then
+    pass "pre-commit hook BLOCKED teammate commit of products/swarm-system/teammate-edit.md (subtree prefix match)"
+  else
+    fail "pre-commit hook did NOT block teammate subtree commit (rc=$HOOK_RC, out=$HOOK_OUT)"
   fi
 fi
 

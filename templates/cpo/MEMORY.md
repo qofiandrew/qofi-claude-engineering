@@ -80,7 +80,9 @@ is part of the protocol.
 
 The product vision repo is **operator-owned at the manifest layer**: `products/`
 and `stress-test-log/` are seeded once by swarm-init and never overwritten by
-sync or `--force` (see the `operator-owned` class in the manifest). Everything
+sync or `--force` — the protection is subtree-wide, so every file you author
+under those directories (e.g. `products/<slug>/vision.md`) is covered, not just
+the `.keep` marker. See the `operator-owned` class in the manifest. Everything
 you write inside those directories is your authoring within the operator's
 repository — they own the repo; you author into it through this protocol.
 

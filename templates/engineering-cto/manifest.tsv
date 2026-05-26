@@ -34,11 +34,19 @@
 #               but with one CRITICAL difference: --force does NOT re-seed.
 #               For content the OPERATOR authors and owns (e.g. cpo
 #               product-vision.md). swarm-init --force never clobbers it;
-#               sync never touches it; the auto-stamped .claude/operator-
-#               owned-paths list is read by the pre-commit hook (Layer 3)
-#               to refuse teammate-worktree commits of any listed path. To
-#               reset operator-owned content, the operator deletes the
-#               file by hand and re-runs init.
+#               sync never touches it. SUBTREE SEMANTICS: an entry whose
+#               target is `<dir>/.keep` declares the WHOLE `<dir>/`
+#               subtree operator-owned — the manifest dispatcher refuses
+#               ANY other entry that targets a path under that prefix
+#               (regardless of class or --force flag), so future writes
+#               under e.g. `products/` are a fatal manifest defect rather
+#               than a silent clobber. The auto-stamped .claude/operator-
+#               owned-paths list contains canonical entries (subtree
+#               prefixes end in `/`, exact files do not) and is read by
+#               the pre-commit hook (Layer 3) to refuse teammate-worktree
+#               commits that stage anything matching. To reset operator-
+#               owned content, the operator deletes the file by hand and
+#               re-runs init.
 #   settings    structured-merge swarm hook registrations + env + permissions
 #               into the existing settings.json. Never clobber; additive +
 #               dedup-by-command. See manifest_apply_settings.

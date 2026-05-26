@@ -7,9 +7,11 @@
 #   (a) swarm-init --type cpo against this repo's SWARM_HOME stamps the
 #       complete cpo file set (doctrine, product-template tree, operator-
 #       owned seeds, permission-gate, settings).
-#   (b) The operator-owned cpo paths (products/.keep + stress-test-log/.keep)
-#       survive swarm-sync byte-unchanged AND survive swarm-init --force
-#       byte-unchanged (the operator-owned class promise on the real manifest).
+#   (b) The operator-owned cpo subtrees (products/ + stress-test-log/, each
+#       declared by a `.keep` anchor) survive swarm-sync byte-unchanged AND
+#       survive swarm-init --force byte-unchanged. Verified at the .keep
+#       anchor here; the subtree-wide protection of files like
+#       products/<slug>/vision.md is proven by test-operator-owned-protection.sh.
 #   (c) The composed cpo permission-gate.sh DIVERGES from engineering-cto's
 #       on `git push` (cpo allows; engineering denies). This is the cpo's
 #       distinguishing capability — it gets its own test so the divergence
@@ -106,10 +108,13 @@ for f in "${NEGATIVE[@]}"; do
 done
 pass "engineering-cto-specific artifacts correctly absent from cpo init"
 
-# operator-owned-paths matches the manifest's operator-owned entries.
-EXPECT_OOP="$(printf '%s\n' 'products/.keep' 'stress-test-log/.keep')"
+# operator-owned-paths matches the manifest's operator-owned entries in
+# CANONICAL form: a `<dir>/.keep` manifest target declares the whole
+# `<dir>/` subtree operator-owned and stamps as `<dir>/` (trailing slash,
+# subtree-prefix form). See _swarm_oo_canonical in swarm-lib.sh.
+EXPECT_OOP="$(printf '%s\n' 'products/' 'stress-test-log/')"
 if [ "$(cat "$REPO/.claude/operator-owned-paths" 2>/dev/null)" = "$EXPECT_OOP" ]; then
-  pass "operator-owned-paths lists products/.keep + stress-test-log/.keep"
+  pass "operator-owned-paths lists products/ + stress-test-log/ (canonical subtree form)"
 else
   fail "operator-owned-paths mismatch:"
   cat "$REPO/.claude/operator-owned-paths" 2>/dev/null | sed 's/^/    /'

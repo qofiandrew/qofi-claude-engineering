@@ -6,5 +6,7 @@ routine over time. See MEMORY.md §drift audit and EVALUATION.md §failure modes
 One file per audit slice, named `YYYY-MM-DD-<slug>.md`. Append-only by nature
 (past verdicts are evidence). Compact: one row per verdict, not full reasoning.
 
-This `.keep` file marks the directory as operator-owned at the manifest layer:
-swarm-init seeds it once; sync and --force never touch it.
+This `.keep` file marks the WHOLE directory operator-owned at the manifest
+layer (subtree semantics): swarm-init seeds the `.keep` once; sync and --force
+never touch anything under `stress-test-log/`; the manifest dispatcher refuses
+any other manifest entry that would target a path under this subtree.

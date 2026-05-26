@@ -22,13 +22,17 @@
 #       won't be caught — that's the §Secrets doctrine's job.
 #
 #   (3) Operator-owned content (teammate worktrees only) — refuse to commit
-#       any path listed in .claude/operator-owned-paths when the commit is
-#       being made from a .claude/worktrees/<name>/ teammate tree. Pairs
-#       with the manifest's `operator-owned` class: the class guarantees
-#       swarm-init/sync never WRITE the file; this layer guarantees a
-#       teammate cannot accidentally STAGE the operator's edits into the
-#       integration branch. Outside teammate worktrees (operator/CTO main
-#       tree) this layer is silent — the human at the keyboard owns
+#       any path matched by .claude/operator-owned-paths when the commit is
+#       being made from a .claude/worktrees/<name>/ teammate tree. Matching
+#       is canonical: a list line ending in `/` is a SUBTREE PREFIX (every
+#       staged path under it is blocked — so `products/` blocks
+#       `products/<slug>/vision.md`); any other line is an exact-file
+#       match. Pairs with the manifest's `operator-owned` class: the class
+#       guarantees swarm-init/sync never WRITE under the subtree (and the
+#       dispatcher refuses any other manifest entry that would); this layer
+#       guarantees a teammate cannot accidentally STAGE the operator's edits
+#       into the integration branch. Outside teammate worktrees (operator/CTO
+#       main tree) this layer is silent — the human at the keyboard owns
 #       changes to operator content.
 #
 # Bypass: `git commit --no-verify` skips this hook. CLAUDE.md §Verification
@@ -153,16 +157,42 @@ case "$TOPLEVEL" in
     if [ -f "$OO_LIST" ]; then
       while IFS= read -r oo_path; do
         [ -z "$oo_path" ] && continue
-        if printf '%s\n' "$STAGED" | grep -qxF "$oo_path"; then
+        # Canonical form: a line ending in `/` is a subtree prefix
+        # (every staged path under it is blocked); any other line is
+        # an exact-file match. Stamped by manifest_apply from the
+        # `operator-owned` class — keep this matcher in lockstep with
+        # _swarm_oo_canonical in swarm-lib.sh.
+        oo_hit=""
+        case "$oo_path" in
+          */)
+            while IFS= read -r staged_path; do
+              [ -z "$staged_path" ] && continue
+              case "$staged_path" in
+                "$oo_path"*) oo_hit="$staged_path"; break ;;
+              esac
+            done <<EOF_STAGED
+$STAGED
+EOF_STAGED
+            ;;
+          *)
+            if printf '%s\n' "$STAGED" | grep -qxF "$oo_path"; then
+              oo_hit="$oo_path"
+            fi
+            ;;
+        esac
+        if [ -n "$oo_hit" ]; then
           {
-            echo "pre-commit: BLOCKED — '$oo_path' is operator-owned content."
+            echo "pre-commit: BLOCKED — '$oo_hit' is operator-owned content."
+            case "$oo_path" in
+              */) echo "             (matched operator-owned subtree '$oo_path')" ;;
+            esac
             echo ""
             echo "Teammate worktrees cannot commit operator-owned files. The"
             echo "operator authors these in the main tree. If your work needs"
             echo "a change to this content, escalate to the CTO."
             echo ""
             echo "Unstage the file and re-commit:"
-            echo "    git restore --staged '$oo_path'"
+            echo "    git restore --staged '$oo_hit'"
           } >&2
           exit 1
         fi
