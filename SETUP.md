@@ -627,7 +627,7 @@ either is unset, the local `status.json` is still written but no POST is made.
 time you stand up a swarm. The abbreviated version, for reference:
 
 1. **Create the application** at https://discord.com/developers/applications
-   → "New Application" → name it `swarm-<name>` (convention).
+   → "New Application" → name it `<repo>-bot` (convention).
 2. **Enable the privileged intent.** Bot sidebar → "Privileged Gateway
    Intents" → toggle on **MESSAGE CONTENT INTENT** → Save Changes.
    *(Of the four intents the bridge requests in
