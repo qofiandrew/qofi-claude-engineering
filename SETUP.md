@@ -68,12 +68,15 @@ under `groups.<channel-id>.requireMention` if you want passive listening.
 
 `swarm-up.sh launch_one()` now hard-refuses (exit 1) before launching if
 the swarm isn't fully configured: missing `enabledPlugins`, missing
-`access.json` group for the channel, or missing doctrine
-(`CLAUDE.md`/`ESCALATION.md`/`TEAM_LEAD.md`). The remediation it prints
-is always the same: `bin/swarm-add.sh <name> <repo> --skip-walkthrough`.
-The "I know what I'm doing" bypass is `SWARM_UP_SKIP_SANITY=1`. These
-gates exist specifically to turn today's silent half-launches into loud
-refusals.
+`access.json` group for the channel, missing doctrine
+(`CLAUDE.md`/`ESCALATION.md`/`TEAM_LEAD.md`), or missing
+`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in the repo's
+`.claude/settings.json` `env` block (without that flag Agent Teams
+silently disables and the lead can never spawn teammates). The
+remediation it prints is always the same: `bin/swarm-add.sh <name>
+<repo> --skip-walkthrough`. The "I know what I'm doing" bypass is
+`SWARM_UP_SKIP_SANITY=1`. These gates exist specifically to turn
+today's silent half-launches into loud refusals.
 
 ---
 
