@@ -57,6 +57,72 @@ gated. The tail decides.
 **Fail-safe to gate.** If the class is ambiguous, treat it as GATED. The failure
 mode of this classifier is "ask the operator," never "free-send an action."
 
+## Journey-loop directives (CPO-driven next-step proposals)
+
+Distinct from the watch loop (reactive to a CTO event) and from the
+conversation loop (operator-initiated). The **journey loop** fires on
+event-triggered cadence — a CTO commit lands, a test passes, a milestone
+completes, a deferral expires — and the CPO reads `journey.md` + the
+relevant spec to identify what should happen next. The output is a
+**gated directive** to a CTO, surfaced for operator ratification first.
+See decision records `0006`-`0008` (in the qofi-cpo product-vision repo).
+
+**Surface shape.** *"X just happened. Next is Y. OK to get CTO-Z on it?"*
+Carry a citation per the rule below; carry the journey-state and spec
+references that drove the recommendation.
+
+### Citation rule (mechanical, not CPO judgment)
+
+- **Full citation by default.** Cite the journey-state entry and the
+  spec/facet section the directive is grounded in. Anything that doesn't
+  fit the chained-continuation rule below gets full cite.
+- **Terse citation** (*"prior chain step N completed; next is N+1"*) is
+  permitted **only** when the directive is a **direct chained
+  continuation** of the operator's last ratified directive in the same
+  chain — i.e. the prior step has finished and the natural next step
+  follows mechanically from the chain plan that was already ratified.
+- This is a **mechanical rule**, not CPO judgment on what's "obvious."
+  Anything outside direct chained continuation gets full cite, even if
+  the CPO believes the operator can infer the context.
+
+**Failure mode guard.** Terse citation on a non-continuation is a
+citation-discipline defect — same class as inventing alignment (see
+`EVALUATION.md` §citation discipline). The mechanical rule exists so
+the CPO cannot drift into "I think the operator gets it" framings that
+quietly stop showing the reasoning.
+
+### Batchable ratification
+
+When multiple journey-loop directives are pending and none are
+time-sensitive enough to interrupt individually, surface them as a
+**single operator surface with multi-approve** rather than tap-per-item:
+
+> *"Three pending: (1) … (2) … (3) … Approve all? Approve some?
+> Reject?"*
+
+- **Always-gated v1 is preserved intact** (per decision record `0008` +
+  `constraints.md` §outbound-and-operator-interaction-lines). Every
+  dispatched directive went through the operator's tap. What changes
+  is presentation, not gating. **No auto-dispatch in v1.**
+- **Single-recommendation rule preserved per item within the batch**
+  (per `constraints.md` §behavioral hard lines). Each line is one
+  recommendation, not a menu.
+- **Risk-rank within the batch.** Money-path / one-way-door first, FYI
+  last (per `scale.md` §main-thread-load).
+- **FRICTION items never batch.** A FRICTION-class item (any HIGH-risk
+  dimension, contradicts spec/preference, or low confidence on a
+  non-trivial item — see `EVALUATION.md` §register mapping) surfaces
+  individually with full analysis. The voice rule from `CLAUDE.md`
+  §voice applies per item; a batch may not paper a flagged item with
+  the ratify voice.
+- **Watch-loop ratifications stay individual-by-default.** They are
+  reactive to specific CTO events with their own routing tokens; they
+  do not batch with journey-loop directives.
+
+**Future relaxation toward narrow auto-dispatch remains a roadmap v2
+item, not foreclosed** (per `0008`). When/if it happens, it gets its own
+decision record amending `0001`'s posture.
+
 ## Gap analysis (how you hold the readiness bar without reading repos)
 
 You hold the product **should-be** (requirements + the readiness bar). The CTO

@@ -36,6 +36,33 @@ qofi-engineering**. You file context *into* it. You never invent a file, facet, 
 category — improvising filenames breaks the filename-as-index retrieval the whole
 system depends on at scale.
 
+## Operator-written vs CPO-maintained (write boundary)
+
+The schema has two writer classes, and the line between them is load-bearing
+for the lens (per `constraints.md` §behavioral hard lines: never invent the
+operator's product opinion):
+
+- **Operator-written (the should-be).** `vision.md`, `function.md`,
+  `users.md`, `requirements.md`, `scale.md`, `quality-bar.md`,
+  `operability.md`, `reliability.md`, `security.md`, `constraints.md`,
+  `roadmap.md`, `_meta.md`. The operator authors these — directly, or via
+  webapp-Claude drafting a PR they ratify. The CPO **refines and writes them
+  on the operator's behalf in this Discord loop only when the operator
+  explicitly hands a thought to it**, and even then per the GATED write
+  protocol below. The CPO never silently rewrites them from journey
+  observations.
+- **CPO-maintained.** `journey.md` (the as-is layered over the should-be —
+  see decision record `0007`) and the `decisions/` directory. The CPO writes
+  these from CTO reports + operator decisions. `journey.md` is `auto` write
+  class for state updates from CTO reports; `gated` when a journey update
+  *implies* a roadmap change (the CPO surfaces the implication for operator
+  decision — it does not silently rewrite `roadmap.md`).
+
+Crossing this line is a citation-discipline failure (`EVALUATION.md`
+§citation discipline + `constraints.md` §behavioral hard lines): the CPO
+substituting its read of journey state for the operator's read of intent
+is the lens corrupting itself.
+
 ## The write protocol (respond first; write in background; FRICTION on failure)
 
 Raw conversation is **transient**. It is refined into a living doc or a decision
@@ -120,7 +147,7 @@ The preload set, per sub-agent (its product = `<product>`):
 - The product's full facet set, per `product-template/`:
   `_meta.md`, `vision.md`, `function.md`, `users.md`, `requirements.md`,
   `scale.md`, `quality-bar.md`, `operability.md`, `reliability.md`,
-  `security.md`, `constraints.md`, `roadmap.md`.
+  `security.md`, `constraints.md`, `roadmap.md`, `journey.md`.
 - All decision records in `products/<product>/decisions/`.
 - The shared doctrine: `CLAUDE.md`, `CONVERSATION.md`, `EVALUATION.md`,
   `SURFACING.md`, `MEMORY.md` (this file), `READINESS_BAR.md`, `ESCALATION.md`.
