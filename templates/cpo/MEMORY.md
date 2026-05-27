@@ -36,7 +36,7 @@ qofi-engineering**. You file context *into* it. You never invent a file, facet, 
 category — improvising filenames breaks the filename-as-index retrieval the whole
 system depends on at scale.
 
-## The write protocol (refine → write → [ratify] → discard)
+## The write protocol (respond first; write in background; FRICTION on failure)
 
 Raw conversation is **transient**. It is refined into a living doc or a decision
 record, and then discarded. Two write classes:
@@ -44,25 +44,97 @@ record, and then discarded. Two write classes:
 **AUTO** — routine context: decision records, minor doc edits, non-core
 observations.
 ```
-refine → write via GitHub API → confirm the write succeeded → discard the raw
+refine → respond to operator → (background) write via git push
+       → on success: silent confirm in next surface; discard the raw
+       → on failure: FRICTION interrupt with refined content + write error;
+                     retain raw until the operator resolves it
 ```
 
 **GATED** — core vision changes: edits to a product's core bet, priorities,
 constraints, or anything the operator would consider "big vision stuff."
 ```
 refine → present the refined version to the operator → operator RATIFIES
-        → write via GitHub API → confirm success → discard the raw
+       → respond to operator → (background) write via git push
+       → on success: silent confirm in next surface; discard the raw
+       → on failure: FRICTION interrupt with refined content + write error;
+                     retain raw until the operator re-ratifies or corrects
 ```
 
+**Respond first; write in the background.** The operator-perceived latency on
+the conversation loop runs at model-speed. The total wall-clock work is
+unchanged — what shifts is the order relative to the visible response. See
+decision record `0005`.
+
 **Discard is always the last step, and never before the write is confirmed
-landed.** If the write fails (API error, conflict), the raw is retained and the
-write retried — a refined insight is never lost to a discard that outran a failed
-write. For GATED writes, **the raw persists in the live conversation until the
-operator has ratified the refined version** — the operator is the commit point;
-nothing core is discarded before they've blessed what it became.
+landed.** The guarantee is unchanged: a refined insight is never lost to a
+discard that outran a failed write. What moves is *where* the refined content
+lives between the response and the confirmed write — in the background-write
+queue rather than the live conversation. If the write fails after the operator
+has moved on, the queued refined content + the write error surface as a
+**FRICTION-class interrupt** (see `EVALUATION.md` §the two scalars) so the
+operator can re-ratify, correct, or otherwise resolve. No silent loss.
+
+For GATED writes, **the operator's ratification still happens before the
+response** — the *write* is what defers, not the ratification. Nothing core
+gets queued for background write that hasn't been blessed.
 
 *Most writes are AUTO.* The gate exists for the core lens, not for routine
 sharpening — consistent with "confirm before big vision stuff, most automatic."
+
+## Startup — warm sub-agent per product
+
+At CPO startup, the main session spawns **one sub-agent per product** in the
+portfolio. Each is preloaded (see §preload) with its product's facet set and
+stays warm for the session. Watch-loop prods route to the matching warm
+sub-agent — there is no per-event spawn, no per-event preload. See decision
+record `0003`.
+
+- **Granularity is per-product, not per-CTO.** The memory schema is
+  per-product; the warm session binds to the product so it survives CTO-side
+  identity changes and aligns with the facet set.
+- **Memory overhead is the accepted cost.** N warm sessions for N products is
+  more Max-pool footprint than on-demand. The operator accepted the trade for
+  the watch-loop latency win.
+- **Sub-agent isolation is unchanged.** Per `SURFACING.md` §internal structure
+  and `constraints.md` §routing safety: no Discord identity, never talks to
+  the operator or a CTO, reports up only, never makes a cross-CTO call.
+- **Re-preload trigger.** Any commit to a product's facet files or its
+  `decisions/` directory during the session must re-run the preload for that
+  product's warm sub-agent — preloaded context goes stale if memory edits
+  land mid-session. The trigger *event* is named here; the *mechanism*
+  (git hook, polled `git fetch`, push-side webhook) is an engineering call,
+  not doctrine.
+- **Portfolio growth.** A new product gets a new warm sub-agent at next
+  startup (or hot-spawned with the same preload contract). Zero per-product
+  preload code; the schema is the contract.
+
+## Preload — deterministic read at sub-agent startup
+
+Sub-agents do **not** discover the memory schema with `view directory`, `grep`,
+or `find`. The schema is doctrine; the file set is known. At sub-agent startup
+a deterministic preload step `cat`s a fixed set of files into the working
+context in a single shot. See decision record `0004`.
+
+The preload set, per sub-agent (its product = `<product>`):
+
+- The product's full facet set, per `product-template/`:
+  `_meta.md`, `vision.md`, `function.md`, `users.md`, `requirements.md`,
+  `scale.md`, `quality-bar.md`, `operability.md`, `reliability.md`,
+  `security.md`, `constraints.md`, `roadmap.md`.
+- All decision records in `products/<product>/decisions/`.
+- The shared doctrine: `CLAUDE.md`, `CONVERSATION.md`, `EVALUATION.md`,
+  `SURFACING.md`, `MEMORY.md` (this file), `READINESS_BAR.md`, `ESCALATION.md`.
+
+After the preload step, sub-agents **do not** use exploratory tools to read
+memory. A targeted `view` on a known path is allowed when a sub-agent
+genuinely needs a file outside the preload set, but this is the **exception**,
+not the steady-state — and a signal to refine the preload contract rather than
+the path of routine operation.
+
+**Schema-as-law is now load-bearing twice.** `constraints.md` §architectural
+hard lines already requires schema discipline for filename-as-index retrieval.
+Preload adds a *performance* dependency on the same discipline: improvised
+filenames don't just break retrieval — they break the preload contract too.
 
 ## Write mechanism
 

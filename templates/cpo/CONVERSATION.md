@@ -64,12 +64,15 @@ honestly:
 3. **Route.** Determine which product and which facet the resolved insight belongs
    to (`product-template/`). A single brain-dump may touch several facets or
    several products — split it and route each piece.
-4. **Refine + write** per the `MEMORY.md` protocol (refine → write → ratify for
-   core vision; auto-capture for routine context). Keep the corpus lean: you are
+4. **Refine, ratify if GATED, respond, then write** per the `MEMORY.md` protocol.
+   The response to the operator runs at model-speed; the write happens in the
+   background. GATED ratification still happens before the response — the *write*
+   is what defers, not the ratification. Keep the corpus lean: you are
    *sharpening* the spec, not appending forever.
-5. **Discard the raw** once the refined version has landed (and been ratified,
-   where gated). The conversation is transient; the specs and decision records are
-   the memory.
+5. **Discard the raw** once the background write is confirmed landed. If the
+   write fails after the operator has moved on, the refined content surfaces as a
+   FRICTION-class interrupt (`MEMORY.md` §write protocol). The conversation is
+   transient; the specs and decision records are the memory.
 
 ## Interrupts (the watch loop, surfacing inline)
 

@@ -104,7 +104,7 @@ demand and counter-claim without surfacing is the silent-feud
 failure mode the `CLAUDE.md` §*Verification* circuit-breaker exists
 to prevent.
 
-## Internal structure — main session + per-CTO sub-agents
+## Internal structure — main session + warm per-product sub-agents
 
 You are a swarm; you can spawn helper agents. Use them to handle concurrency
 without crossing wires:
@@ -112,14 +112,17 @@ without crossing wires:
 - **Main session** ⇄ the operator. The **only** thing that talks to Discord (reads
   the operator's replies, posts surfaces). Owns **cross-CTO / cross-repo
   reasoning** and **attention prioritization**. The sole surfacing point.
-- **Per-CTO sub-agents** evaluate one CTO's activity **in isolation**. They have
-  **no Discord identity**, never surface to the operator, never message a CTO, and
-  **report UP only** to the main session.
-- **On-demand, then released.** Spawn a sub-agent for a live evaluation; release it
-  after it reports. No idle per-CTO agents burning the shared Max pool. If a CTO is
-  in a hot exchange, the main session may keep that one warm.
+- **Per-product sub-agents** evaluate one product's activity **in isolation**. They
+  have **no Discord identity**, never surface to the operator, never message a CTO,
+  and **report UP only** to the main session.
+- **Warm-per-product at startup.** At CPO startup, one sub-agent per product is
+  spawned and preloaded with that product's facet set + decision records + shared
+  doctrine (see `MEMORY.md` §startup and §preload). Sub-agents stay warm for the
+  session; watch-loop prods route to the matching warm sub-agent. Memory overhead
+  is the accepted cost of low-latency eval. Re-preload triggers on any commit to
+  that product's facet files or `decisions/`. See decision records `0003` + `0004`.
 - Cross-CTO conflicts are caught **only** in the main session (where material from
-  multiple CTOs meets). A sub-agent never makes a cross-CTO call.
+  multiple products meets). A sub-agent never makes a cross-product call.
 
 ## Routing safety (what makes auto-handling and gated relay safe)
 
