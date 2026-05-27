@@ -22,24 +22,50 @@ It is read on **every journey-loop event and most watch-loop evaluations**, so
 it must stay greppable. Compact one-line-per-item shape preferred; expand
 only where evidence + reasoning actually warrants it.
 
-## State vocabulary
+## State vocabulary (locked rev 3)
 
-A spec'd item progresses through these states. Use them consistently;
-improvising vocabulary breaks grep-as-index the same way improvising
-filenames breaks the schema (`constraints.md` §architectural hard lines).
+A spec'd item progresses through these **seven** states. The set is locked
+(per decision record `0009`'s companion vocabulary lock in rev 3). Use
+them consistently; improvising vocabulary breaks grep-as-index the same
+way improvising filenames breaks the schema (`constraints.md`
+§architectural hard lines).
 
-- **sketched** — idea exists in conversation / decision record; not yet
-  captured in a spec facet.
-- **specced** — captured in a spec facet (`requirements.md`, `function.md`,
-  etc.); not yet built.
-- **built** — code or artifact exists; not yet exercised against real input.
-- **tested** — exercised against real input or test suite; not yet hardened
-  for production load.
-- **hardened** — battle-tested at production load / soak-tested; ready to be
-  live.
-- **live** — running in production for real users.
+Monotonically ordered (forward progression):
 
-Plus three flag states orthogonal to the progression:
+1. **sketched** — the idea exists in conversation or memory; not yet in a
+   spec file.
+2. **specced** — written down in a facet file (`vision.md`, `function.md`,
+   `requirements.md`, etc.). Defined, but no code yet.
+3. **in-progress** — a CTO is actively working on it; commits exist but
+   the spec is not yet fully implemented.
+4. **implemented** — code exists and the CTO claims completion, but it
+   has not been tested against its spec.
+5. **tested** — passes its own tests (per `quality-bar.md` test
+   requirements). Functional but not soaked.
+6. **hardened** — passed real-world soak / failure-mode exercise. The
+   routing-safety test having lived through N-concurrent-channel traffic
+   is the canonical example.
+7. **live** — in production use by the operator (and, in future products,
+   by end users).
+
+**Rules.**
+
+- The progression is **monotonic**. State can move forward (e.g.
+  `tested → hardened`) and **back** (e.g. `tested → in-progress` if a
+  regression is found and rework is needed). It cannot **skip**
+  (e.g. `specced → tested` is invalid; the intermediate states must be
+  recorded as they are passed). The progression is the *audit trail*,
+  not just the snapshot.
+- Each state change is **logged with a citation**: which commit, which
+  test run, which CTO report, or which operator decision justified the
+  transition. Uncited transitions are citation-discipline defects (per
+  `EVALUATION.md` §citation discipline + `constraints.md` §behavioral
+  hard lines).
+- A journey item that is **stale or wrong vs. ground truth** is a
+  quality defect (per `quality-bar.md` §journey-state accuracy).
+
+Plus three **flag states orthogonal to the progression** — flags layer on
+top of a primary state, they do not replace it:
 
 - **blocked** — progress stopped on a named dependency. Carry the blocker.
 - **deferred** — explicit operator/decision-record choice to not pursue
@@ -48,6 +74,12 @@ Plus three flag states orthogonal to the progression:
   what *would* tell, surface to operator. **Never invent state to fill an
   unknown** (per `constraints.md` §behavioral hard lines + `EVALUATION.md`
   §citation discipline).
+
+Other useful flags (non-exhaustive; add per-product as needed):
+
+- **needs-real-world-soak** — at `tested` but the operator has elected to
+  hold off declaring `hardened` until a defined soak period (see the
+  product's `journey.md` §v1-prod-ready milestone, if defined).
 
 ## Per-spec'd-item state
 

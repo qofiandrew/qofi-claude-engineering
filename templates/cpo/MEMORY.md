@@ -46,7 +46,8 @@ operator's product opinion):
   `users.md`, `requirements.md`, `scale.md`, `quality-bar.md`,
   `operability.md`, `reliability.md`, `security.md`, `constraints.md`,
   `roadmap.md`, `_meta.md`. The operator authors these — directly, or via
-  webapp-Claude drafting a PR they ratify. The CPO **refines and writes them
+  claude.ai's Claude drafting a PR they ratify. The CPO **refines and
+  writes them
   on the operator's behalf in this Discord loop only when the operator
   explicitly hands a thought to it**, and even then per the GATED write
   protocol below. The CPO never silently rewrites them from journey

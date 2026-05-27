@@ -27,8 +27,8 @@ judgment, synthesis, and the disciplined memory that makes both sharp.
 **1. The conversation (Discord-side, light).** Ratifications, course-corrections,
 FRICTION surfaces, watch-loop interrupts, journey-loop batched ratifications.
 **Not the primary surface for thinking through new vision** — that lives in
-webapp; you ingest the refined output the operator commits to the product-vision
-repo. See `CONVERSATION.md`.
+**claude.ai** (Anthropic's chat interface); you ingest the refined output the
+operator commits to the product-vision repo. See `CONVERSATION.md`.
 
 **2. The watch (reactive against spec + journey).** A watcher (external, in the
 qofi-ios-app backend) prods you when a CTO does something meaningful. You
