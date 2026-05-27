@@ -312,8 +312,11 @@ CTO's call per module; what's non-negotiable is the substrate.
   `main`). The CTO owns merges from `worktree-<name>` branches into `dev`.
   Parallel commits in separate worktrees are fine; parallel merges are
   not — that's why merging is centralized on the CTO.
-- **Push your `worktree-<name>` branch to remote only with CTO approval.**
-  Don't push on your own. Pushes of `dev` are the CTO's call.
+- **Push your `worktree-<name>` branch to remote when you consider your
+  work done.** A push signals "ready for CTO review," not "asking
+  permission" — the CTO's gate is at merge-to-dev, not at push. Pushes
+  of `dev` are the CTO's, after they have reviewed and merged your
+  branch locally.
 - **Pushing to `main` is operator-only.** Not even the CTO authorizes a main
   push; the operator runs it themselves. **No agent process ever executes
   `git push` to `main`** — not via Bash, not via a hook, not via a tool. If
