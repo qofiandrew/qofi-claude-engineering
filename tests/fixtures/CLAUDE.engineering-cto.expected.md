@@ -199,6 +199,13 @@ tried, the approach isn't working, and you don't see the next step.
   need has no `covers` note (or no facet routing it), the map is incomplete —
   surface it (build log) so the note gets added, then proceed. Don't paper over
   a missing route by grepping the whole tree every time.
+- **The `covers` map is the standard until it stops routing.** The minimal
+  manifest-`covers` design is the doctrine, not a stopgap. The trigger to build
+  the heavier mechanism — per-doc frontmatter + a generated `INDEX.md` — is when
+  `covers` can no longer route reliably: agents or humans routinely fall back to
+  wide grep, or `covers` lookups miss. That trigger opens a **scoped ADR** for
+  the generated-INDEX mechanism; it is a doctrine trigger condition, not a
+  backlog item, and the heavier mechanism is not built until the trigger fires.
 
 ## Source of truth
 - `PROJECT_SPEC.md` and the ADRs in `docs/adr/` are authoritative **once they
