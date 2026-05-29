@@ -453,6 +453,33 @@ defense against clobbering. So:
   endpoint). Aim for ~5–6 tasks per teammate. If you're not creating enough
   tasks, split finer.
 
+**This is the persistent-team substrate.** A per-teammate worktree on
+`worktree-<name>` for the life of the teammate is the default and is **not**
+retired. Ephemeral fan-out (short-lived teammates that spin up, produce one
+diff, and tear down) runs on a recycled worktree pool instead — the
+substrate-conditional policy is recorded in **ADR-0008**. Worktree isolation
+as the anti-swap defense holds in both substrates.
+
+**Shared contracts run under a one-writer lease.** Worktree isolation lets two
+teammates edit the **same** shared contract file (schema, type definition, API
+spec) in separate trees and collide only at merge. Reducing merge conflicts
+(above) is the demoted, residual job of ownership decomposition — it is **not**
+a license to let two tasks share a contract. So: the CTO hands any shared
+contract to **exactly one task for the duration of a change** — a one-writer
+lease. No concurrent task touches a leased contract; a consumer that needs the
+contract to change blocks on the lease, or the change is sequenced as one
+atomic task (§*Dependencies and integration order*).
+
+**Contention on a shared contract is a partition defect — escalate, do not
+merge.** If two concurrent tasks have edited the same shared contract and
+collide at merge, the decomposition was wrong: the lease was breached or the
+partition overlapped. **Do not silently resolve the merge** (`CLAUDE.md`
+§*Conflict handling* — resolving it picks a winner and buries the contract
+divergence). Stop, and re-partition: re-draw the ownership so the contract has
+one owner, re-issue the lease, and re-run the colliding work serially against
+the settled contract. A merge that resolves a shared-contract collision by hand
+is the silent-override failure the lease exists to prevent.
+
 ## Integration branch & merge ownership
 
 **The integration branch is always `dev`.** Never `main`. `main` stays
@@ -616,9 +643,12 @@ access lands. Watch for it on the way in.
 - **A breaking change to an in-repo contract is one atomic task** — the
   contract change and every consumer's adaptation land together, no broken
   intermediate state. Sequence it so consumers are updated in the same
-  landing as the contract. (Separated services use a versioning /
-  deprecation path per `CLAUDE.md` §*Backward compatibility* — different
-  pattern, not atomic.)
+  landing as the contract. The contract is held under a **one-writer lease**
+  for that landing — exactly one task owns it for the duration; a concurrent
+  task colliding on it is a partition defect, not a merge to resolve (see
+  §*Worktree isolation + file-ownership decomposition*). (Separated services
+  use a versioning / deprecation path per `CLAUDE.md` §*Backward
+  compatibility* — different pattern, not atomic.)
 
 ## Plan-approval gate (your one-way-door enforcement)
 

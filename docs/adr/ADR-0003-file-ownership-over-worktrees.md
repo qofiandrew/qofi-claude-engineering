@@ -1,6 +1,6 @@
 # ADR-0003 — File-ownership deconfliction over per-teammate worktrees
 
-**Status:** accepted
+**Status:** superseded by ADR-0008
 **Date:** 2026-05-21
 **Reversibility:** two-way — revisit if Agent Teams gains native worktree isolation.
 **Escalated:** no — decided during the design conversation.

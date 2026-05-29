@@ -245,6 +245,13 @@ Surface to the CTO when:
   your own module's authority.
 - **The work touches anything outside your own module's boundaries** —
   cross-app writes, sibling-module internals.
+- **You collide with another task on a shared contract** (schema, type
+  definition, API spec) at merge — a partition defect, not a merge to
+  resolve. Surface it; **do not silently resolve the merge**
+  (`CLAUDE.md` §*Conflict handling*). The CTO holds each shared
+  contract under a one-writer lease and re-partitions on contention
+  (per `TEAM_LEAD.md` §*Worktree isolation + file-ownership
+  decomposition*).
 
 ---
 

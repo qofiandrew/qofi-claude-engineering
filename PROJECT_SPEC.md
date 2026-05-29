@@ -52,7 +52,8 @@ A single technical operator, driving from a phone via Discord. They:
   is "tmux session exists," which only catches a dead one).
 - A **second concurrent team** and a metered-API overflow path for bursts.
 - **Headless Agent SDK** migration for true unattended 24/7 operation.
-- Per-teammate **git-worktree** isolation, if/when Agent Teams supports it natively.
+- Richer pooled-worktree provisioning for ephemeral fan-out beyond the basic
+  recycled pool (→ ADR-0008).
 - Richer reconciliation tooling (automated spec-vs-code drift reports).
 
 ### Non-goals
@@ -89,7 +90,8 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
 
 - Orchestration: Agent Teams, hierarchical lead + teammates (→ ADR-0001)
 - Bridge: Discord, persistent session (→ ADR-0002)
-- Deconfliction: shared tree + file ownership (→ ADR-0003)
+- Deconfliction: per-teammate worktrees, substrate-conditional; file ownership
+  reduces merge conflicts (→ ADR-0008)
 - Capacity: single Max pool, 1–2 teams (→ ADR-0004)
 - Gates: deterministic hooks (→ ADR-0005)
 - Process: CTO authors docs from the conversation (→ ADR-0006)
@@ -105,11 +107,12 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
 
 - ADR-0001 — Agent Teams over a flat peer-bot swarm
 - ADR-0002 — Discord bridge over Slack
-- ADR-0003 — File-ownership deconfliction over per-teammate worktrees
+- ADR-0003 — File-ownership deconfliction over per-teammate worktrees (superseded by ADR-0008)
 - ADR-0004 — Single Max pool; 1–2 concurrent teams; API for overflow
 - ADR-0005 — Deterministic quality gates via hooks
 - ADR-0006 — The CTO authors docs from the conversation
 - ADR-0007 — Monorepo with the bridge as a `bridge/` subcomponent
+- ADR-0008 — Per-teammate worktree isolation, substrate-conditional
 
 ## 9. Open questions
 
@@ -154,3 +157,14 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   `git log --follow bridge/README.md` — git's rename heuristic attributed path
   continuity to the root `README.md` (which got rewritten as the whole-system
   README in the same commit) rather than to `bridge/README.md`.
+- `2026-05-29` — Worktree contradiction resolved (ADR-0008). ADR-0003 superseded;
+  §3/§6/§8 and root `docs/TEAM_LEAD.md` reconciled to per-teammate worktrees
+  (substrate-conditional: durable per-teammate for persistent teams, recycled
+  pool for ephemeral fan-out); file-ownership decomposition demoted to
+  merge-conflict reduction. Same change harvested ephemeral-sibling doctrine
+  gaps into the engineering-cto templates: a one-writer contract lease +
+  contention-is-a-partition-defect rule, a per-task assumptions record folded
+  into this build log at integration (no silence-as-consent), prod-migration
+  floor raised to push-to-main parity, skill-promotion standards, simplicity
+  scoping + surgical-hygiene + beyond-ask disclosure, and a route-before-scan
+  doc map (manifest `covers` column).

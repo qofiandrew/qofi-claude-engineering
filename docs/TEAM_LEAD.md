@@ -43,8 +43,11 @@ it yourself.
 
 ## Decomposition by file ownership (the core rule)
 
-Teammates share one working tree. The **only** thing preventing them from
-clobbering each other is disjoint file ownership. Therefore:
+Persistent teammates each work in **their own git worktree** on their own
+branch (→ ADR-0008) — that is the structural defense against clobbering and the
+commit-attribution swaps a shared tree produces. Disjoint file ownership still
+applies, but its job is now to **reduce merge conflicts** at integration, not to
+prevent clobbering. Therefore:
 
 - Every task **must declare the files/directories it owns.** Put the ownership
   list in the task description.
