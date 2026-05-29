@@ -253,11 +253,20 @@ versioning adds ceremony without value — don't introduce it.
   hard requirements (idempotency, resumability, per-item status,
   streaming) apply to the migration the same as any other batch op.
 - **Agents write and run migrations against dev/local only.** Running
-  a migration against production is operator-only — same hard-floor
-  tier as `git push` to `main`. **No agent process ever runs a
-  migration against prod** — not via Bash, not via a hook, not via a
-  tool, not via the migration tool's own runner. If you find yourself
-  reasoning toward a prod-targeted migration command, stop and escalate.
+  a migration against production is operator-only — an irreversible-action
+  floor at the same tier as `git push` to `main`. **No agent process runs a
+  migration against prod**; if you find yourself reasoning toward a
+  prod-targeted migration command, stop and escalate.
+- **Enforcement status (no overclaim).** This floor is currently **prose +
+  circuit-breaker** — this rule plus operator escalation — **not** a mechanical
+  deny. Unlike `git push`, which the permission gate denies deterministically
+  because the command self-identifies in its tokens, a prod migration's
+  prod-ness lives in the environment (`DATABASE_URL`, `NODE_ENV`) / config, not
+  in the tokens the hook sees — so there is no surface to gate yet. A
+  deterministic deny is **pending the canonical prod-migration surface defined
+  by ADR-0009**; until that lands this is a **known enforcement gap, not a
+  silent one.** The floor's tier is unchanged — only the enforcement claim is
+  corrected.
 - **Destructive or irreversible migration design** (drop a column, drop
   a table, narrow a constraint that fails on existing rows, in-place
   irreversible data transform) is **grave**: the design itself needs

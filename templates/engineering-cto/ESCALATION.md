@@ -121,8 +121,10 @@ Every item below is grave. Apply the §*Cadence* binary:
   see below.)
 - **Running a migration against production.** Operator-only — same tier
   as `git push` to main. Agents write and run migrations only against
-  dev/local. No agent process — Bash, hook, tool, or the migration
-  tool's own runner — ever executes a migration against prod.
+  dev/local; no agent process executes a migration against prod.
+  Enforcement is currently prose + circuit-breaker (this rule + escalation),
+  **not** a mechanical deny — a deterministic deny is pending the canonical
+  prod-migration surface (ADR-0009). Known gap, not silent.
 - **Destructive or irreversible migration design**, even before it runs:
   the design itself needs operator approval before commit. Examples:
   dropping a column or table, narrowing a constraint that fails on
