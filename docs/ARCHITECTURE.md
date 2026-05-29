@@ -22,8 +22,9 @@ keeps several products legible from a phone.
 4. **Orchestration — one Agent Teams team per repo.** A **lead (the CTO)** holds
    the spec and the channel; **teammates** (3–5, elastic) are spawned for parallel
    phases and torn down after. They coordinate through the native shared task list
-   and mailbox, and deconflict by **file ownership** on a shared working tree
-   (ADR-0003) — not by per-teammate branches.
+   and mailbox, and isolate by **per-teammate worktree** on a `worktree-<name>`
+   branch (ADR-0008); file-ownership-disjoint decomposition still applies, now to
+   reduce merge conflicts at integration rather than to prevent clobbering.
 5. **Guardrails + memory.** A plan-approval gate (one-way doors escalate instead of
    proceeding), two deterministic hooks (test gate, docs check), and a CI + review
    gate before merge. Memory is the repo's `PROJECT_SPEC.md`, the ADRs, and the
@@ -40,7 +41,7 @@ keeps several products legible from a phone.
    dependencies, and **spawns** 3–5 teammates for the parallel slices.
 5. Each teammate **plans first.** Tasks brushing a one-way door are escalated to
    you rather than approved; two-way doors proceed.
-6. Teammates **build** in the shared tree, each owning its files. The
+6. Teammates **build**, each in its own worktree, owning its files. The
    `TaskCompleted` hook blocks any task closing on red tests; the `TeammateIdle`
    hook blocks idle when source changed but docs didn't.
 7. The CTO **integrates** in dependency order, **reconciles** docs against the real
