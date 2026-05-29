@@ -167,6 +167,22 @@ tried, the approach isn't working, and you don't see the next step.
   spec contradictions.
 - Every one-way-door decision becomes an ADR (`ADR.template.md`), whether or not
   it was escalated.
+- **Reversible technical ambiguity → proceed and record the assumption; don't
+  block.** Where a *technical* point is ambiguous and the call is reversible /
+  safe-to-be-wrong, decide, proceed, and append a one-line assumption record —
+  **path touched · what was assumed · why · what would falsify it** — to your
+  task's commit summary (or task notes). No global `ASSUMPTIONS.md`; the record
+  is per-task and append-only, and the CTO folds it into the build log at
+  integration (`TEAM_LEAD.md` §*Docs reflect reality*). The *what-would-falsify-it*
+  field is mandatory: it is the tripwire that lets a later reader — or the CTO at
+  integration — see the assumption was wrong without re-deriving it.
+- **This is NOT a consent mechanism.** It applies *only* to reversible technical
+  calls. Anything grave or irreversible does **not** get an assumption note — it
+  **escalates**: halt that track and wait for an actual answer, no timer, no
+  "proceeding unless you object" (`ESCALATION.md` §*No silence-as-consent, no
+  countdown defaults* and the ESCALATE/NOTIFY split in §*How to escalate*).
+  Silence is never consent. A contradiction with doctrine or the spec surfaces
+  per `§Conflict handling` — it is never absorbed into an assumption record.
 
 ## Verification (non-negotiable)
 - Tests are part of the feature, not a follow-up. Write them as you build.

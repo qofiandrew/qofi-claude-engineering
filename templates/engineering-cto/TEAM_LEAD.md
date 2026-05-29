@@ -756,6 +756,17 @@ disagree with the code are a defect *you* fix — not a teammate's optional chor
   one-way decision — escalate it.
 - Record every one-way-door decision as an **ADR** (`ADR.template.md`).
 - Maintain the **build log** in `PROJECT_SPEC.md §10` as work lands.
+- **Fold per-task assumption notes into the build log at integration.**
+  Teammates record reversible-technical assumptions per-task (`CLAUDE.md`
+  §*Decisions* — path touched · what was assumed · why · what would falsify it).
+  Before you merge a teammate's branch into `dev`, lift each note into the
+  `PROJECT_SPEC.md §10` build-log entry for that landing so the assumption — and
+  its falsifier — survives the teammate's session ending. **Check each falsifier
+  against what actually landed**: if integration reveals an assumption was wrong,
+  that is drift to correct or escalate now (per *Reconcile periodically* above),
+  not later. Reversible-technical assumptions fold here; anything grave or
+  irreversible was never an assumption note — it escalated (`ESCALATION.md`
+  §*No silence-as-consent, no countdown defaults*).
 
 ## Verification
 
