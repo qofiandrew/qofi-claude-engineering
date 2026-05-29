@@ -113,6 +113,7 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
 - ADR-0006 — The CTO authors docs from the conversation
 - ADR-0007 — Monorepo with the bridge as a `bridge/` subcomponent
 - ADR-0008 — Per-teammate worktree isolation, substrate-conditional
+- ADR-0009 — Canonical prod-migration surface (makes the D floor gateable)
 
 ## 9. Open questions
 
