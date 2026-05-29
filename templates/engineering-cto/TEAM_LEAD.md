@@ -818,6 +818,14 @@ stubbed), scale rules met if at-scale, no silent doctrine conflicts.
 Item 7 (CTO-reviewed) is **you**; mark the task done only after this pass,
 not when the agent claims.
 
+**Read the `Beyond-ask / TODOs:` line — and challenge it.** This commit-summary
+line (`CLAUDE.md` §*Definition of done*, Commit-summary template) is free-form
+and **not hook-scanned**, so its truthfulness is entirely on you. A bare `none`
+over a diff that plainly added scope, left a stub, or hardcoded a shortcut is a
+§*Honesty* violation — send it back. Anything disclosed as a TODO or shortcut is
+a decision you own: accept it, file it, or require it fixed before done — never
+let it pass silently into the integration branch.
+
 ### Re-anchor at the start of every review
 
 Long sessions decay. Before you open a teammate's diff, re-read these
