@@ -104,12 +104,45 @@ Conflicts within an agent's own authority (an ambiguous task, an
 internal naming question) are not doctrine conflicts — those are
 decisions to make per `ESCALATION.md`.
 
+## Reaching the operator
+
+The operator only sees what arrives in the swarm's Discord channel.
+Terminal output is unmonitored — anything intended for a human to
+read or respond to that you write to the terminal is **effectively
+lost.**
+
+- **Human-facing output goes through Discord, always.** Questions,
+  requests for input, status, summaries, escalations, plans, design
+  docs, reports — if you want a human to read it, deliver it via the
+  Discord plugin. The terminal does not count as a second channel.
+- **Short or inline content → a Discord message.** A question, a
+  status update, an escalation prompt, a one-paragraph result.
+- **Longer or structured content → a markdown file delivered through
+  a Discord message.** Specs, plans, ADRs, design docs, multi-section
+  reports. Write the file, then ship it through Discord so the
+  operator actually receives it.
+- **Terminal output is for tool I/O and internal reasoning only.**
+  Tool calls, shell output, working notes — fine to print. Never the
+  thing you actually need the operator to read.
+- **Intra-swarm agent-to-agent communication is out of scope.** This
+  rule governs human I/O. Coordination inside the swarm uses whatever
+  the archetype's playbook prescribes.
+
+You know your swarm type and you know how to invoke the Discord
+plugin. The rule is the requirement, not the mechanism: if a human
+needs to see it, deliver it through Discord.
+
 ## Cost & blast radius
 - Never touch production or real user data without an explicit blocking escalation.
 - Don't add recurring-cost services or hard-to-remove dependencies without
   escalating (one-way door).
 - Prefer reversible, sandboxed changes. Assume anything you can break, you
   eventually will — keep the blast radius small.
+- Never perform destructive git operations autonomously: force-push
+  (`--force`, `-f`, `--force-with-lease`), mirror push (`--mirror`),
+  branch-delete push (`--delete`), bulk push (`--all`), or any variant
+  that rewrites or destroys remote refs. Routine push is archetype-
+  shaped (see the archetype's own push rules); destruction is not.
 
 ## Secrets
 - **Never generate, hardcode, invent, log, print, echo, or commit secrets,
@@ -568,8 +601,11 @@ wrap procedure; the codebase holds logic.
   `main`). The CTO owns merges from `worktree-<name>` branches into `dev`.
   Parallel commits in separate worktrees are fine; parallel merges are
   not — that's why merging is centralized on the CTO.
-- **Push your `worktree-<name>` branch to remote only with CTO approval.**
-  Don't push on your own. Pushes of `dev` are the CTO's call.
+- **Push your `worktree-<name>` branch to remote when you consider your
+  work done.** A push signals "ready for CTO review," not "asking
+  permission" — the CTO's gate is at merge-to-dev, not at push. Pushes
+  of `dev` are the CTO's, after they have reviewed and merged your
+  branch locally.
 - **Pushing to `main` is operator-only.** Not even the CTO authorizes a main
   push; the operator runs it themselves. **No agent process ever executes
   `git push` to `main`** — not via Bash, not via a hook, not via a tool. If

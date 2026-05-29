@@ -60,7 +60,6 @@ Surface to the CTO when:
 - **Plan sign-off** is required (per the CTO's plan-approval gate).
 - **A CTO-approved contract would need to change** — never silently edit
   a contract another module depends on; ask the CTO to re-approve.
-- **Pushing your dev branch to remote** — the CTO approves the push.
 - **You are stuck or blocked** on something you cannot resolve within
   your own module's authority.
 - **The work touches anything outside your own module's boundaries** —
@@ -161,7 +160,7 @@ These are CTO calls. Write an ADR for one-way decisions; do NOT escalate.
   ownership*).
 - **Monolith-first vs services-from-day-one declaration.** Per-project
   ADR.
-- **Dev-branch push approvals for teammates.**
+- **Merging teammate `worktree-<name>` branches into `dev`, and pushing `dev` to remote.**
 - **Anything you'd recommend the operator accept anyway** — make the
   call yourself.
 

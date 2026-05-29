@@ -68,12 +68,15 @@ under `groups.<channel-id>.requireMention` if you want passive listening.
 
 `swarm-up.sh launch_one()` now hard-refuses (exit 1) before launching if
 the swarm isn't fully configured: missing `enabledPlugins`, missing
-`access.json` group for the channel, or missing doctrine
-(`CLAUDE.md`/`ESCALATION.md`/`TEAM_LEAD.md`). The remediation it prints
-is always the same: `bin/swarm-add.sh <name> <repo> --skip-walkthrough`.
-The "I know what I'm doing" bypass is `SWARM_UP_SKIP_SANITY=1`. These
-gates exist specifically to turn today's silent half-launches into loud
-refusals.
+`access.json` group for the channel, missing doctrine
+(`CLAUDE.md`/`ESCALATION.md`/`TEAM_LEAD.md`), or missing
+`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in the repo's
+`.claude/settings.json` `env` block (without that flag Agent Teams
+silently disables and the lead can never spawn teammates). The
+remediation it prints is always the same: `bin/swarm-add.sh <name>
+<repo> --skip-walkthrough`. The "I know what I'm doing" bypass is
+`SWARM_UP_SKIP_SANITY=1`. These gates exist specifically to turn
+today's silent half-launches into loud refusals.
 
 ---
 
@@ -627,7 +630,7 @@ either is unset, the local `status.json` is still written but no POST is made.
 time you stand up a swarm. The abbreviated version, for reference:
 
 1. **Create the application** at https://discord.com/developers/applications
-   → "New Application" → name it `swarm-<name>` (convention).
+   → "New Application" → name it `<repo>-bot` (convention).
 2. **Enable the privileged intent.** Bot sidebar → "Privileged Gateway
    Intents" → toggle on **MESSAGE CONTENT INTENT** → Save Changes.
    *(Of the four intents the bridge requests in

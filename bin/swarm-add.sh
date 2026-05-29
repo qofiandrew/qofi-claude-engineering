@@ -116,6 +116,7 @@ echo "$NAME" | grep -qE '^[a-zA-Z][a-zA-Z0-9_-]*$' || {
   echo "swarm-add: name must match [a-zA-Z][a-zA-Z0-9_-]* (got: $NAME)" >&2; exit 1; }
 [ -d "$REPO" ] || { echo "swarm-add: repo not found: $REPO" >&2; exit 1; }
 REPO="$(cd "$REPO" && pwd)"
+REPO_BASENAME="$(basename "$REPO")"
 
 # Channel validation if given up front.
 if [ -n "$CHANNEL" ]; then
@@ -248,7 +249,7 @@ A) CREATE THE APPLICATION
 
    1. Open  https://discord.com/developers/applications
    2. Click  "New Application"
-   3. Name it  "swarm-$NAME"        (convention; mirrors tmux session name)
+   3. Name it  "$REPO_BASENAME-bot"        (convention: <repo>-bot)
    4. Accept the terms; click  "Create"
 EOF
 pause "Press Enter when the application exists in the portal."
@@ -314,17 +315,21 @@ if [ -n "$CHANNEL" ]; then
 else
   phase "Phase 2 — Channel ID"
 
-cat <<'EOF'
+cat <<EOF
 
 You need the Discord channel ID this swarm will live in (the bot's home
 channel; required even though swarm-up.sh itself doesn't read it — the
 heartbeat watcher does, and access.json keys on channel ID).
 
-  1. In Discord:  User Settings (cog icon) -> "Advanced" -> enable
-        "Developer Mode"
-  2. Right-click the target channel in the server (or use the "..."
+Convention: name the channel "$REPO_BASENAME" (matching the repo
+directory exactly). The swarm still routes by channel ID below — the
+name is just for your own organization.
+
+  1. In Discord, create or pick a channel named "$REPO_BASENAME".
+  2. User Settings (cog icon) -> "Advanced" -> enable "Developer Mode"
+  3. Right-click the channel in the server (or use the "..."
      menu on its row).
-  3. Click  "Copy Channel ID".
+  4. Click  "Copy Channel ID".
 
 Now paste it here.
 EOF

@@ -8,7 +8,21 @@
     "discord-b2b@qofi-swarm": true
   },
   "permissions": {
-    "allow": ["mcp__plugin_discord-b2b_discord__reply"]
+    "allow": [
+      "mcp__plugin_discord-b2b_discord__reply",
+      "Bash(git push origin worktree-*:*)",
+      "Bash(git push origin dev:*)"
+    ],
+    "deny": [
+      "Bash(git push origin main*)",
+      "Bash(git push *:main*)",
+      "Bash(git push *--force*)",
+      "Bash(git push *--force-with-lease*)",
+      "Bash(git push *-f *)",
+      "Bash(git push *--mirror*)",
+      "Bash(git push *--delete*)",
+      "Bash(git push *--all*)"
+    ]
   },
   "hooks": {
     "PermissionRequest": [

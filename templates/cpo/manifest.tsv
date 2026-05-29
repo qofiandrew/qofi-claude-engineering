@@ -50,6 +50,7 @@ refresh           | cpo/product-template/reliability.md                         
 refresh           | cpo/product-template/quality-bar.md                                                                           | product-template/quality-bar.md
 refresh           | cpo/product-template/security.md                                                                              | product-template/security.md
 refresh           | cpo/product-template/roadmap.md                                                                               | product-template/roadmap.md
+refresh           | cpo/product-template/journey.md                                                                               | product-template/journey.md
 refresh           | cpo/product-template/decisions/README.md                                                                      | product-template/decisions/README.md
 compose           | _base/hooks/permission-gate-prelude.sh+cpo/hooks/permission-gate-policy.sh+_base/hooks/permission-gate-tail.sh | .claude/hooks/permission-gate.sh
 operator-owned    | cpo/products/.keep                                                                                            | products/.keep
