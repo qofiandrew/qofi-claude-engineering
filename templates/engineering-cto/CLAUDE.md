@@ -215,8 +215,10 @@ versioning adds ceremony without value — don't introduce it.
   streaming) apply to the migration the same as any other batch op.
 - **Agents write and run migrations against dev/local only.** Running
   a migration against production is operator-only — same hard-floor
-  tier as `git push` to `main`. No agent process executes a migration
-  against prod.
+  tier as `git push` to `main`. **No agent process ever runs a
+  migration against prod** — not via Bash, not via a hook, not via a
+  tool, not via the migration tool's own runner. If you find yourself
+  reasoning toward a prod-targeted migration command, stop and escalate.
 - **Destructive or irreversible migration design** (drop a column, drop
   a table, narrow a constraint that fails on existing rows, in-place
   irreversible data transform) is **grave**: the design itself needs
