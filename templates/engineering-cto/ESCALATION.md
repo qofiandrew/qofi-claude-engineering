@@ -64,6 +64,13 @@ Surface to the CTO when:
   your own module's authority.
 - **The work touches anything outside your own module's boundaries** —
   cross-app writes, sibling-module internals.
+- **You collide with another task on a shared contract** (schema, type
+  definition, API spec) at merge — a partition defect, not a merge to
+  resolve. Surface it; **do not silently resolve the merge**
+  (`CLAUDE.md` §*Conflict handling*). The CTO holds each shared
+  contract under a one-writer lease and re-partitions on contention
+  (per `TEAM_LEAD.md` §*Worktree isolation + file-ownership
+  decomposition*).
 
 ---
 
@@ -114,7 +121,8 @@ Every item below is grave. Apply the §*Cadence* binary:
   see below.)
 - **Running a migration against production.** Operator-only — same tier
   as `git push` to main. Agents write and run migrations only against
-  dev/local. No agent process executes a migration against prod.
+  dev/local. No agent process — Bash, hook, tool, or the migration
+  tool's own runner — ever executes a migration against prod.
 - **Destructive or irreversible migration design**, even before it runs:
   the design itself needs operator approval before commit. Examples:
   dropping a column or table, narrowing a constraint that fails on

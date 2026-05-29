@@ -453,6 +453,33 @@ defense against clobbering. So:
   endpoint). Aim for ~5–6 tasks per teammate. If you're not creating enough
   tasks, split finer.
 
+**This is the persistent-team substrate.** A per-teammate worktree on
+`worktree-<name>` for the life of the teammate is the default and is **not**
+retired. Ephemeral fan-out (short-lived teammates that spin up, produce one
+diff, and tear down) runs on a recycled worktree pool instead — the
+substrate-conditional policy is recorded in **ADR-0008**. Worktree isolation
+as the anti-swap defense holds in both substrates.
+
+**Shared contracts run under a one-writer lease.** Worktree isolation lets two
+teammates edit the **same** shared contract file (schema, type definition, API
+spec) in separate trees and collide only at merge. Reducing merge conflicts
+(above) is the demoted, residual job of ownership decomposition — it is **not**
+a license to let two tasks share a contract. So: the CTO hands any shared
+contract to **exactly one task for the duration of a change** — a one-writer
+lease. No concurrent task touches a leased contract; a consumer that needs the
+contract to change blocks on the lease, or the change is sequenced as one
+atomic task (§*Dependencies and integration order*).
+
+**Contention on a shared contract is a partition defect — escalate, do not
+merge.** If two concurrent tasks have edited the same shared contract and
+collide at merge, the decomposition was wrong: the lease was breached or the
+partition overlapped. **Do not silently resolve the merge** (`CLAUDE.md`
+§*Conflict handling* — resolving it picks a winner and buries the contract
+divergence). Stop, and re-partition: re-draw the ownership so the contract has
+one owner, re-issue the lease, and re-run the colliding work serially against
+the settled contract. A merge that resolves a shared-contract collision by hand
+is the silent-override failure the lease exists to prevent.
+
 ## Integration branch & merge ownership
 
 **The integration branch is always `dev`.** Never `main`. `main` stays
@@ -616,9 +643,12 @@ access lands. Watch for it on the way in.
 - **A breaking change to an in-repo contract is one atomic task** — the
   contract change and every consumer's adaptation land together, no broken
   intermediate state. Sequence it so consumers are updated in the same
-  landing as the contract. (Separated services use a versioning /
-  deprecation path per `CLAUDE.md` §*Backward compatibility* — different
-  pattern, not atomic.)
+  landing as the contract. The contract is held under a **one-writer lease**
+  for that landing — exactly one task owns it for the duration; a concurrent
+  task colliding on it is a partition defect, not a merge to resolve (see
+  §*Worktree isolation + file-ownership decomposition*). (Separated services
+  use a versioning / deprecation path per `CLAUDE.md` §*Backward
+  compatibility* — different pattern, not atomic.)
 
 ## Plan-approval gate (your one-way-door enforcement)
 
@@ -730,6 +760,17 @@ disagree with the code are a defect *you* fix — not a teammate's optional chor
   one-way decision — escalate it.
 - Record every one-way-door decision as an **ADR** (`ADR.template.md`).
 - Maintain the **build log** in `PROJECT_SPEC.md §10` as work lands.
+- **Fold per-task assumption notes into the build log at integration.**
+  Teammates record reversible-technical assumptions per-task (`CLAUDE.md`
+  §*Decisions* — path touched · what was assumed · why · what would falsify it).
+  Before you merge a teammate's branch into `dev`, lift each note into the
+  `PROJECT_SPEC.md §10` build-log entry for that landing so the assumption — and
+  its falsifier — survives the teammate's session ending. **Check each falsifier
+  against what actually landed**: if integration reveals an assumption was wrong,
+  that is drift to correct or escalate now (per *Reconcile periodically* above),
+  not later. Reversible-technical assumptions fold here; anything grave or
+  irreversible was never an assumption note — it escalated (`ESCALATION.md`
+  §*No silence-as-consent, no countdown defaults*).
 
 ## Verification
 
@@ -780,6 +821,14 @@ dodge a real-but-cheap collaborator), operability tiers built (not
 stubbed), scale rules met if at-scale, no silent doctrine conflicts.
 Item 7 (CTO-reviewed) is **you**; mark the task done only after this pass,
 not when the agent claims.
+
+**Read the `Beyond-ask / TODOs:` line — and challenge it.** This commit-summary
+line (`CLAUDE.md` §*Definition of done*, Commit-summary template) is free-form
+and **not hook-scanned**, so its truthfulness is entirely on you. A bare `none`
+over a diff that plainly added scope, left a stub, or hardcoded a shortcut is a
+§*Honesty* violation — send it back. Anything disclosed as a TODO or shortcut is
+a decision you own: accept it, file it, or require it fixed before done — never
+let it pass silently into the integration branch.
 
 ### Re-anchor at the start of every review
 

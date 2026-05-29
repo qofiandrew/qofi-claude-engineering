@@ -187,6 +187,19 @@ tried, the approach isn't working, and you don't see the next step.
   have one). The CTO has a wider view and can redirect, redesign, or
   take it over.
 
+## Doc map (route before scan)
+- **Route, don't blind-grep.** Before scanning the tree for a doc, read the
+  manifest (`templates/<type>/manifest.tsv`, default `engineering-cto`) — it is
+  the single source of truth for which doctrine files exist, and its `covers`
+  field says what each one answers. Open what it points to; grep is the
+  **fallback**, not the first move.
+- The cpo `product-template/` facet files carry the same contract inline — a
+  `DEFINITION / ROUTES HERE / GREP FOR` header per file. Same idea, finer grain.
+- **An index miss is a defect, not a license to grep wide.** If the topic you
+  need has no `covers` note (or no facet routing it), the map is incomplete —
+  surface it (build log) so the note gets added, then proceed. Don't paper over
+  a missing route by grepping the whole tree every time.
+
 ## Source of truth
 - `PROJECT_SPEC.md` and the ADRs in `docs/adr/` are authoritative **once they
   exist**. On a new project the spec may be empty or absent — the CTO authors it
@@ -200,6 +213,22 @@ tried, the approach isn't working, and you don't see the next step.
   spec contradictions.
 - Every one-way-door decision becomes an ADR (`ADR.template.md`), whether or not
   it was escalated.
+- **Reversible technical ambiguity → proceed and record the assumption; don't
+  block.** Where a *technical* point is ambiguous and the call is reversible /
+  safe-to-be-wrong, decide, proceed, and append a one-line assumption record —
+  **path touched · what was assumed · why · what would falsify it** — to your
+  task's commit summary (or task notes). No global `ASSUMPTIONS.md`; the record
+  is per-task and append-only, and the CTO folds it into the build log at
+  integration (`TEAM_LEAD.md` §*Docs reflect reality*). The *what-would-falsify-it*
+  field is mandatory: it is the tripwire that lets a later reader — or the CTO at
+  integration — see the assumption was wrong without re-deriving it.
+- **This is NOT a consent mechanism.** It applies *only* to reversible technical
+  calls. Anything grave or irreversible does **not** get an assumption note — it
+  **escalates**: halt that track and wait for an actual answer, no timer, no
+  "proceeding unless you object" (`ESCALATION.md` §*No silence-as-consent, no
+  countdown defaults* and the ESCALATE/NOTIFY split in §*How to escalate*).
+  Silence is never consent. A contradiction with doctrine or the spec surfaces
+  per `§Conflict handling` — it is never absorbed into an assumption record.
 
 ## Verification (non-negotiable)
 - Tests are part of the feature, not a follow-up. Write them as you build.
@@ -282,6 +311,20 @@ the gravest behavioral violation in this manual.
 - Do **not** perform large unrequested refactors. If the existing structure is
   genuinely blocking the work, propose the refactor as an escalation with scope and
   rationale — don't just do it.
+- **Clean up the orphans your change creates.** An import, variable, function,
+  or branch your edit just made unreachable is part of your change — remove it
+  in the same edit. Leaving the carcass of code you just bypassed is an
+  incomplete change, not a smaller one.
+- **Pre-existing dead code: mention, don't delete.** If you notice unrelated
+  dead code that was already there, surface it per `§Conflict handling` to the
+  CTO (Agent → CTO; `ESCALATION.md`) and leave it in place. Deleting it is an
+  unrequested refactor with its own blast radius (a "dead" export may be a
+  contract surface a peer module consumes). Naming it is the contribution;
+  removing it is a separate, scoped decision.
+- **The test: every changed line traces to the request.** Before you commit,
+  each line in the diff is there because the task needed it — not an
+  opportunistic reformat, rename, or tidy of code you happened to pass. A line
+  you can't trace to the ask is an unrequested change; drop it or escalate it.
 
 ## Greenfield
 - Build v1 scope only. Resist premature architecture and gold-plating. Deferred
@@ -300,6 +343,18 @@ the gravest behavioral violation in this manual.
 - **Document it** in `modules/<module>.md` per module: what it OFFERS (the
   contract surface, fully specified) and what it REQUIRES (every contract
   surface from other modules it consumes).
+- **The contract+doc gate is keyed to actual sharing, not future reuse.**
+  A unit needs its own contract surface and `modules/<module>.md` entry only
+  when it is **consumed across a module boundary**. Private single-caller
+  helpers, one-off diagnostics, throwaway test scripts, and migration one-offs
+  stay **bare and undocumented** — they have no cross-module consumer to
+  protect. Don't formalize a seam that doesn't exist yet: "someone might reuse
+  this later" is the premature-architecture trap (`§Greenfield`), not a
+  contract. When a second consumer actually arrives across the boundary, *that*
+  is when the unit earns a contract surface and a doc — surface the promotion
+  then. For a task that touches only such bare units, `[DoD-3] Docs: n/a:<reason>`
+  is the correct affirmation (`§Definition of done`), not a doc fabricated to
+  clear the gate.
 - **Depend only on contract surfaces, never on internals.** If you find
   yourself reaching into another module's internal file, function, or
   table, the boundary is wrong — escalate.
@@ -388,8 +443,10 @@ versioning adds ceremony without value — don't introduce it.
   streaming) apply to the migration the same as any other batch op.
 - **Agents write and run migrations against dev/local only.** Running
   a migration against production is operator-only — same hard-floor
-  tier as `git push` to `main`. No agent process executes a migration
-  against prod.
+  tier as `git push` to `main`. **No agent process ever runs a
+  migration against prod** — not via Bash, not via a hook, not via a
+  tool, not via the migration tool's own runner. If you find yourself
+  reasoning toward a prod-targeted migration command, stop and escalate.
 - **Destructive or irreversible migration design** (drop a column, drop
   a table, narrow a constraint that fails on existing rows, in-place
   irreversible data transform) is **grave**: the design itself needs
@@ -413,6 +470,16 @@ Distinguish two error classes; treat them differently.
   marked failed and skipped — not partially written.
 - **Validate at contract surfaces.** Don't trust callers. Garbage in at
   the boundary becomes garbage at the storage layer.
+- **Don't handle impossible states.** The mandate above is to handle errors
+  that *can* occur, not to invent guards against states the contract and the
+  type system already preclude. Once a value is validated at its contract
+  surface, downstream code trusts it — don't re-check it at every call, don't
+  add a branch for an enum case that cannot exist, don't write a fallback for a
+  dependency the system cannot run without (that is a fatal/systemic error —
+  fail fast, not a speculative recovery path). Defensive code for unreachable
+  states is untestable, rots silently, and is the error-handling face of the
+  premature-architecture trap (`§Greenfield`). Handle the real failure modes
+  well; leave the impossible ones to fail loud at the boundary.
 
 **Hard requirements for at-scale data operations** (CTO verifies these are
 in the plan before approval):
@@ -486,6 +553,39 @@ CTO's call per module; what's non-negotiable is the substrate.
   support surfaces so an authz layer can be added in front of them
   later — don't hardcode wide-open access. Do **not** build the
   permission system now unless the spec calls for it.
+- **Promote a repeated operator move into a skill — on its second or
+  third use, never first sight.** Operability ops are the canonical
+  skill-earning class: deploy / rollback, health / smoke checks, log
+  triage, env bring-up, incident diagnostics. The first time you run
+  one, run it bare — promoting on first sight is speculation. When the
+  *same* procedure earns its keep a second or third time, it has proven
+  stable and consequential; capture it as a skill so the next operator
+  (or the next session) runs it the proven way, not from memory. The
+  full bar is `§Skill standards`; a one-off stays bare.
+
+## Skill standards
+
+A skill is captured operational procedure, not a place to hide code. It earns
+promotion only when all **three prongs** hold:
+
+- **Runs more than once.** A genuine repeat, not a guessed-at future one. First
+  sight stays bare — promoting on speculation is the trap (`§Greenfield`'s
+  resist-premature instinct applies to skills too).
+- **Same procedure each time.** The steps are stable enough to write down. If
+  every run improvises, there's nothing fixed to capture yet.
+- **Getting it wrong has a cost.** Consequential — a botched run breaks a
+  deploy, corrupts state, or pages a human. A trivial, harmless repeat doesn't
+  earn the ceremony.
+
+Miss any prong and it isn't a skill: a one-off stays bare; an unstable or
+inconsequential repeat waits until it proves out.
+
+**A code module in a script costume is not a skill.** If the thing is real
+program logic — parsing, transforming, branching, anything you'd want tested
+behind the test gate — it belongs in the codebase under `§Modular design`
+(single responsibility, one contract surface, documented in `modules/<module>.md`
+per `§Documentation`), **not** stuffed into a skill to dodge that bar. Skills
+wrap procedure; the codebase holds logic.
 
 ## Scope & branches
 - **Stay in your app.** In a monorepo, your writes are scoped to `apps/<app>/`
@@ -569,7 +669,10 @@ done without addressing an item is an immediate flag.
 6. **No silent conflicts.** Any contradiction between the work and
    the spec, an ADR, a contract another module depends on, or any
    other piece of doctrine has been surfaced per `§Conflict
-   handling` — not silently resolved.
+   handling` — not silently resolved. Includes hygiene: orphans this
+   change created are removed, every changed line traces to the
+   request, and any pre-existing dead code noticed is surfaced not
+   deleted (per `§Working with existing code`).
 7. **CTO-reviewed.** Plan was approved, summary verified against the
    contract, CTO accepted. The CTO marks done after review, not the
    agent on its own claim.
@@ -594,6 +697,7 @@ the point of use is what fights context decay over a long session.
 [DoD-4] Operability: yes | n/a:<reason>
 [DoD-5] Scale: yes | n/a:<reason>
 [DoD-6] No conflicts: yes | n/a:<reason>
+Beyond-ask / TODOs: <free-form> | none
 ```
 
 Use `yes` when the item is satisfied. Use `n/a:<one-line reason>` when
@@ -602,3 +706,13 @@ the item doesn't apply to this task — e.g.
 `[DoD-5] Scale: n/a:not an at-scale operation`. Bare `n/a` without a
 reason is rejected by the hook. **Never `yes` if it isn't true** —
 that is the §Honesty violation that corrupts everything downstream.
+
+The **`Beyond-ask / TODOs:`** line is **required, free-form, and not
+hook-scanned** — it is the disclosure slot the CTO reads at review (see
+`TEAM_LEAD.md` §*Lead review of teammate output*). State, in one or two lines:
+anything you did **beyond the literal ask**, and any **known TODO, shortcut,
+stub, or follow-up you left behind**. Write `none` only when there is genuinely
+nothing on either count — `none` over a real shortcut is a §Honesty violation,
+same as a false `yes`. This line is not mechanically gated precisely because it
+is prose the hook can't judge; the CTO is the verifier, so silence here that the
+diff contradicts is caught at review.

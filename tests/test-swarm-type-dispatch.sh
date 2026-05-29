@@ -251,6 +251,51 @@ REPO=""  # so cleanup doesn't try to remove it twice
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "==> (g) manifest_walk tolerates the optional 4th 'covers' field (no target corruption)"
+# Regression guard for the route-before-scan manifest column (commit 586f111).
+# manifest_walk splits on '|' and reads FOUR vars (behavior src tgt covers); the
+# catch-all 'covers' absorbs field 4 and any further '|', so target-path is
+# field 3 EXACTLY. A 3-var read (read -r behavior src tgt) would, by bash's
+# last-var rule, corrupt tgt to "field3 | field4 | ..." on any line carrying a
+# covers value — silently mis-routing every such target. This proves it doesn't.
+mkdir -p "$FAKE_HOME/templates/probe"
+cat > "$FAKE_HOME/templates/probe/manifest.tsv" <<'EOF'
+refresh | engineering-cto/CLAUDE.md | CLAUDE.md | route note: doors | with an embedded pipe
+refresh | engineering-cto/TEAM_LEAD.md | TEAM_LEAD.md
+EOF
+PROBE_OUT="$(SWARM_APPLY_TYPE=probe ROOT="$ROOT" bash -c '
+  source "$ROOT/bin/swarm-lib.sh"
+  probe_cb() { printf "%s\t%s\t%s\n" "$1" "$2" "$3"; }
+  manifest_walk probe_cb
+')"
+rm -rf "$FAKE_HOME/templates/probe"
+S1="$(printf '%s\n' "$PROBE_OUT" | sed -n 1p | cut -f2)"
+T1="$(printf '%s\n' "$PROBE_OUT" | sed -n 1p | cut -f3)"
+T2="$(printf '%s\n' "$PROBE_OUT" | sed -n 2p | cut -f3)"
+if [ "$T1" = "CLAUDE.md" ]; then
+  pass "4-field line: target-path is field 3 exactly (CLAUDE.md)"
+else
+  fail "4-field line: target-path corrupted — got '$T1', want 'CLAUDE.md'"
+fi
+if [ "$S1" = "engineering-cto/CLAUDE.md" ]; then
+  pass "4-field line: template-path is field 2 exactly (covers did not bleed into it)"
+else
+  fail "4-field line: template-path corrupted — got '$S1', want 'engineering-cto/CLAUDE.md'"
+fi
+case "$S1$T1" in
+  *covers*|*"route note"*|*"embedded pipe"*)
+    fail "covers text leaked into template/target: src='$S1' tgt='$T1'" ;;
+  *)
+    pass "covers text appears in neither template-path nor target-path" ;;
+esac
+if [ "$T2" = "TEAM_LEAD.md" ]; then
+  pass "3-field line still resolves (back-compat: TEAM_LEAD.md)"
+else
+  fail "3-field line regressed — got '$T2', want 'TEAM_LEAD.md'"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
 if [ "$FAIL" -ne 0 ]; then
   echo "FAIL ($FAIL failure(s))"
   exit 1
