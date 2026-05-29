@@ -489,9 +489,13 @@ manifest_walk() {
     echo "swarm-lib: manifest not found at $mf — aborting" >&2
     return 2
   fi
-  local behavior src tgt line
-  # Read pipe-delimited fields, skip comments + blanks, trim each field.
-  while IFS='|' read -r behavior src tgt; do
+  local behavior src tgt covers line
+  # Read pipe-delimited fields, skip comments + blanks, trim each field. The
+  # 4th field (covers) is the optional route-before-scan note; a catch-all var
+  # absorbs it (and any further '|') so tgt is always exactly field 3 — same
+  # arity-safety idiom as the swarm.conf parser's trailing _rest. covers is
+  # human/agent-facing only and intentionally unused here.
+  while IFS='|' read -r behavior src tgt covers; do
     # Trim leading/trailing whitespace (bash 3.2: use parameter expansion + sed).
     behavior="$(printf '%s' "$behavior" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
     src="$(printf '%s' "$src" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"

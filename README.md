@@ -258,7 +258,12 @@ the `compose` behavior in the manifest cats `+`-joined sources literally.
 See [`templates/_base/README.md`](./templates/_base/README.md) for the
 mechanism and the trailing-newline invariant.
 
-Each line is `behavior | template-path | target-path`. There are six
+Each line is `behavior | template-path | target-path` with an optional
+trailing `| covers` note — a terse, hand-written one-liner of what the target
+doc answers. That column makes the manifest double as the **route-before-scan
+map**: a reader looks up which file covers a topic, opens it, and only greps
+the tree as a fallback. It is human/agent-facing only — `manifest_walk` absorbs
+it into a catch-all field and ignores it. There are six
 behavior classes (each implemented as `manifest_apply_<class>` in
 `swarm-lib.sh`):
 

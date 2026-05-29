@@ -154,6 +154,19 @@ tried, the approach isn't working, and you don't see the next step.
   have one). The CTO has a wider view and can redirect, redesign, or
   take it over.
 
+## Doc map (route before scan)
+- **Route, don't blind-grep.** Before scanning the tree for a doc, read the
+  manifest (`templates/<type>/manifest.tsv`, default `engineering-cto`) — it is
+  the single source of truth for which doctrine files exist, and its `covers`
+  field says what each one answers. Open what it points to; grep is the
+  **fallback**, not the first move.
+- The cpo `product-template/` facet files carry the same contract inline — a
+  `DEFINITION / ROUTES HERE / GREP FOR` header per file. Same idea, finer grain.
+- **An index miss is a defect, not a license to grep wide.** If the topic you
+  need has no `covers` note (or no facet routing it), the map is incomplete —
+  surface it (build log) so the note gets added, then proceed. Don't paper over
+  a missing route by grepping the whole tree every time.
+
 ## Source of truth
 - `PROJECT_SPEC.md` and the ADRs in `docs/adr/` are authoritative **once they
   exist**. On a new project the spec may be empty or absent — the CTO authors it

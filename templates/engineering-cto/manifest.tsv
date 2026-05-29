@@ -7,9 +7,17 @@
 # archetype from its .claude/swarm-type marker (default 'engineering-cto')
 # and the manifest at templates/<type>/manifest.tsv is consumed.
 #
-# Format: behavior | template-path | target-path
+# Format: behavior | template-path | target-path [| covers]
 #   - lines starting with '#' and blank lines are ignored
 #   - fields are pipe-delimited, leading/trailing whitespace per field is trimmed
+#   - covers (OPTIONAL 4th field): a terse one-line note of what topics the
+#     target doc answers — the route-before-scan map. Hand-written here, next to
+#     the line that already declares the file exists; no separate index, no
+#     frontmatter, no generator. A reader routes by reading this column, opens
+#     the named target, and only greps the tree as a fallback. A covered topic
+#     with no matching `covers` note is incomplete-manifest, not a reason to
+#     blind-grep — fix the note. manifest_walk absorbs `covers` into a catch-all
+#     var and ignores it; it never affects target-path resolution.
 #   - template-path is relative to $SWARM_HOME/templates/
 #     (except seed-text, where this field is the literal text to seed)
 #   - target-path is relative to the target repo
@@ -56,11 +64,11 @@
 #   gitignore   append the line in template-path to .gitignore idempotently.
 #
 # behavior   | template-path                                                                                            | target-path
-compose      | engineering-cto/CLAUDE.preamble.md+_base/CLAUDE.md+engineering-cto/CLAUDE.md                              | CLAUDE.md
-compose      | engineering-cto/ESCALATION.preamble.md+_base/ESCALATION.md+engineering-cto/ESCALATION.md                  | ESCALATION.md
-refresh      | engineering-cto/TEAM_LEAD.md                                                                              | TEAM_LEAD.md
-seed         | engineering-cto/PROJECT_SPEC.template.md                                                                  | PROJECT_SPEC.md
-seed         | engineering-cto/ADR.template.md                                                                           | docs/adr/ADR.template.md
+compose      | engineering-cto/CLAUDE.preamble.md+_base/CLAUDE.md+engineering-cto/CLAUDE.md                              | CLAUDE.md                 | teammate operating manual: honesty/verification floor, testing-mock policy, modular design + single-caller carve-out, data ownership, error/logging/operability, skill standards, DoD + beyond-ask disclosure
+compose      | engineering-cto/ESCALATION.preamble.md+_base/ESCALATION.md+engineering-cto/ESCALATION.md                  | ESCALATION.md             | when to stop-and-ask vs proceed: one-way vs two-way doors, no-silence-as-consent, grave-action floors, agent->CTO triggers (incl shared-contract contention)
+refresh      | engineering-cto/TEAM_LEAD.md                                                                              | TEAM_LEAD.md              | CTO-only brief (not loaded by teammates): doc authoring, decomposition, worktree provisioning + one-writer contract lease, spawning, review, dev integration, assumption-note fold
+seed         | engineering-cto/PROJECT_SPEC.template.md                                                                  | PROJECT_SPEC.md           | this swarm's own spec: scope (sec3), acceptance (sec4), architecture (sec6), build log (sec10)
+seed         | engineering-cto/ADR.template.md                                                                           | docs/adr/ADR.template.md  | one-way-door decision record format
 refresh      | engineering-cto/hooks/test-gate.sh                                                                        | .claude/hooks/test-gate.sh
 refresh      | engineering-cto/hooks/docs-check.sh                                                                       | .claude/hooks/docs-check.sh
 compose      | _base/hooks/permission-gate-prelude.sh+engineering-cto/hooks/permission-gate-policy.sh+_base/hooks/permission-gate-tail.sh | .claude/hooks/permission-gate.sh
