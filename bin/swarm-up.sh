@@ -221,7 +221,16 @@ launch_one() {  # name repo tokvar [channel]
   tmux send-keys -t "$sess" "unset ANTHROPIC_API_KEY; export SWARM_HOME='$SWARM_HOME'; set -a; . '$TOKENS'; export DISCORD_BOT_TOKEN=\"\$$tokvar\"; set +a" C-m
   # CRITICAL: --dangerously-load-development-channels (not --channels) because the
   # qofi-swarm marketplace is self-published, not on Anthropic's approved allowlist.
-  tmux send-keys -t "$sess" "claude --dangerously-load-development-channels $PLUGIN" C-m
+  # --remote-control "$name" enables Remote Control and NAMES the remote session
+  # after the swarm/repo (e.g. "qofi-product"), so it shows up by that name at
+  # claude.ai/code and in the mobile app — the operator can drive any swarm
+  # remotely. Passing an explicit name skips the hostname-prefixed auto-naming
+  # (--remote-control-session-name-prefix). This is a launch flag (not a send-keys
+  # slash command like /effort): it's enabled from turn one and the footer still
+  # reaches the "auto mode" readiness marker below, so the gate is unaffected.
+  # Lives in launch_one, the single launch path, so `up`, `restart`, and
+  # `update` all inherit it. $name is the swarm.conf session name == repo name.
+  tmux send-keys -t "$sess" "claude --dangerously-load-development-channels $PLUGIN --remote-control $name" C-m
 
   # --dangerously-load-development-channels opens an interactive warning prompt:
   #   ❯ 1. I am using this for local development
@@ -238,6 +247,22 @@ launch_one() {  # name repo tokvar [channel]
   if ! _wait_for "$sess" "auto mode" 20; then
     echo "  WARN: main input didn't render in 20s — brief may not land" >&2
   fi
+
+  # Force ultracode (xhigh effort + automatic workflow orchestration) for this
+  # session, BEFORE the brief so the first substantive task runs under it.
+  # ultracode is SESSION-ONLY — it can't live in settings.json, has no env var,
+  # and is rejected by --effort/CLAUDE_CODE_EFFORT_LEVEL — so it must be re-sent
+  # on every launch. Sent here as the documented user-facing /effort command
+  # rather than a launch-time `--settings '{"ultracode":true}'` flag: both work
+  # and both are session-only, but the in-session command avoids JSON-escaping
+  # nested inside this tmux/shell send-keys string and leaves a visible record
+  # in the pane scrollback. (Note: the "auto mode" readiness marker above is the
+  # permission/edit mode, independent of effort, so the launch-flag form would
+  # NOT have broken that gate — the choice here is escaping + transparency, not
+  # readiness.) Send text and Enter as separate calls (same idiom as the brief).
+  tmux send-keys -t "$sess" "/effort ultracode"
+  sleep 1
+  tmux send-keys -t "$sess" Enter
 
   # Send the brief, then submit. A trailing C-m on the same send-keys call gets
   # absorbed into the input (treated as part of the paste) and does NOT fire
