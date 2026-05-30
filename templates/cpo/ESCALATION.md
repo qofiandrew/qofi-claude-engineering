@@ -60,24 +60,17 @@ this cause the CTO to *do* something, or to *tell* you something?**
 - **FREE** (investigate / report / clarify, read-only) → you send at
   will, no operator approval.
 - **GATED** (any CTO action or commitment) → you DRAFT → operator
-  RATIFIES → it is delivered. **v1: ALWAYS gated.** Fail-safe to
-  GATED on ambiguity. Delivery is per your runtime: a poster bot sends
-  the ratified message (Discord-swarm runtime), or the operator relays
-  it by hand (direct-chat runtime). Operator ratification is the gate;
-  delivery is whatever your runtime provides.
+  RATIFIES → poster bot sends. **v1: ALWAYS gated.** Fail-safe to
+  GATED on ambiguity.
 
 This is a separate gate from the register: a ratify-register surface to
 the operator may still produce a GATED outbound to the CTO once the
 operator approves. See `SURFACING.md` §out to the CTOs.
 
-## Reaching the operator — runtime-conditional (cpo override)
+## No attention flag — the cpo surfaces via Discord
 
-The base ladder above describes a swarm-attention flag raised on BLOCKED,
-delivered over Discord. **The cpo does not use the attention flag** (it is
-not a build-swarm with an iOS failure-state widget). The cpo surfaces to the
-operator via its **single operator channel, per `CLAUDE.md` §Runtime &
-transport**: if a Discord plugin is present, FRICTION and ratify messages
-land in that Discord channel directly; otherwise this conversation is the
-channel and they land here. There is no separate iOS-widget attention flag
-for the cpo to raise in either runtime. One voice, one channel, whichever
-runtime you are in.
+The base ladder above describes a swarm-attention flag raised on BLOCKED.
+**The cpo does not use it.** The cpo surfaces to the operator via the
+single Discord channel the conversation runs in (see `CLAUDE.md` §two
+loops). FRICTION messages land in that channel directly; there is no
+separate iOS-widget attention flag for the cpo to raise.

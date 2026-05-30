@@ -53,6 +53,14 @@ try {
 
 const TOKEN = process.env.DISCORD_BOT_TOKEN
 const STATIC = process.env.DISCORD_ACCESS_MODE === 'static'
+// Per-bot channel binding. When set, the bot only RESPONDS in this one guild
+// channel, regardless of which channels it's a member of. Membership in other
+// channels is still useful (resolveForwardChannel needs the bot in the source
+// guild to name a forwarded message), but a bot must not answer there. This is
+// the real scoping mechanism — the shared access.json lists groups for every
+// swarm's channel, so without this gate a bot added to a sibling's channel
+// would deliver there too. Unset → no binding (legacy single-channel behavior).
+const BOUND_CHANNEL = process.env.DISCORD_BOUND_CHANNEL?.trim() || undefined
 
 if (!TOKEN) {
   process.stderr.write(
@@ -279,6 +287,16 @@ async function gate(msg: Message): Promise<GateResult> {
   const channelId = msg.channel.isThread()
     ? msg.channel.parentId ?? msg.channelId
     : msg.channelId
+  // Hard channel binding: a bot only answers in its own channel even if it's a
+  // member of others (membership is kept for forward-name resolution). Checked
+  // before the ACL so a sibling channel's group entry in the shared access.json
+  // can't make this bot respond there.
+  if (BOUND_CHANNEL && channelId !== BOUND_CHANNEL) {
+    process.stderr.write(
+      `discord: DROP channel ${channelId} != bound channel ${BOUND_CHANNEL} (sender ${senderId})\n`,
+    )
+    return { action: 'drop' }
+  }
   const policy = access.groups[channelId]
   if (!policy) {
     process.stderr.write(

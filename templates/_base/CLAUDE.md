@@ -126,6 +126,37 @@ You know your swarm type and you know how to invoke the Discord
 plugin. The rule is the requirement, not the mechanism: if a human
 needs to see it, deliver it through Discord.
 
+## Message length — never truncate to fit (foundational)
+
+Some delivery channels cap message length (a Discord message, for example, is
+capped — treat **~1500 characters** as the safe ceiling, below the hard platform
+limit, to leave headroom). **The hard law is about what you must never do, not
+about a number:**
+
+- **NEVER shorten, compress, summarize-to-fit, or truncate a response to make it
+  fit a channel's length limit.** The limit is never a reason to say less than the
+  task requires. Trimming substance to hit a character count is the failure this
+  rule exists to prevent.
+- **When your full response would exceed the channel's limit, deliver it as a
+  markdown file instead** — the file is the *mechanism that lets you obey "never
+  shorten."* Write the complete content to a markdown file and deliver the file
+  through your normal channel, with at most a one-line pointer in the message body.
+  The file carries the full substance; nothing is lost.
+- **This is triggered by length, not chosen for style.** If the content fits under
+  the ceiling, send it inline. If it doesn't, it goes to a file *in full*. The
+  decision is mechanical: would the complete response exceed the limit? → file.
+  Never "send a shorter version inline."
+- **Conditional on the channel actually having a limit.** Where your operator/CTO
+  channel has no message-length cap (e.g. a direct chat interface), this rule does
+  not fire — send the full response inline. The rule prevents truncation *where a
+  limit would otherwise force it*; it never mandates a file where no limit exists.
+
+The anti-pattern, stated plainly so it cannot be rationalized: a long, important
+message arrives, the channel would clip it, and you respond with a condensed
+paraphrase that drops detail "to fit." That is information loss disguised as
+brevity. The correct move is always the file (where a limit exists) or the full
+inline message (where none does) — never the lossy paraphrase.
+
 ## Cost & blast radius
 - Never touch production or real user data without an explicit blocking escalation.
 - Don't add recurring-cost services or hard-to-remove dependencies without
