@@ -1,0 +1,10 @@
+# Secrets and operator-specific config — never commit
+.env
+config.json
+
+# Node
+node_modules
+npm-debug.log*
+
+# pm2 local logs (if any land here)
+*.log

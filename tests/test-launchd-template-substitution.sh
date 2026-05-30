@@ -51,7 +51,20 @@ rc=$?
 assert_eq 0 "$rc" "swarm-launchd-install --render-only exits 0"
 [ "$rc" -ne 0 ] && cat "$TMP/err" >&2
 
-for base in com.qofi.swarm-watch.plist com.qofi.swarm-typing.plist; do
+# Derive the expected plist set from the ACTIVE templates (launchd/*.plist.template),
+# mirroring swarm-launchd-install.sh's own glob. A template renamed to
+# *.plist.template.disabled (e.g. swarm-watch, whose heartbeat is intentionally
+# off — see "launchd: disable swarm-watch heartbeat") is excluded by the glob,
+# so this test tracks whatever is actually active instead of hardcoding a fixed
+# set that drifts the moment a template is enabled/disabled.
+shopt -s nullglob 2>/dev/null || true
+EXPECTED_BASES=""   # space-separated; plist basenames never contain spaces
+for tmpl in "$ROOT"/launchd/*.plist.template; do
+  b="$(basename "$tmpl")"; EXPECTED_BASES="$EXPECTED_BASES ${b%.template}"
+done
+assert_eq "1" "$([ -n "$EXPECTED_BASES" ] && echo 1 || echo 0)" "at least one active *.plist.template in launchd/"
+
+for base in $EXPECTED_BASES; do
   out="$TMP/$base"
   if [ ! -f "$out" ]; then
     assert_eq "exists" "MISSING" "$base rendered"

@@ -1,1 +1,1 @@
-npm test --silent
+bun test && for t in tests/test-*.sh; do bash $t || exit 1; done

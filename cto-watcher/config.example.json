@@ -1,0 +1,23 @@
+{
+  "_comment": "Copy to config.json and fill in. JSON has no comments — see README for each field. config.json is gitignored; this example is committed. All values are Discord snowflakes (enable Developer Mode, right-click to copy ids).",
+
+  "busChannelId": "REPLACE_WITH_cpo_cto_bus_channel_id",
+  "cpoBotUserId": "REPLACE_WITH_qofi_product_bot_USER_id_not_channel_id",
+
+  "alertUserIds": [
+    "REPLACE_WITH_operator_user_id_to_DM_on_failclosed"
+  ],
+
+  "_liveness_comment": "AUTO-mode liveness monitor (everything-in-bus: state parsed from the bus, pings posted to the bus). livenessEnabled=false keeps it OFF; the relay runs normally. Thresholds are seconds; defaults shown (silence/cooldown 30m, check 60s) and may be omitted.",
+  "livenessEnabled": false,
+  "silenceThresholdSeconds": 1800,
+  "pingCooldownSeconds": 1800,
+  "checkIntervalSeconds": 60,
+
+  "_ctoChannels_comment": "Per CTO: channelId (where it lives), botUserId (mentioned on delivery so its swarm acts). botUserId ALSO serves as the inbound author allowlist (A1): only messages authored by it are shuttled CTO->bus — operator forwards / other bots are ignored. Override with an explicit authorId only if the CTO posts under a different id than it's mentioned at (normally it doesn't). A channel with neither authorId nor botUserId will NOT shuttle (fail-closed + startup warning).",
+  "ctoChannels": {
+    "reserve-backend-2": { "channelId": "1507159618453770291", "botUserId": "REPLACE_WITH_reserve_backend_2_bot_user_id" },
+    "qofi-ios-app": { "channelId": "1507882161535975654", "botUserId": "REPLACE_WITH_qofi_ios_app_bot_user_id" },
+    "press-backend": { "channelId": "1510131439906066442", "botUserId": "REPLACE_WITH_press_backend_bot_user_id" }
+  }
+}

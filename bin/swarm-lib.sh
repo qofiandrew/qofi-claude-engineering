@@ -461,13 +461,23 @@ swarm_required_doctrine() {
 # fail-safe reason as swarm_required_doctrine: a misclassified swarm
 # at least gets the engineering brief (a known-good orientation),
 # rather than launching with no instructions at all.
+#
+# Both briefs open with an explicit READ-YOURSELF-DO-NOT-DELEGATE clause.
+# This is load-bearing, not boilerplate: launch_one sends `/effort
+# ultracode` BEFORE this brief (swarm-up.sh), and under ultracode the lead
+# defaults to fanning every substantive task out to a workflow/subagents.
+# Without the clause, the lead reads its doctrine in ephemeral subagent
+# contexts that are discarded — TEAM_LEAD.md / ESCALATION.md /
+# PROJECT_SPEC.md (none auto-loaded; only CLAUDE.md is) never land in the
+# lead's own context and it boots without its operating manual. Keep the
+# clause unless ultracode is moved to AFTER the brief.
 swarm_launch_brief() {
   case "$1" in
     cpo)
-      printf '%s' "Read CLAUDE.md, ESCALATION.md, CONVERSATION.md, EVALUATION.md, SURFACING.md, MEMORY.md, READINESS_BAR.md. You are the CPO for this product-vision repo; operate per CLAUDE.md. The operator will hold the product conversation with you over Discord. You write into products/<product>/<facet>.md via the refine → ratify → write protocol in MEMORY.md. Do NOT act as an engineering team lead and do NOT execute engineering work — that is the CTOs' lane."
+      printf '%s' "Read CLAUDE.md, ESCALATION.md, CONVERSATION.md, EVALUATION.md, SURFACING.md, MEMORY.md, READINESS_BAR.md NOW, yourself, directly with the file-reading tool — read them into your OWN context. Do NOT delegate this to a workflow or to subagents: your operating doctrine must live in your context, not an ephemeral one, so read the files inline before doing anything else. You are the CPO for this product-vision repo; operate per CLAUDE.md. The operator will hold the product conversation with you over Discord. You write into products/<product>/<facet>.md via the refine → ratify → write protocol in MEMORY.md. Do NOT act as an engineering team lead and do NOT execute engineering work — that is the CTOs' lane."
       ;;
     engineering-cto|*)
-      printf '%s' "Read TEAM_LEAD.md, ESCALATION.md, CLAUDE.md and PROJECT_SPEC.md. You are the team lead (CTO) for this repo; operate per TEAM_LEAD.md. The human will hold a product design conversation with you over Discord and the spec may be empty for now — do NOT build during the conversation. When the human says to build, first author PROJECT_SPEC.md and the one-way-door ADRs from the conversation, confirm them with the human, then decompose and spawn the team. Keep the docs reconciled with the implementation as it proceeds, and message the human for any major spec decision."
+      printf '%s' "Read TEAM_LEAD.md, ESCALATION.md, CLAUDE.md and PROJECT_SPEC.md NOW, yourself, directly with the file-reading tool — read them into your OWN context. Do NOT delegate this to a workflow or to subagents: your operating doctrine must live in your context, not an ephemeral one, so read the files inline before doing anything else. You are the team lead (CTO) for this repo; operate per TEAM_LEAD.md. The human will hold a product design conversation with you over Discord and the spec may be empty for now — do NOT build during the conversation. When the human says to build, first author PROJECT_SPEC.md and the one-way-door ADRs from the conversation, confirm them with the human, then decompose and spawn the team. Keep the docs reconciled with the implementation as it proceeds, and message the human for any major spec decision."
       ;;
   esac
 }

@@ -28,6 +28,16 @@
 #   swarm-sync                propagate doctrine from templates into each repo
 #   swarm-watch-log           tail the launchd watcher logs
 #
+#   cto-watcher (the Discord CPO<->CTO relay daemon, pm2-managed):
+#   watcher-up                start the relay (pm2)
+#   watcher-down              STOP the relay (disable for this session; pm2)
+#   watcher-restart           restart after a config/code change
+#   watcher-status            pm2 status for the relay
+#   watcher-log               tail the relay's logs (Ctrl-C to stop)
+#   watcher-smoke             read-only pre-flight (verify channel access; posts nothing)
+#   watcher-disable           stop AND persist stopped state (won't come back on reboot)
+#   watcher-enable            start AND persist (survives reboot, with `pm2 startup` set once)
+#
 # When you add a swarm via swarm-add.sh, re-source this file to get the new
 # per-swarm alias: `source ~/.zshrc` (or just open a new terminal).
 #
@@ -56,6 +66,19 @@ alias swarm-restart="$_swarm_bin/swarm-restart.sh"
 alias swarm-update="$_swarm_bin/swarm-update.sh"
 alias swarm-update-all="$_swarm_bin/swarm-update.sh --all"
 alias swarm-watch-log="tail -F $HOME/.config/swarm/watch.log $HOME/.config/swarm/watch.err"
+
+# cto-watcher (Discord CPO<->CTO relay daemon, pm2-managed). Names mirror the
+# swarm verbs. start uses the ecosystem's absolute path so it works from any
+# dir; the rest target the app by name (cwd-independent). "disable" persists the
+# stopped state via pm2 save so a reboot/resurrect won't bring it back running.
+alias watcher-up="pm2 start $SWARM_HOME/cto-watcher/ecosystem.config.cjs"
+alias watcher-down="pm2 stop cto-watcher"
+alias watcher-restart="pm2 restart cto-watcher"
+alias watcher-status="pm2 describe cto-watcher"
+alias watcher-log="pm2 logs cto-watcher"
+alias watcher-smoke="node $SWARM_HOME/cto-watcher/smoke.js"
+alias watcher-disable="pm2 stop cto-watcher && pm2 save"
+alias watcher-enable="pm2 start $SWARM_HOME/cto-watcher/ecosystem.config.cjs && pm2 save"
 
 # Per-swarm aliases generated from swarm.conf — for every row, THREE aliases:
 #   swarm-<name>          attach-or-launch

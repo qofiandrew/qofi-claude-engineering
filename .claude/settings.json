@@ -1,7 +1,7 @@
 {
   "env": {
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
-    "CLAUDE_TEST_CMD": "npm test --silent"
+    "CLAUDE_TEST_CMD": "bun test && for t in tests/test-*.sh; do bash $t || exit 1; done"
   },
   "teammateMode": "in-process",
   "hooks": {

@@ -139,16 +139,16 @@ assert defer "$(decide Bash '"$SWARM_HOME/bin/swarm-attention-evil.sh" raise "x"
 assert defer "$(decide Bash '"$SWARM_HOME/bin/swarm-attention" raise "x"')" \
   'missing .sh suffix (path resolution would 127 anyway, but gate shouldn\''t pre-approve)'
 
-# Chained commands. The new helper allowlist is `^`-anchored, so a chain
-# hiding the helper after `&&` does NOT match the new rule. The pre-existing
-# `echo` allowlist (templates/engineering-cto/hooks/permission-gate.sh:98) does still allow
-# any command-chain whose leading word is `echo`, but that's a pre-existing
-# scope, not a regression from this commit. The protection that matters is
-# that a chain hiding a REDIRECT into ~/.config/swarm/ is caught by the new
-# hard-floor deny (the deny scans the whole command, unanchored) — verified
-# in the next assertion.
-assert allow "$(decide Bash 'echo hi && "$SWARM_HOME/bin/swarm-attention.sh" raise "x"')" \
-  'chained-after-echo: pre-existing echo allowlist accepts the chain (not a new regression)'
+# Chained commands. The helper allowlist is `^`-anchored, so a chain hiding the
+# helper after `&&` does NOT match it. Historically the `echo` allowlist still
+# blanket-allowed any chain whose leading word was `echo` — a loose spot. The
+# repo-scope floor (templates/_base/hooks/permission-gate-prelude.sh) now closes
+# it: a util-prefixed command is auto-allowed only when EVERY path it touches is
+# in-scope, so a chain referencing `$SWARM_HOME/...` (a var-path it can't verify
+# statically) DEFERS to a human. The canonical un-chained helper form (above) is
+# unaffected. This deliberately tightens `echo X && <arbitrary>`.
+assert defer "$(decide Bash 'echo hi && "$SWARM_HOME/bin/swarm-attention.sh" raise "x"')" \
+  'chained-after-echo: repo-scope floor no longer blanket-allows the chain (tightened)'
 assert defer "$(decide Bash 'false && "$SWARM_HOME/bin/swarm-attention.sh" raise "x"')" \
   'chained-after-non-allowed: helper anchor correctly fails to match'
 assert deny "$(decide Bash 'echo ok && echo "x" > ~/.config/swarm/attention-1.flag')" \

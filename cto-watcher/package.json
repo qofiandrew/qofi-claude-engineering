@@ -1,0 +1,19 @@
+{
+  "name": "cto-watcher",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Real-time Discord relay between CTO channels and the #cpo-cto-bus channel.",
+  "main": "index.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.0",
+    "dotenv": "^16.4.5"
+  }
+}
