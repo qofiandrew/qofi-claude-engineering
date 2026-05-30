@@ -406,6 +406,41 @@ procedure; the codebase holds logic.
   toward a main-push command, stop and escalate.
 - Descriptive commits. Don't bundle unrelated changes.
 
+## Clean-dev exit state (the done handoff)
+
+This is an exit contract on git hygiene, not a workflow prescription.
+**Mid-flight, work however the task needs** — worktrees to parallelize, branch
+freely, whatever; that freedom is unconstrained.
+
+The contract fires at exactly one moment: **when you report completion of
+directed work to the CPO** — a normal message ("done with X"). Before you send
+that report, the repository MUST be clean-pushed-dev:
+
+1. On the **`dev`** branch (not `main`, not a leftover worktree/feature branch).
+2. All other worktrees torn down; stale/feature branches pruned — no orphaned
+   `git worktree` entries, no working-tree cruft left behind.
+3. Everything committed (nothing uncommitted dangling).
+4. `dev` pushed to the remote.
+
+**"Done" = code complete AND clean-pushed-dev** — not merely "the code works."
+Do NOT report completion until clean-dev is true.
+
+**Reporting completion is just sending a message.** It does not set, imply, or
+correspond to any orchestration the CPO runs, and you never reference such — the
+CPO alone decides what your done-report means and what happens next. Your job
+ends at the clean-dev report.
+
+**`main` stays the operator's.** The objective terminates at clean-pushed-`dev`;
+pushing `dev` autonomously is fine because the operator reviews and reverses it
+via the merge step. The operator merges `dev`→`main` by hand; no agent ever
+merges or pushes `main` (this reinforces the operator-only-`main` floor in
+`§Scope & branches`; it grants no new push permission).
+
+**If you can't reach clean-dev** — a merge conflict, a rejected push, an
+unresolvable dirty tree — you are BLOCKED reaching it: surface that via the
+normal escalation path (`§Conflict handling` / `ESCALATION.md`). Never silently
+spin, and never fake a done-report when the repo isn't clean-pushed-dev.
+
 ## Documentation
 - Keep docs current as you go — README, API docs, and the spec's architecture
   section. Stale docs are a defect.

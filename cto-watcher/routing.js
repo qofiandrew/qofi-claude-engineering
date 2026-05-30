@@ -73,6 +73,13 @@ export function prepareContext(config, selfId) {
     throw new Error('watcher selfId equals cpoBotUserId — the watcher must be its own bot identity');
   }
 
+  // Operator channel id — LOOKUP KEY ONLY for the DM kill switch: locates the
+  // operator group's allowFrom in access.json for authorization. The watcher does
+  // NOT bind to, read, post in, or surface in this channel. Absent → kill switch
+  // authorizes no one (fail-closed).
+  const operatorChannelId = config.operatorChannelId ?? null;
+  if (operatorChannelId !== null) requireSnowflake('operatorChannelId', operatorChannelId);
+
   // Liveness monitor (AUTO-mode accelerator). OFF unless explicitly enabled.
   // Thresholds tuned to the operator's distribution (work cycles ~20m, ~10% to 30m).
   const livenessEnabled = config.livenessEnabled === true;
@@ -81,7 +88,7 @@ export function prepareContext(config, selfId) {
   const checkIntervalMs = Math.round((config.checkIntervalSeconds ?? 60) * 1000);
 
   return {
-    selfId, busChannelId, cpoBotUserId, alertUserIds, ctoByName, ctoById,
+    selfId, busChannelId, cpoBotUserId, alertUserIds, ctoByName, ctoById, operatorChannelId,
     livenessEnabled, silenceThresholdMs, pingCooldownMs, checkIntervalMs,
   };
 }

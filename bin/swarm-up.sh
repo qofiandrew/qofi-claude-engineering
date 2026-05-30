@@ -220,11 +220,17 @@ launch_one() {  # name repo tokvar [channel]
   # without hardcoding the host path.
   # DISCORD_BOUND_CHANNEL scopes the bridge to this swarm's own channel: the bot
   # may be a MEMBER of sibling channels (needed so it can resolve the source name
-  # of forwarded messages) but it only RESPONDS in its bound channel. Without it,
-  # the shared access.json — which lists a group for every swarm's channel — lets
-  # a bot answer in any channel it's been added to. Empty channel (legacy 3-col
-  # swarm.conf row) → unset, preserving prior single-channel behavior.
-  tmux send-keys -t "$sess" "unset ANTHROPIC_API_KEY; export SWARM_HOME='$SWARM_HOME'; export DISCORD_BOUND_CHANNEL='$channel'; set -a; . '$TOKENS'; export DISCORD_BOT_TOKEN=\"\$$tokvar\"; set +a" C-m
+  # of forwarded messages) but it only RESPONDS in its bound channel(s). Without
+  # it, the shared access.json — which lists a group for every swarm's channel —
+  # lets a bot answer in any channel it's been added to. Empty channel (legacy
+  # 3-col swarm.conf row) → unset, preserving prior single-channel behavior.
+  #
+  # swarm_bound_exports (swarm-lib.sh) derives the binding: every swarm is
+  # single-bound to its own channel EXCEPT the CPO swarm, which is bound to
+  # operator+bus and also gets DISCORD_OPERATOR_CHANNEL / DISCORD_BUS_CHANNEL for
+  # register-by-channel. Deriving it there keeps every CTO swarm untouched (no bus).
+  bound_exports="$(swarm_bound_exports "$name" "$channel")"
+  tmux send-keys -t "$sess" "unset ANTHROPIC_API_KEY; export SWARM_HOME='$SWARM_HOME'; $bound_exports; set -a; . '$TOKENS'; export DISCORD_BOT_TOKEN=\"\$$tokvar\"; set +a" C-m
   # CRITICAL: --dangerously-load-development-channels (not --channels) because the
   # qofi-swarm marketplace is self-published, not on Anthropic's approved allowlist.
   # --remote-control "$name" enables Remote Control and NAMES the remote session

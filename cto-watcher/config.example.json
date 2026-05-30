@@ -4,6 +4,9 @@
   "busChannelId": "REPLACE_WITH_cpo_cto_bus_channel_id",
   "cpoBotUserId": "REPLACE_WITH_qofi_product_bot_USER_id_not_channel_id",
 
+  "_operatorChannelId_comment": "LOOKUP KEY ONLY for the DM kill switch: the operator channel (#qofi-product) id, used solely to read groups[<id>].allowFrom from access.json for authorization. The watcher does NOT bind to, post in, or surface in this channel. Omit → kill switch authorizes no one (fail-closed).",
+  "operatorChannelId": "REPLACE_WITH_qofi_product_channel_id",
+
   "alertUserIds": [
     "REPLACE_WITH_operator_user_id_to_DM_on_failclosed"
   ],

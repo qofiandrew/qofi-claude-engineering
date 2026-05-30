@@ -177,3 +177,28 @@ an **unknown** `[name]`, and asserts correct routing plus that the unknown name
 - Loop prevention: the watcher ignores `message.author.id === client.user.id`
   everywhere, so neither its bus posts nor its routed CTO posts are ever
   re-shuttled.
+
+## DM kill switch (soft pause)
+
+Send the watcher bot a **direct message** (DM only — never a guild channel):
+
+- `!watcher stop` — pause: relay shuttles nothing, liveness pings nothing. The
+  process stays connected and alive under pm2 (inert, not dead); it keeps tracking
+  per-CTO state/activity in memory so resume has current data.
+- `!watcher start` — resume.
+- `!watcher status` — report PAUSED/ACTIVE + uptime.
+
+The watcher replies in the DM to confirm every recognized command. Commands are
+exact and case-insensitive.
+
+**Authorization:** a command is honored only if the sender's id is in the
+**operator channel group's `allowFrom`** in `access.json`
+(`groups[<operatorChannelId>].allowFrom`, read fresh per command). Add an operator
+to `#qofi-product` and they're automatically authorized; the watcher bot / bus
+allowlist can **not** drive the switch. If the ACL can't be read, **no one** is
+authorized (fail-closed). `operatorChannelId` in `config.json` is a **lookup key
+only** — the watcher never joins, posts in, or reads `#qofi-product`.
+
+**State is in-memory: pause does NOT survive a restart.** A `pm2 restart` (or
+crash) brings the watcher back **ACTIVE** — a deliberate safe default. Re-issue
+`!watcher stop` after a restart if you still want it paused.

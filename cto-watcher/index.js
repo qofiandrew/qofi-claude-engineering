@@ -13,13 +13,31 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
+import { homedir } from 'node:os';
 import { config as loadDotenv } from 'dotenv';
-import { Client, GatewayIntentBits, Events } from 'discord.js';
+import { Client, GatewayIntentBits, Events, Partials } from 'discord.js';
 import { prepareContext, decideRoute } from './routing.js';
 import { LivenessMonitor } from './liveness.js';
 import { readTokenFromEnvFile } from './token.js';
+import { authorizeDm, readOperatorAllowFrom, KillSwitch } from './killswitch.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const START_MS = Date.now(); // process start, for !watcher status uptime
+
+// Where the shared ACL lives (for kill-switch operator-allowFrom lookups).
+// Overridable; defaults to the bridge's standard state dir.
+const ACCESS_PATH =
+  process.env.CTO_WATCHER_ACCESS_JSON ||
+  join(process.env.DISCORD_STATE_DIR || join(homedir(), '.claude', 'channels', 'discord'), 'access.json');
+
+const killswitch = new KillSwitch(); // in-memory; pm2 restart → ACTIVE (safe default)
+
+function fmtUptime() {
+  const s = Math.floor((Date.now() - START_MS) / 1000);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return h > 0 ? `${h}h${m}m` : `${m}m${s % 60}s`;
+}
 
 function log(...args) {
   // ISO timestamp + message; pm2 prefixes its own metadata, this keeps lines greppable.
@@ -66,7 +84,13 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
+    // DirectMessages — REQUIRED for the DM kill switch; without it the watcher
+    // never receives DM messageCreate and the switch silently fails.
+    GatewayIntentBits.DirectMessages,
   ],
+  // DM channels/messages often arrive uncached → partials are required to get
+  // the messageCreate event for a DM at all.
+  partials: [Partials.Channel, Partials.Message],
 });
 
 // ctx is set once we know our own user id (client.user.id) at login.
@@ -88,6 +112,11 @@ client.once(Events.ClientReady, (c) => {
     if (!e.authorId) log(`[warn] CTO channel "${name}" has no author id — its messages will NOT shuttle (fail-closed)`);
   }
   log(`[ready] liveness thresholds: silence=${Math.round(ctx.silenceThresholdMs / 1000)}s cooldown=${Math.round(ctx.pingCooldownMs / 1000)}s check=${Math.round(ctx.checkIntervalMs / 1000)}s`);
+  // DM kill switch (cpo/CLAUDE.md is unaffected — this is operational only).
+  const dmIntentOn = client.options.intents.has(GatewayIntentBits.DirectMessages);
+  log(`[ready] DM kill-switch: DM intent ${dmIntentOn ? 'ENABLED' : 'DISABLED'}; auth via access.json groups[${ctx.operatorChannelId ?? 'UNSET'}].allowFrom @ ${ACCESS_PATH}`);
+  if (!ctx.operatorChannelId) log('[warn] no operatorChannelId in config — DM kill switch authorizes NO ONE (fail-closed)');
+  if (!dmIntentOn) log('[warn] DM intent is OFF — kill-switch DMs will not be received');
 
   // Per-CTO liveness monitor (cpo/CLAUDE.md §"The CTO loop"). Everything-in-bus:
   // state is parsed from the bus stream; revival pings post to the bus. OFF
@@ -100,6 +129,7 @@ client.once(Events.ClientReady, (c) => {
     });
     log(`[liveness] ON — monitoring ${ctx.ctoByName.size} CTO(s) on the bus`);
     setInterval(async () => {
+      if (killswitch.livenessHalted()) return; // paused: track in memory, emit nothing
       for (const d of monitor.tick(Date.now())) {
         const mins = Math.round(d.silenceMs / 60000);
         const text =
@@ -138,8 +168,47 @@ async function alertOperators(name, kind) {
   }));
 }
 
+// DM kill switch. Authorized ONLY against the operator group's allowFrom in
+// access.json (read fresh per command, fail-closed). DM-only; never a guild
+// channel. Replies in the DM on every recognized command.
+async function handleDmCommand(message) {
+  const senderId = message.author?.id;
+  const allowFrom = readOperatorAllowFrom(ACCESS_PATH, ctx.operatorChannelId); // fresh read, fail-closed []
+  const d = authorizeDm({ isDM: !message.guildId, senderId, content: message.content ?? '', allowFrom });
+  if (!d.command) return; // not one of our commands — ignore silently
+  if (!d.authorized) {
+    log(`[killswitch] IGNORED "${d.command}" DM from ${senderId} (${d.reason}; operator allowFrom=[${allowFrom.join(', ')}])`);
+    return;
+  }
+  let reply;
+  if (d.command === 'stop') {
+    killswitch.stop();
+    log('[killswitch] PAUSED — relay and liveness halted (by ' + senderId + ')');
+    reply = `Paused. Relay + liveness halted; still connected under pm2. Uptime ${fmtUptime()}.`;
+  } else if (d.command === 'start') {
+    killswitch.start();
+    log('[killswitch] RESUMED — relay and liveness active (by ' + senderId + ')');
+    reply = `Resumed. Relay + liveness active. Uptime ${fmtUptime()}.`;
+  } else {
+    reply = `Status: ${killswitch.paused ? 'PAUSED' : 'ACTIVE'}. Uptime ${fmtUptime()}.`;
+    log(`[killswitch] status → ${killswitch.paused ? 'PAUSED' : 'ACTIVE'} (by ${senderId})`);
+  }
+  try {
+    await message.reply(reply);
+  } catch (err) {
+    log(`[killswitch] FAILED to send DM confirmation for "${d.command}": ${err.message}`);
+  }
+}
+
 client.on(Events.MessageCreate, async (message) => {
   if (!ctx) return; // not ready yet
+
+  // DM kill-switch path — DMs are DM-ONLY commands, NEVER relayed. Handle + return.
+  if (!message.guildId) {
+    await handleDmCommand(message);
+    return;
+  }
+
   const msg = {
     channelId: message.channelId,
     authorId: message.author?.id,
@@ -154,10 +223,22 @@ client.on(Events.MessageCreate, async (message) => {
     return;
   }
 
-  // OP1 timer reset — a CTO's OWN message (shuttled or empty) is liveness activity.
-  if (monitor && decision.ctoActivity && decision.sourceName) {
-    monitor.noteChannelActivity(decision.sourceName, Date.now());
+  // MONITOR TRACKING — runs even while PAUSED so resume has current state/activity.
+  const now = Date.now();
+  if (monitor) {
+    if (decision.ctoActivity && decision.sourceName) monitor.noteChannelActivity(decision.sourceName, now); // OP1
+    if (decision.action === 'state') {
+      let changed = false;
+      for (const s of decision.states) {
+        const r = monitor.applyState(s.name, s.state, now); // also resets the clock (heartbeat)
+        if (r && r.changed) { changed = true; log(`[state] ${s.name} ${r.from} -> ${r.to}`); }
+      }
+      if (changed) log(`[state] map: ${monitor.snapshot()}`);
+    }
   }
+
+  // SOFT-PAUSE gate: tracked above; emit NOTHING below while paused.
+  if (killswitch.relayHalted()) return;
 
   switch (decision.action) {
     case 'ignore':
@@ -190,19 +271,9 @@ client.on(Events.MessageCreate, async (message) => {
       }
       return;
 
-    case 'state': { // CPO STATE line(s) — never shuttled
-      if (monitor) {
-        const now = Date.now();
-        let changed = false;
-        for (const s of decision.states) {
-          const r = monitor.applyState(s.name, s.state, now); // OP1: also resets the clock (heartbeat)
-          if (r && r.changed) { changed = true; log(`[state] ${s.name} ${r.from} -> ${r.to}`); }
-        }
-        if (changed) log(`[state] map: ${monitor.snapshot()}`);
-      }
-      for (const name of decision.unknownNames) await alertOperators(name, 'STATE'); // fail-closed, no tracking
+    case 'state': // CPO STATE line(s) — never shuttled; state tracking done above the pause gate
+      for (const name of decision.unknownNames) await alertOperators(name, 'STATE'); // fail-closed alert (send)
       return;
-    }
 
     case 'alert': // unknown directive name -> fail closed
       await alertOperators(decision.name, 'DIRECTIVE');

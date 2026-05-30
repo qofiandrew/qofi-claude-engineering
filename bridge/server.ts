@@ -30,6 +30,7 @@ import {
   type Interaction,
 } from 'discord.js'
 import { forwardedContent, safeAttName } from './normalize.ts'
+import { parseBoundChannels, isBoundDrop } from './binding.ts'
 import { randomBytes } from 'crypto'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
@@ -60,7 +61,9 @@ const STATIC = process.env.DISCORD_ACCESS_MODE === 'static'
 // the real scoping mechanism — the shared access.json lists groups for every
 // swarm's channel, so without this gate a bot added to a sibling's channel
 // would deliver there too. Unset → no binding (legacy single-channel behavior).
-const BOUND_CHANNEL = process.env.DISCORD_BOUND_CHANNEL?.trim() || undefined
+// May be a single id or a comma-separated list (e.g. the CPO: operator + bus).
+// Parsed to a list; an empty list means unbound (legacy single-channel behavior).
+const BOUND_CHANNELS = parseBoundChannels(process.env.DISCORD_BOUND_CHANNEL)
 
 if (!TOKEN) {
   process.stderr.write(
@@ -291,9 +294,9 @@ async function gate(msg: Message): Promise<GateResult> {
   // member of others (membership is kept for forward-name resolution). Checked
   // before the ACL so a sibling channel's group entry in the shared access.json
   // can't make this bot respond there.
-  if (BOUND_CHANNEL && channelId !== BOUND_CHANNEL) {
+  if (isBoundDrop(BOUND_CHANNELS, channelId)) {
     process.stderr.write(
-      `discord: DROP channel ${channelId} != bound channel ${BOUND_CHANNEL} (sender ${senderId})\n`,
+      `discord: DROP channel ${channelId} not in bound [${BOUND_CHANNELS.join(', ')}] (sender ${senderId})\n`,
     )
     return { action: 'drop' }
   }

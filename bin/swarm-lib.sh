@@ -482,6 +482,31 @@ swarm_launch_brief() {
   esac
 }
 
+# swarm_bound_exports NAME CHANNEL — emit the shell `export` statements that
+# scope a swarm's Discord bridge binding. ALL swarms get DISCORD_BOUND_CHANNEL =
+# their own channel (single-bound, unchanged). The ONE exception is the CPO
+# swarm (name matches $SWARM_CPO_NAME, default "qofi-product"): it is bound to
+# the UNION of its operator channel + the bus, and additionally gets the role
+# env vars so doctrine's register-by-channel can compare a message's source id
+# against DISCORD_OPERATOR_CHANNEL vs DISCORD_BUS_CHANNEL. The CPO name and bus
+# id are the only deployment-specific values; both are env-overridable so this
+# shared lib stays portable. Single source of truth: binding and role env are
+# derived together here, so they can't disagree. A CTO swarm NEVER reaches this
+# branch — its binding is exactly its own channel and it gets no bus access.
+swarm_bound_exports() {
+  local name="$1" channel="$2"
+  local cpo_name="${SWARM_CPO_NAME:-qofi-product}"
+  local bus="${SWARM_BUS_CHANNEL:-1510301812434141194}"
+  if [ -n "$channel" ] && [ "$name" = "$cpo_name" ]; then
+    printf "export DISCORD_OPERATOR_CHANNEL='%s'; export DISCORD_BUS_CHANNEL='%s'; export DISCORD_BOUND_CHANNEL='%s,%s'" \
+      "$channel" "$bus" "$channel" "$bus"
+  else
+    # Every non-CPO swarm (and the legacy empty-channel row): single-bound, no
+    # operator/bus role env. Empty channel → empty bind (prior behavior).
+    printf "export DISCORD_BOUND_CHANNEL='%s'" "$channel"
+  fi
+}
+
 # Resolve and verify the manifest file for a given archetype. Refuses
 # (caller-side) to run if it's missing — caller checks file existence
 # after this returns.
