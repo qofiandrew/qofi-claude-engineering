@@ -500,14 +500,14 @@ python3 - "$ACCESS" "$CHANNEL" "$OWNER_ID" <<'PY'
 import json, os, sys
 path, channel, owner = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(path) as f: cfg = json.load(f)
-cfg.setdefault("groups", {})[channel] = {"requireMention": True, "allowFrom": [owner]}
+cfg.setdefault("groups", {})[channel] = {"requireMention": False, "allowFrom": [owner]}
 tmp = path + ".tmp"
 with open(tmp, "w") as f:
     json.dump(cfg, f, indent=2); f.write("\n")
 os.replace(tmp, path)
 with open(path) as f: json.load(f)  # validate the file we just wrote
 print("  access.json group for channel {} set "
-      "(requireMention=true, allowFrom=[{}])".format(channel, owner))
+      "(requireMention=false, allowFrom=[{}])".format(channel, owner))
 PY
 
 # ---------------------------------------------------------------------------

@@ -50,10 +50,10 @@ Guild channels are off by default. Opt each one in individually, keyed on the **
 /discord:access group add 846209781206941736
 ```
 
-With the default `requireMention: true`, the bot responds only when @mentioned or replied to. Pass `--no-mention` to process every message in the channel, or `--allow id1,id2` to restrict which members can trigger it.
+With the default `requireMention: false`, the bot processes every message in the channel. Pass `--require-mention` to respond only when @mentioned or replied to, or `--allow id1,id2` to restrict which members can trigger it.
 
 ```
-/discord:access group add 846209781206941736 --no-mention
+/discord:access group add 846209781206941736 --require-mention
 /discord:access group add 846209781206941736 --allow 184695080709324800,221773638772129792
 /discord:access group rm 846209781206941736
 ```
@@ -99,7 +99,7 @@ Configure outbound behavior with `/discord:access set <key> <value>`.
 | `/discord:access allow 184695080709324800` | Add a user snowflake directly. |
 | `/discord:access remove 184695080709324800` | Remove from the allowlist. |
 | `/discord:access policy allowlist` | Set `dmPolicy`. Values: `pairing`, `allowlist`, `disabled`. |
-| `/discord:access group add 846209781206941736` | Enable a guild channel. Flags: `--no-mention`, `--allow id1,id2`. |
+| `/discord:access group add 846209781206941736` | Enable a guild channel. Flags: `--require-mention`, `--allow id1,id2`. |
 | `/discord:access group rm 846209781206941736` | Disable a guild channel. |
 | `/discord:access set ackReaction 🔨` | Set a config key: `ackReaction`, `replyToMode`, `textChunkLimit`, `chunkMode`, `mentionPatterns`. |
 
@@ -118,8 +118,8 @@ Configure outbound behavior with `/discord:access set <key> <value>`.
   // Guild channels the bot is active in. Empty object = DM-only.
   "groups": {
     "846209781206941736": {
-      // true: respond only to @mentions and replies.
-      "requireMention": true,
+      // false (default): process every message; true: respond only to @mentions and replies.
+      "requireMention": false,
       // Restrict triggers to these senders. Empty = any member (subject to requireMention).
       "allowFrom": []
     }

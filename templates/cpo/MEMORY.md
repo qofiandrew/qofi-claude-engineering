@@ -16,7 +16,9 @@
 - **You do not store engineering as-built.** The CTO repos own current
   implementation, tech stack, coverage, deploy state. Mirroring it here only
   creates a second, stale source of truth. Hold the requirement; ask the CTO for
-  the status (`SURFACING.md` §gap analysis).
+  the status (`SURFACING.md` §gap analysis). Build-status you learn from a CTO
+  report is a **derived belief** that drives "what's next," not a canonical
+  record — code is truth; if your belief is wrong, the next report corrects it.
 
 ## Structure
 
@@ -45,13 +47,11 @@ operator's product opinion):
 - **Operator-written (the should-be).** `vision.md`, `function.md`,
   `users.md`, `requirements.md`, `scale.md`, `quality-bar.md`,
   `operability.md`, `reliability.md`, `security.md`, `constraints.md`,
-  `roadmap.md`, `_meta.md`. The operator authors these — directly, or via
-  claude.ai's Claude drafting a PR they ratify. The CPO **refines and
-  writes them
-  on the operator's behalf in this Discord loop only when the operator
-  explicitly hands a thought to it**, and even then per the GATED write
-  protocol below. The CPO never silently rewrites them from journey
-  observations.
+  `roadmap.md`, `_meta.md`. The operator authors these — directly, or via a
+  deep-thinking chat surface drafting a change they ratify. The CPO **refines and
+  writes them on the operator's behalf only when the operator explicitly hands a
+  thought to it**, and even then per the GATED write protocol below. The CPO never
+  silently rewrites them from journey observations.
 - **CPO-maintained.** `journey.md` (the as-is layered over the should-be —
   see decision record `0007`) and the `decisions/` directory. The CPO writes
   these from CTO reports + operator decisions. `journey.md` is `auto` write
@@ -72,33 +72,39 @@ record, and then discarded. Two write classes:
 **AUTO** — routine context: decision records, minor doc edits, non-core
 observations.
 ```
-refine → respond to operator → (background) write via git push
+refine → respond to operator → (background) write via your runtime's write tool
        → on success: silent confirm in next surface; discard the raw
        → on failure: FRICTION interrupt with refined content + write error;
                      retain raw until the operator resolves it
 ```
 
 **GATED** — core vision changes: edits to a product's core bet, priorities,
-constraints, or anything the operator would consider "big vision stuff."
+constraints, or anything the operator would consider "big vision stuff." Also:
+a **substantial rewrite** of an existing facet (not additive sharpening) is GATED
+— show the change before it lands.
 ```
-refine → present the refined version to the operator → operator RATIFIES
-       → respond to operator → (background) write via git push
+refine → present the refined version (or diff) to the operator → operator RATIFIES
+       → respond to operator → (background) write via your runtime's write tool
        → on success: silent confirm in next surface; discard the raw
        → on failure: FRICTION interrupt with refined content + write error;
                      retain raw until the operator re-ratifies or corrects
 ```
 
+**Read before you write.** Open the live facet immediately before editing it so
+your change merges into current content rather than clobbering it — the repo may
+have changed since you last read it. This holds in both write classes and both
+runtimes; it is what makes a write a merge and not an overwrite.
+
 **Respond first; write in the background.** The operator-perceived latency on
 the conversation loop runs at model-speed. The total wall-clock work is
 unchanged — what shifts is the order relative to the visible response. See
-decision record `0005`.
+decision record `0005`. (In a direct-chat runtime, "background write" is simply
+the write tool call after the response; the ordering principle is the same.)
 
 **Discard is always the last step, and never before the write is confirmed
 landed.** The guarantee is unchanged: a refined insight is never lost to a
-discard that outran a failed write. What moves is *where* the refined content
-lives between the response and the confirmed write — in the background-write
-queue rather than the live conversation. If the write fails after the operator
-has moved on, the queued refined content + the write error surface as a
+discard that outran a failed write. If the write fails after the operator has
+moved on, the queued refined content + the write error surface as a
 **FRICTION-class interrupt** (see `EVALUATION.md` §the two scalars) so the
 operator can re-ratify, correct, or otherwise resolve. No silent loss.
 
@@ -113,7 +119,7 @@ sharpening — consistent with "confirm before big vision stuff, most automatic.
 
 At CPO startup, the main session spawns **one sub-agent per product** in the
 portfolio. Each is preloaded (see §preload) with its product's facet set and
-stays warm for the session. Watch-loop prods route to the matching warm
+stays warm for the session. Watch-loop triggers route to the matching warm
 sub-agent — there is no per-event spawn, no per-event preload. See decision
 record `0003`.
 
@@ -124,8 +130,8 @@ record `0003`.
   more Max-pool footprint than on-demand. The operator accepted the trade for
   the watch-loop latency win.
 - **Sub-agent isolation is unchanged.** Per `SURFACING.md` §internal structure
-  and `constraints.md` §routing safety: no Discord identity, never talks to
-  the operator or a CTO, reports up only, never makes a cross-CTO call.
+  and `constraints.md` §routing safety: no operator-channel identity, never talks
+  to the operator or a CTO, reports up only, never makes a cross-CTO call.
 - **Re-preload trigger.** Any commit to a product's facet files or its
   `decisions/` directory during the session must re-run the preload for that
   product's warm sub-agent — preloaded context goes stale if memory edits
@@ -135,6 +141,12 @@ record `0003`.
 - **Portfolio growth.** A new product gets a new warm sub-agent at next
   startup (or hot-spawned with the same preload contract). Zero per-product
   preload code; the schema is the contract.
+
+(Runtime note: the warm-sub-agent model is the steady-state structure of the
+multi-product Discord-swarm runtime. A single-product direct-chat runtime that is
+dedicated to one product holds that one product's context directly and need not
+spawn sub-agents; the isolation and preload contract still describe how
+per-product context is bounded.)
 
 ## Preload — deterministic read at sub-agent startup
 
@@ -164,19 +176,29 @@ hard lines already requires schema discipline for filename-as-index retrieval.
 Preload adds a *performance* dependency on the same discipline: improvised
 filenames don't just break retrieval — they break the preload contract too.
 
-## Write mechanism
+## Write mechanism (runtime-conditional)
 
-Writes are **local edits + git commit + git push** through the swarm's own
-permission gate. The cpo swarm repo IS the product-vision repo — your edits to
-`products/<product>/<facet>.md` and `products/<product>/decisions/*.md` are
-local-file edits in your own working tree. Commit them. The cpo permission-gate
-(`.claude/hooks/permission-gate.sh`) allows `git push`, so the push completes
-without an API workaround.
+You write to the product-vision repo through **whatever write tool your runtime
+provides** — the behavior, the protocol above, and the gates are identical; only
+the tool differs:
 
-The store's permanence (survives restart/redeploy) and visibility — the operator
-can read the repo to see exactly what is stored — are the whole reason it's a
-real git repo rather than local scratch. Push frequently; incremental visibility
-is part of the protocol.
+- **Discord-swarm runtime:** the cpo swarm directory IS the product-vision repo.
+  Your edits to `products/<product>/<facet>.md` and
+  `products/<product>/decisions/*.md` are local-file edits in your own working
+  tree. Commit them and push. The cpo permission-gate
+  (`.claude/hooks/permission-gate.sh`) allows `git push`, so the push completes
+  without an API workaround. Push frequently; incremental visibility is part of
+  the protocol.
+- **Direct-chat runtime (e.g. Claude on the desktop):** you write the same files
+  through a **filesystem connector** pointed at the product-vision repo, under the
+  same diff-gate (AUTO writes land and you report the diff; GATED/money-path/
+  one-way-door/substantial-rewrite writes show the diff and wait for approval).
+
+Either way there is **no upload step and no separate ingesting agent** — you author
+the facet directly into the repo. The store's permanence (it is a real git repo —
+survives restart/redeploy, has history) and visibility (the operator can read the
+repo to see exactly what is stored) are the whole reason it is a real git repo
+rather than local scratch.
 
 The product vision repo is **operator-owned at the manifest layer**: `products/`
 and `stress-test-log/` are seeded once by swarm-init and never overwritten by

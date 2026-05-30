@@ -53,16 +53,17 @@ existed. **Per swarm, run `swarm-add` once even if `swarm-up` already
 brought it online.** (§8 enforces this; the new `swarm-up` preflight
 gates §0.1.4 below now hard-refuse without it.)
 
-### Trap B — `requireMention: true` (silence ≠ broken)
+### Trap B — `requireMention: false` (the bot listens to everything)
 
-The default bridge ACL sets `requireMention: true` on every per-channel
-group (`bin/swarm-add.sh:436-461` Phase 4d). The bot will appear **online**
-and **ignore every message** in the channel until you **@-mention it
-directly**. This is correct behavior, not a failure mode — but it looks
-identical to "the bot is broken" on first standup. If you typed in the
-channel and nothing happened, @-mention the bot first; only THEN start
-debugging. Flip the flag in `~/.claude/channels/discord/access.json`
-under `groups.<channel-id>.requireMention` if you want passive listening.
+The default bridge ACL sets `requireMention: false` on every per-channel
+group (`bin/swarm-add.sh` Phase 4d), so the bot processes **every** message
+in the channel — no `@`-mention required. Reach is still gated by
+`allowFrom` (only listed senders trigger it) and by Discord's shared-server
+requirement, but within those bounds the agent acts on all ambient chatter.
+If you want the lead to stay quiet until explicitly addressed, set
+`requireMention: true` in `~/.claude/channels/discord/access.json` under
+`groups.<channel-id>.requireMention` (re-read on every message, no restart),
+or pass `--require-mention` to `/discord:access group add`.
 
 ### Trap C — preflight gates in `swarm-up`
 
@@ -479,7 +480,7 @@ machine, holds Discord IDs).
   "dmPolicy": "pairing" | "allowlist" | "disabled",
   "allowFrom": ["<your-discord-user-id>"],
   "groups": {
-    "<channel-id>": { "requireMention": true, "allowFrom": ["<your-id>"] }
+    "<channel-id>": { "requireMention": false, "allowFrom": ["<your-id>"] }
   },
   "pending": {}
 }
@@ -490,16 +491,15 @@ machine, holds Discord IDs).
 defaults (`dmPolicy: "pairing"`, your owner ID in `allowFrom`), and
 appends a per-channel group entry on every subsequent `swarm-add`.
 
-> **`requireMention: true` — silent by default, not broken.** Each
-> per-channel group is created with `requireMention: true`. The bot
-> shows **online** in Discord and **ignores every message in the
-> channel** until you **@-mention it directly** — and that silence
-> looks identical to "the bot is broken." It's working correctly. If
-> you want passive listening, edit the group entry in
+> **`requireMention: false` — listens to the whole channel.** Each
+> per-channel group is created with `requireMention: false`, so the bot
+> processes **every** message in the channel without an `@`-mention.
+> Reach is still bounded by `allowFrom` (only listed senders trigger it)
+> and Discord's shared-server requirement. If you want the lead to stay
+> quiet until explicitly addressed, edit the group entry in
 > `~/.claude/channels/discord/access.json` and set
-> `requireMention: false`; the bridge re-reads the file at message
-> dispatch time, no restart needed. Today this confused us twice on
-> the qofi-ios-app swarm before we remembered to @-mention.
+> `requireMention: true`; the bridge re-reads the file at message
+> dispatch time, no restart needed.
 
 You will need **your Discord user ID** when `swarm-add` prompts for
 `OWNER_ID`: in Discord, User Settings → Advanced → enable Developer

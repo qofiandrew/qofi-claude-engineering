@@ -361,16 +361,17 @@ repo) controls who the bridge accepts messages from:
   "dmPolicy": "pairing" | "allowlist" | "disabled",
   "allowFrom": ["<owner-discord-id>"],
   "groups": {
-    "<channel-id>": { "requireMention": true, "allowFrom": ["<owner-id>"] }
+    "<channel-id>": { "requireMention": false, "allowFrom": ["<owner-id>"] }
   },
   "pending": { ... }
 }
 ```
 
 `swarm-add` pre-writes the owner group for the new swarm's channel with
-`requireMention: true` and `allowFrom: [owner]`, so the lead only acts on
-messages from the operator that explicitly `@`-mention its bot — no
-ambient chatter triggers the agent.
+`requireMention: false` and `allowFrom: [owner]`, so the lead acts on
+every message from the operator in that channel — no `@`-mention
+required — while `allowFrom` still keeps other members from triggering
+the agent.
 
 ### tmux + state paths
 

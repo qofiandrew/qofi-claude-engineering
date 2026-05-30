@@ -19,6 +19,9 @@
 #   swarm-attach              same as swarm-<name> but takes <name> as arg
 #   swarm-restart             same as swarm-restart-<name> but takes arg
 #   swarm-update              same as swarm-update-<name> but takes arg
+#   swarm-update-all          sync + restart EVERY swarm (resilient: one
+#                             failure doesn't stop the rest). Add --force to
+#                             skip the busy-swarm safety rail.
 #   swarm-up                  bring up all configured swarms
 #   swarm-down                stop all swarm sessions
 #   swarm-status              list running swarm sessions
@@ -51,6 +54,7 @@ alias swarm-status="$_swarm_bin/swarm-up.sh status"
 alias swarm-sync="$_swarm_bin/swarm-sync.sh"
 alias swarm-restart="$_swarm_bin/swarm-restart.sh"
 alias swarm-update="$_swarm_bin/swarm-update.sh"
+alias swarm-update-all="$_swarm_bin/swarm-update.sh --all"
 alias swarm-watch-log="tail -F $HOME/.config/swarm/watch.log $HOME/.config/swarm/watch.err"
 
 # Per-swarm aliases generated from swarm.conf — for every row, THREE aliases:

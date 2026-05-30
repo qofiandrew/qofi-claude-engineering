@@ -135,7 +135,7 @@ _access_with_group() {
   python3 - "$FAKE_HOME/.claude/channels/discord/access.json" "$CHANNEL" <<'PY'
 import json, sys
 p, ch = sys.argv[1], sys.argv[2]
-json.dump({"groups": {ch: {"requireMention": True, "allowFrom": []}}}, open(p, "w"))
+json.dump({"groups": {ch: {"requireMention": False, "allowFrom": []}}}, open(p, "w"))
 PY
 }
 _access_without_group() {

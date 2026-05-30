@@ -286,7 +286,7 @@ async function gate(msg: Message): Promise<GateResult> {
     return { action: 'drop' }
   }
   const groupAllowFrom = policy.allowFrom ?? []
-  const requireMention = policy.requireMention ?? true
+  const requireMention = policy.requireMention ?? false
   if (groupAllowFrom.length > 0 && !groupAllowFrom.includes(senderId)) {
     process.stderr.write(
       `discord: DROP sender ${senderId} not in group ${channelId} allowFrom [${groupAllowFrom.join(', ')}]\n`,
