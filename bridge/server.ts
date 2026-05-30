@@ -29,6 +29,7 @@ import {
   type Attachment,
   type Interaction,
 } from 'discord.js'
+import { forwardedContent, safeAttName } from './normalize.ts'
 import { randomBytes } from 'crypto'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
@@ -400,6 +401,23 @@ function chunk(text: string, limit: number, mode: 'length' | 'newline'): string[
   return out
 }
 
+// Best-effort name of a forwarded message's source channel. The forward only
+// carries msg.reference.channelId; the name must be resolved against the client
+// cache. Channels of any guild the bot is in are cached via the Guilds intent,
+// so same-workspace forwards resolve without a network call. A fetch fallback
+// covers cache misses; cross-server channels the bot can't see return undefined.
+async function resolveForwardChannel(msg: Message): Promise<string | undefined> {
+  const id = msg.reference?.channelId
+  if (!id) return undefined
+  const cached = client.channels.cache.get(id)
+  if (cached && 'name' in cached && typeof cached.name === 'string') return cached.name
+  try {
+    const ch = await client.channels.fetch(id)
+    if (ch && 'name' in ch && typeof ch.name === 'string') return ch.name
+  } catch {}
+  return undefined
+}
+
 async function fetchTextChannel(id: string) {
   const ch = await client.channels.fetch(id)
   if (!ch || !ch.isTextBased()) {
@@ -441,10 +459,6 @@ async function downloadAttachment(att: Attachment): Promise<string> {
 // att.name is uploader-controlled. It lands inside a [...] annotation in the
 // notification body and inside a newline-joined tool result — both are places
 // where delimiter chars let the attacker break out of the untrusted frame.
-function safeAttName(att: Attachment): string {
-  return (att.name ?? att.id).replace(/[\[\]\r\n;]/g, '_')
-}
-
 const mcp = new Server(
   { name: 'discord', version: '1.0.0' },
   {
@@ -873,9 +887,35 @@ async function handleInbound(msg: Message): Promise<void> {
     atts.push(`${safeAttName(att)} (${att.contentType ?? 'unknown'}, ${kb}KB)`)
   }
 
+  // Forwarded messages (Discord "Forward") arrive with an empty msg.content —
+  // the original text lives in msg.messageSnapshots. Recover it so the model
+  // sees what was forwarded instead of a blank message. Author is not exposed
+  // in the snapshot payload, so the label is generic (see normalize.ts).
+  const forwarded = forwardedContent(msg, await resolveForwardChannel(msg))
+  if (msg.messageSnapshots.size > 0 && process.env.DISCORD_DEBUG_FORWARDS) {
+    process.stderr.write(`discord forward debug: ${JSON.stringify({
+      message_id: msg.id,
+      channel_id: msg.channelId,
+      author_id: msg.author.id,
+      content: msg.content,
+      type: msg.type,
+      reference: msg.reference,
+      snapshots: [...msg.messageSnapshots.values()].map(s => ({
+        content: s.content,
+        type: s.type,
+        author: s.author?.username ?? null,
+        attachments: s.attachments.size,
+        embeds: s.embeds.length,
+      })),
+    })}\n`)
+  }
+
   // Attachment listing goes in meta only — an in-content annotation is
-  // forgeable by any allowlisted sender typing that string.
-  const content = msg.content || (atts.length > 0 ? '(attachment)' : '')
+  // forgeable by any allowlisted sender typing that string. Forwarded text is
+  // the sender's actual payload, so it belongs in content (appended after any
+  // text the sender typed alongside the forward).
+  const body = [msg.content, forwarded].filter(Boolean).join('\n\n')
+  const content = body || (atts.length > 0 ? '(attachment)' : '')
 
   mcp.notification({
     method: 'notifications/claude/channel',
