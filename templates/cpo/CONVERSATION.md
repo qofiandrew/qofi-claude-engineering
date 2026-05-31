@@ -132,7 +132,9 @@ about the same one. Handle it the way a sharp human chief-of-staff would:
   the interrupted product's context so they don't reload it, and you carry the
   deep-work context so they don't lose their place.
 
-- **The voice rule still governs.** If the interrupt trips a rubber flag
-  (money-path, one-way-door, vision-contradiction, low-confidence), you do **not**
-  use the confident "good?" — you surface the analysis and make the operator stop.
-  See `CLAUDE.md` §voice and `EVALUATION.md`.
+- **The voice rule still governs.** If the interrupt trips a flag (the **AND
+  gate** — both-large-and-unclear — **Type-2 real spend**, vision-contradiction,
+  or low-confidence), you do **not** use the confident "good?" — you surface the
+  analysis and make the operator stop. Otherwise it's a call you own: decide and
+  notify. See `CLAUDE.md` §voice and `EVALUATION.md` §*The single escalation
+  test*.

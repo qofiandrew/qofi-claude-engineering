@@ -561,6 +561,28 @@ responsibility, one contract surface, documented in `modules/<module>.md` per
 `§Documentation`), **not** stuffed into a skill to dodge that bar. Skills wrap
 procedure; the codebase holds logic.
 
+## Real spend & money movement (hard floor)
+
+**NEVER execute an action that incurs real external cost or real-world money
+movement without EXPLICIT operator approval.** This is unconditional — the same
+tier as the operator-only `main` push (§*Scope & branches*) and prod migrations
+(§*Data migrations*), not a judgment call you weigh.
+
+- **What it covers**: running a pipeline that burns real API credits, turning on
+  a contributor's or third party's billable pipe, triggering a payout or any
+  money transfer, activating a paid service — anything that spends real money or
+  incurs real external cost or payout.
+- **Unconditional.** No "it seemed fine," no autonomous cost/benefit call, no
+  exception for an obvious-looking case. If you are directed to do such a thing,
+  **confirm an explicit operator approval exists before executing**; absent that,
+  stop and escalate (§*Conflict handling* / `ESCALATION.md`).
+- **When unsure whether an action incurs real spend, treat it as if it does** and
+  require explicit approval. Test / dev / sandbox runs that cost nothing real are
+  unaffected — the floor is on *real* money and *real* external cost.
+
+This is defense-in-depth: the CPO gates this same class on the directive side, the
+CTO (and every teammate) gates it on the execution side. Both stop for real spend.
+
 ## Scope & branches
 - **Stay in your app.** In a monorepo, your writes are scoped to `apps/<app>/`
   (or the repo root for a single-app repo). Don't touch sibling apps; a genuine
@@ -582,6 +604,12 @@ procedure; the codebase holds logic.
   operator runs it themselves. **No agent process ever executes `git push` to
   `main`** — not via Bash, a hook, or a tool. If you find yourself reasoning
   toward a main-push command, stop and escalate.
+- **No pull requests.** This project does not use PRs. Work flows
+  `worktree-<name>` branch → CTO review → CTO merges into `dev` and pushes `dev`
+  directly. **No agent opens, requests, or waits on a PR.** A teammate signals
+  "ready" by pushing its `worktree-<name>` branch (above), not by raising a PR;
+  the CTO integrates by direct merge + push to `dev`. (`main` stays the
+  operator's, above.)
 - Descriptive commits. Don't bundle unrelated changes.
 
 ## Clean-dev exit state (the done handoff)
@@ -622,6 +650,13 @@ spin, and never fake a done-report when the repo isn't clean-pushed-dev.
 ## Documentation
 - Keep docs current as you go — README, API docs, and the spec's architecture
   section. Stale docs are a defect.
+- **Docs are committed alongside the work they document — always, as normal
+  practice.** A change and its doc updates land *together*, in the same commit;
+  the clean-dev exit contract's "everything committed" (§*Clean-dev exit state*)
+  includes docs. This is the default, not a follow-up — so **never surface "docs
+  need updating" or "docs are out of sync" as a problem, an issue, or a flag.**
+  Committing the docs with the code is just how work lands; a stale doc is a
+  defect you fix inline by committing the current doc, not something you raise.
 - Maintain the build log in `PROJECT_SPEC.md` §10 as you work.
 
 ## Dependencies

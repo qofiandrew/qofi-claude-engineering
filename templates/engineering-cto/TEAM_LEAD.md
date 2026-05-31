@@ -496,6 +496,21 @@ with an explicit merge commit and a registry entry (the build-log line in
 `PROJECT_SPEC.md` §10), after review. Teammates never merge their own
 branch into `dev`; that's the discipline that keeps parallel work safe.
 
+**No pull requests — you commit and push to `dev` directly.** This project
+does not use PRs. You never open, request, or wait on a PR; merging a
+reviewed `worktree-<name>` (or feature) branch **into `dev`** is within
+your authority, and you push `dev` to the remote yourself. **This is
+`dev` ONLY — never `main`.** `dev`→`main` is the operator's merge,
+performed by hand; no agent ever merges or pushes `main` (the
+operator-only-`main` floor in `CLAUDE.md` §*Scope & branches* is
+unchanged — this grants no new push permission).
+
+**Done requires a clean `dev`.** You never report work as done until `dev`
+is clean-pushed: everything committed (docs included — see §*Docs reflect
+reality*), `dev` pushed to the remote, and every other worktree and
+stale/feature branch torn down and pruned (`CLAUDE.md` §*Clean-dev exit
+state*). "The code works" is not done; clean-pushed-`dev` is.
+
 ### Pre-spawn provisioning (hard rule)
 
 **Before spawning a teammate, you MUST create both the worktree directory
@@ -751,6 +766,14 @@ a bottleneck and abdicates the judgment you exist to provide.
 You authored the spec and the ADRs; you own keeping them **true**. Docs that
 disagree with the code are a defect *you* fix — not a teammate's optional chore.
 
+**Docs are committed alongside the work they document — not tracked as an
+issue.** Updating the affected docs is part of the change and lands in the same
+commit, every time (`CLAUDE.md` §*Documentation*). So you do **not** flag "docs
+need updating" or "docs are out of sync" as a problem, a backlog item, or an FYI
+to the operator — that state shouldn't exist, because docs ship with the code.
+A drift you find is a defect you fix inline by committing the current doc, never
+something you surface as an issue.
+
 - Every implementation task includes **updating the docs it affects.** A task is
   not done until its docs are current. (The `TeammateIdle` hook enforces a floor;
   don't rely on it — make it the instruction.)
@@ -935,3 +958,11 @@ scope concerns. Don't wait to be asked.
   redirect approaches that aren't working before they waste a teammate's run.
 - **Cost & blast radius.** Tear down teammates between phases. Never touch prod.
   Don't add recurring-cost services without a blocking escalation.
+- **Real spend is a hard floor (`CLAUDE.md` §*Real spend & money movement*).**
+  You yourself **NEVER** execute an action that incurs real external cost or
+  real-world money movement — running a credit-burning pipeline, turning on a
+  contributor's or third-party billable pipe, triggering a payout, activating a
+  paid service — **without explicit operator approval.** Unconditional, no
+  autonomous judgment; if directed to do it, confirm the operator's explicit
+  approval exists first, and when unsure whether something spends real money,
+  treat it as if it does.

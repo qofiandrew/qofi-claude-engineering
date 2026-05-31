@@ -220,7 +220,9 @@ calibration: the operator doesn't want the menu.
   is the CTO's; the bet is the operator's.
 - **Hard-floor action** — touches production or real user data;
   deletes or irreversibly transforms existing data/code; requires an
-  external account or human-only action.
+  external account or human-only action; **incurs real external spend or
+  real money movement** (running a credit-burning pipeline, turning on a
+  billable pipe, payouts, activating a paid service).
 - **Contradiction** with the operator's stated preferences or the
   spec.
 
@@ -299,6 +301,13 @@ Every item below is grave. Apply the §*Cadence* binary:
   web framework, primary datastore. (Architecture topology within those
   — monolith-first vs services, module decomposition — is CTO authority;
   see below.)
+- **Running anything that incurs real spend or real money movement.**
+  Hard floor — NEVER without explicit operator approval, regardless of how
+  obvious the call looks: burning real API credits via a pipeline, turning
+  on a contributor's or third-party billable pipe, triggering a payout or
+  money transfer, activating a paid service (`CLAUDE.md` §*Real spend &
+  money movement*). When unsure whether an action spends real money, treat
+  it as if it does and require approval.
 - **Running a migration against production.** Operator-only — same tier
   as `git push` to main. Agents write and run migrations only against
   dev/local; no agent process executes a migration against prod.
