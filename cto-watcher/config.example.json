@@ -17,6 +17,10 @@
   "pingCooldownSeconds": 1800,
   "checkIntervalSeconds": 60,
 
+  "_usage_limit_comment": "Usage-limit overlay (RATE_LIMITED). The watcher reads swarm-watch's status.json (default ~/.config/swarm/status.json; override with env CTO_WATCHER_SWARM_STATUS_JSON, or point SWARM_STATE_DIR at the dir) to learn which CTOs are paused on a Claude usage/5-hour limit, so it stops pinging a capped loop and waits. resumeBufferSeconds = grace window after a cap lifts before a resume nudge fires (lets Claude Code auto-resume first). swarmStatusMaxAgeSeconds = how stale the feed may be before it's distrusted. Defaults shown; may be omitted.",
+  "resumeBufferSeconds": 180,
+  "swarmStatusMaxAgeSeconds": 120,
+
   "_ctoChannels_comment": "Per CTO: channelId (where it lives), botUserId (mentioned on delivery so its swarm acts). botUserId ALSO serves as the inbound author allowlist (A1): only messages authored by it are shuttled CTO->bus — operator forwards / other bots are ignored. Override with an explicit authorId only if the CTO posts under a different id than it's mentioned at (normally it doesn't). A channel with neither authorId nor botUserId will NOT shuttle (fail-closed + startup warning).",
   "ctoChannels": {
     "reserve-backend-2": { "channelId": "1507159618453770291", "botUserId": "REPLACE_WITH_reserve_backend_2_bot_user_id" },

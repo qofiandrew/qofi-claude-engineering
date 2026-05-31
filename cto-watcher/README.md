@@ -139,6 +139,27 @@ removed**, then restart the watcher. Config is validated at startup — a malfor
 map (non-numeric id, a bus id reused as a CTO channel, the watcher sharing the CPO
 identity) aborts with a clear error rather than relaying wrongly.
 
+### ⚠️ Adding a new CTO requires TWO edits — the map *and* the ACL
+
+The `ctoChannels` map is only half the wiring. When you add a new CTO channel you
+**must** do both of the following, or the watcher will shuttle directives into the
+new CTO's channel and the CTO will **silently drop them**:
+
+1. **Add it to the `ctoChannels` map** above (its `name` → `channelId` + the CTO's
+   `botUserId`), then restart the watcher.
+2. **Add the WATCHER bot id `1510298728148369448` to the new CTO channel's
+   `allowFrom`** in `~/.claude/channels/discord/access.json`
+   (`groups[<newCtoChannelId>].allowFrom`).
+
+Why (2) is mandatory: the watcher reposts a `[name]` directive into the CTO's
+channel by **posting as itself**, so the message's author is the **watcher bot**
+(`1510298728148369448`), not the CPO. The CTO's `bridge/` plugin only honors
+messages whose author is in **that channel's `allowFrom`**. Without the watcher id
+on the new CTO channel's `allowFrom`, every shuttled directive is rejected by the
+new CTO's bridge and the CTO never picks up requests. The edit is purely additive —
+append the watcher id, don't remove or reorder existing entries — and back up
+`access.json` first (it is a live, shared file every swarm reads).
+
 ## Run
 
 ```sh
@@ -178,6 +199,51 @@ an **unknown** `[name]`, and asserts correct routing plus that the unknown name
   everywhere, so neither its bus posts nor its routed CTO posts are ever
   re-shuttled.
 
+## Usage-limit state (RATE_LIMITED) — waiting out a Claude cap
+
+A CTO swarm that hits its Claude Max usage / 5-hour limit goes **silent** — but
+not because it's stuck: it's throttled and **cannot act** until the cap resets.
+Pinging it (or having the CPO re-drive it) is wasted noise. The watcher detects
+this and treats it as a distinct state.
+
+**How it learns the cap** — the watcher can't see the tmux pane, so it reads the
+signal `swarm-watch.sh` already produces. That watcher scrapes each swarm's pane,
+detects the limit message, parses the reset hint, and writes a **`swarm-status/v1`
+snapshot** to `status.json` (default `~/.config/swarm/status.json`). The cto-watcher
+reads that file each liveness tick: any swarm whose `state` is `paused-limit` is
+marked **`RATE_LIMITED`**. This is an **overlay** on the CPO-declared state — the
+underlying `DRIVING`/`WAITING_FOR_OPERATOR`/`STOOD_DOWN` (owned solely by the CPO's
+`STATE:` lines) is untouched. Override the path with `CTO_WATCHER_SWARM_STATUS_JSON`,
+or point `SWARM_STATE_DIR` at the directory.
+
+**Fail-safe, not fail-closed.** If the feed is missing, unreadable, malformed, or
+**stale** (older than `swarmStatusMaxAgeSeconds`, i.e. `swarm-watch` is probably
+dead), the overlay is left **unchanged** — "don't know" beats guessing a cap on or
+off from bad data.
+
+**While `RATE_LIMITED`:** the loop is **never pinged** — the watcher waits for the
+cap to clear.
+
+**When the cap clears** (the feed flips `state` away from `paused-limit`, the real
+observed lift): the watcher arms a **resume buffer** (`resumeBufferSeconds`, default
+3m). After the buffer:
+
+- If the loop **came back on its own** (fresh CTO activity since the clear — Claude
+  Code auto-resumes the queued turn at reset), **no nudge** — it already resumed.
+- If the underlying state is `WAITING_FOR_OPERATOR` / `STOOD_DOWN` (intentional
+  non-driving), **no nudge** — a cap clearing must not shove it back to driving.
+- Otherwise (a `DRIVING`/`UNKNOWN` loop still quiet), the watcher posts an **active
+  resume nudge** to the bus (@mentioning the CPO, naming the CTO) to resume driving.
+
+After that, **normal ping rules resume** — the silence clock is reset to the clear
+time, so the loop isn't pinged for silence accrued during the cap, and is pinged
+again only if it goes quiet afresh.
+
+> Both the overlay tracking and the resume nudge live behind `livenessEnabled` (the
+> nudge is gated like a revival ping — AUTO-only, suppressed while the kill switch
+> is paused). `!watcher state` calls a fresh feed read on demand, so it shows
+> `RATE_LIMITED` (with the reset hint) even when liveness is off.
+
 ## DM kill switch (soft pause)
 
 Send the watcher bot a **direct message** (DM only — never a guild channel):
@@ -187,6 +253,8 @@ Send the watcher bot a **direct message** (DM only — never a guild channel):
   per-CTO state/activity in memory so resume has current data.
 - `!watcher start` — resume.
 - `!watcher status` — report PAUSED/ACTIVE + uptime.
+- `!watcher state` — read-only per-CTO liveness readout (state, activity, ping
+  status). Works while paused and mutates nothing; see "Liveness" below.
 
 The watcher replies in the DM to confirm every recognized command. Commands are
 exact and case-insensitive.

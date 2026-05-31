@@ -87,9 +87,17 @@ export function prepareContext(config, selfId) {
   const pingCooldownMs = Math.round((config.pingCooldownSeconds ?? 1800) * 1000);
   const checkIntervalMs = Math.round((config.checkIntervalSeconds ?? 60) * 1000);
 
+  // Usage-limit overlay (RATE_LIMITED) — fed from swarm-watch's status.json (see
+  // swarmstatus.js). resumeBuffer is the grace window after a cap lifts before a
+  // resume nudge fires (lets Claude Code's own auto-resume come back first);
+  // swarmStatusMaxAge bounds how stale the feed may be before we distrust it.
+  const resumeBufferMs = Math.round((config.resumeBufferSeconds ?? 180) * 1000);
+  const swarmStatusMaxAgeMs = Math.round((config.swarmStatusMaxAgeSeconds ?? 120) * 1000);
+
   return {
     selfId, busChannelId, cpoBotUserId, alertUserIds, ctoByName, ctoById, operatorChannelId,
     livenessEnabled, silenceThresholdMs, pingCooldownMs, checkIntervalMs,
+    resumeBufferMs, swarmStatusMaxAgeMs,
   };
 }
 

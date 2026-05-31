@@ -17,8 +17,9 @@ import { homedir } from 'node:os';
 import { config as loadDotenv } from 'dotenv';
 import { Client, GatewayIntentBits, Events, Partials } from 'discord.js';
 import { prepareContext, decideRoute } from './routing.js';
-import { LivenessMonitor } from './liveness.js';
+import { LivenessMonitor, renderStateReadout } from './liveness.js';
 import { readTokenFromEnvFile } from './token.js';
+import { readSwarmLimitStates } from './swarmstatus.js';
 import { authorizeDm, readOperatorAllowFrom, KillSwitch } from './killswitch.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -29,6 +30,13 @@ const START_MS = Date.now(); // process start, for !watcher status uptime
 const ACCESS_PATH =
   process.env.CTO_WATCHER_ACCESS_JSON ||
   join(process.env.DISCORD_STATE_DIR || join(homedir(), '.claude', 'channels', 'discord'), 'access.json');
+
+// Where swarm-watch.sh writes its swarm-status/v1 snapshot. The watcher reads it
+// (read-only, same host) to learn which CTOs are paused on a Claude usage limit
+// — see swarmstatus.js. Overridable; defaults to swarm-watch's standard state dir.
+const SWARM_STATUS_PATH =
+  process.env.CTO_WATCHER_SWARM_STATUS_JSON ||
+  join(process.env.SWARM_STATE_DIR || join(homedir(), '.config', 'swarm'), 'status.json');
 
 const killswitch = new KillSwitch(); // in-memory; pm2 restart → ACTIVE (safe default)
 
@@ -119,18 +127,43 @@ client.once(Events.ClientReady, (c) => {
   if (!dmIntentOn) log('[warn] DM intent is OFF — kill-switch DMs will not be received');
 
   // Per-CTO liveness monitor (cpo/CLAUDE.md §"The CTO loop"). Everything-in-bus:
-  // state is parsed from the bus stream; revival pings post to the bus. OFF
-  // unless livenessEnabled — keeps the relay unaffected until the operator flips it.
+  // state is parsed from the bus stream; revival pings post to the bus. The map
+  // is ALWAYS tracked in-memory (so "!watcher state" can report it); only the
+  // revival PINGS are gated by livenessEnabled — keeping the relay unaffected
+  // until the operator flips it.
+  monitor = new LivenessMonitor({
+    ctoNames: [...ctx.ctoByName.keys()],
+    silenceThresholdMs: ctx.silenceThresholdMs,
+    pingCooldownMs: ctx.pingCooldownMs,
+  });
+  log(`[liveness] usage-limit feed: ${SWARM_STATUS_PATH} (resume buffer ${Math.round(ctx.resumeBufferMs / 1000)}s, max feed age ${Math.round(ctx.swarmStatusMaxAgeMs / 1000)}s)`);
   if (ctx.livenessEnabled) {
-    monitor = new LivenessMonitor({
-      ctoNames: [...ctx.ctoByName.keys()],
-      silenceThresholdMs: ctx.silenceThresholdMs,
-      pingCooldownMs: ctx.pingCooldownMs,
-    });
     log(`[liveness] ON — monitoring ${ctx.ctoByName.size} CTO(s) on the bus`);
     setInterval(async () => {
-      if (killswitch.livenessHalted()) return; // paused: track in memory, emit nothing
-      for (const d of monitor.tick(Date.now())) {
+      const now = Date.now();
+      // TRACKING (no emission) — refresh the usage-limit overlay even while paused.
+      refreshLimitFeed(now);
+      if (killswitch.livenessHalted()) return; // paused: tracked above, emit nothing
+
+      // Resume nudges: a CTO whose usage cap lifted (+buffer) and did NOT come
+      // back on its own. Gated like pings — AUTO-only, off while paused.
+      for (const r of monitor.resumesDue(now, ctx.resumeBufferMs)) {
+        if (!r.nudge) { log(`[limit] ${r.name} cap cleared — no nudge (${r.reason})`); continue; }
+        const was = r.resetHint ? ` (was: resets ${r.resetHint})` : '';
+        const text =
+          `▶️ **${r.name}**: usage limit cleared${was} — resume driving. ` +
+          `Reply on the bus with \`STATE: ${r.name} DRIVING\` and the next directive, ` +
+          `or \`STATE: ${r.name} WAITING_FOR_OPERATOR\` if there's nothing left to push.`;
+        try {
+          await send(ctx.busChannelId, text, ctx.cpoBotUserId);
+          log(`[limit] nudged ${r.name} to resume (usage limit cleared)`);
+        } catch (err) {
+          log(`[limit] failed to nudge ${r.name}: ${err.message}`);
+        }
+      }
+
+      // Revival pings (DRIVING-but-quiet loops; limited loops are skipped in tick).
+      for (const d of monitor.tick(now)) {
         const mins = Math.round(d.silenceMs / 60000);
         const text =
           `⏱️ **${d.name}**: DRIVING and quiet ~${mins}m — still working, blocked, or should you correct the state? ` +
@@ -146,9 +179,28 @@ client.once(Events.ClientReady, (c) => {
       }
     }, ctx.checkIntervalMs);
   } else {
-    log('[liveness] OFF (livenessEnabled not set in config)');
+    log('[liveness] OFF (livenessEnabled not set) — state tracked for !watcher state, no pings/nudges');
   }
 });
+
+// Refresh each tracked CTO's usage-limit overlay from swarm-watch's status.json.
+// TRACKING ONLY — never emits (the resume nudge lives in the gated interval).
+// Safe to call anytime: while paused, or from the !watcher state readout so it
+// reflects current limit status. Idempotent — a steady feed logs nothing (only
+// RATE_LIMITED ⇄ underlying transitions log). A null feed (missing / unreadable /
+// malformed / stale) leaves every overlay unchanged — "don't know" beats "guess".
+function refreshLimitFeed(nowMs) {
+  if (!monitor || !ctx) return;
+  const feed = readSwarmLimitStates(SWARM_STATUS_PATH, nowMs, ctx.swarmStatusMaxAgeMs);
+  if (!feed) return;
+  for (const name of ctx.ctoByName.keys()) {
+    const e = feed.get(name);
+    const r = monitor.applyLimitFeed(name, e?.paused === true, e?.resetHint ?? null, nowMs);
+    if (r && r.changed) {
+      log(`[limit] ${name} ${r.from} -> ${r.to}` + (r.to === 'RATE_LIMITED' && e?.resetHint ? ` (resets ${e.resetHint})` : ''));
+    }
+  }
+}
 
 // Fail-closed alert: DM every operator on the allowlist. `kind` is DIRECTIVE or STATE.
 async function alertOperators(name, kind) {
@@ -189,6 +241,14 @@ async function handleDmCommand(message) {
     killswitch.start();
     log('[killswitch] RESUMED — relay and liveness active (by ' + senderId + ')');
     reply = `Resumed. Relay + liveness active. Uptime ${fmtUptime()}.`;
+  } else if (d.command === 'state') {
+    // Read-only diagnostic. NOT pause-gated (you'd want to inspect state while
+    // paused). Freshen the usage-limit overlay first so RATE_LIMITED is current
+    // even when the liveness interval isn't running; then report the in-memory
+    // map only — changes nothing else.
+    refreshLimitFeed(Date.now());
+    reply = renderStateReadout(monitor, Date.now(), ctx.livenessEnabled);
+    log(`[killswitch] state readout (by ${senderId}; paused=${killswitch.paused})`);
   } else {
     reply = `Status: ${killswitch.paused ? 'PAUSED' : 'ACTIVE'}. Uptime ${fmtUptime()}.`;
     log(`[killswitch] status → ${killswitch.paused ? 'PAUSED' : 'ACTIVE'} (by ${senderId})`);

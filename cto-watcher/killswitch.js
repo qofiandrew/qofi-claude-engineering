@@ -12,13 +12,14 @@
 
 import { readFileSync } from 'node:fs';
 
-/** Recognize the three DM commands. Exact, case-insensitive, trimmed. Else null. */
+/** Recognize the DM commands. Exact, case-insensitive, trimmed. Else null. */
 export function parseDmCommand(content) {
   if (typeof content !== 'string') return null;
   switch (content.trim().toLowerCase()) {
     case '!watcher stop': return 'stop';
     case '!watcher start': return 'start';
     case '!watcher status': return 'status';
+    case '!watcher state': return 'state'; // read-only liveness readout (works while paused)
     default: return null;
   }
 }
@@ -42,7 +43,7 @@ export function readOperatorAllowFrom(accessPath, operatorChannelId) {
 /**
  * Decide a DM command. Authorized IFF it's a recognized command, arrived as a DM
  * (never a guild channel), and the sender is in the operator allowFrom.
- * @returns {{command: 'stop'|'start'|'status'|null, authorized: boolean, reason: string}}
+ * @returns {{command: 'stop'|'start'|'status'|'state'|null, authorized: boolean, reason: string}}
  */
 export function authorizeDm({ isDM, senderId, content, allowFrom }) {
   const command = parseDmCommand(content);

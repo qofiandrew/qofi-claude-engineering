@@ -96,3 +96,15 @@ or resolve per the revival-loop guard. It never pings WAITING_FOR_OPERATOR or
 STOOD_DOWN loops. **You never wait on the ping** — a DRIVING loop with nothing to
 push self-resolves to WAITING_FOR_OPERATOR and surfaces to the operator (see
 `CLAUDE.md` §"The liveness guarantee is YOUR discipline").
+
+**Usage-limit pauses (RATE_LIMITED) — handled for you.** When a CTO's swarm hits
+its Claude usage / 5-hour limit it goes silent because it is *throttled*, not
+stuck. The watcher detects this out-of-band (it does **not** come from your STATE
+lines — it's not a fourth state you declare), stops pinging that loop, and waits
+for the cap to clear. You do **not** re-drive a capped loop; a directive can't be
+acted on while throttled. When the cap clears and the loop didn't auto-resume, the
+watcher posts a **resume nudge** (`▶️ … usage limit cleared — resume driving`,
+@mentioning you, naming the CTO). Treat it exactly like a revival ping: re-read
+that CTO's next drivable step and resolve to a definite state — issue the next
+directive (`STATE: <name> DRIVING` + the directive) or `WAITING_FOR_OPERATOR` if
+there's nothing left to push.

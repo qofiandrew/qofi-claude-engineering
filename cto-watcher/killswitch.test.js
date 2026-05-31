@@ -35,10 +35,30 @@ test('parseDmCommand: exact, case-insensitive, trimmed; else null', () => {
   assert.equal(parseDmCommand('  !WATCHER STOP  '), 'stop');
   assert.equal(parseDmCommand('!watcher start'), 'start');
   assert.equal(parseDmCommand('!watcher status'), 'status');
+  assert.equal(parseDmCommand('!watcher state'), 'state');
+  assert.equal(parseDmCommand('  !WATCHER STATE  '), 'state');
   assert.equal(parseDmCommand('!watcher pause'), null);
   assert.equal(parseDmCommand('watcher stop'), null);
   assert.equal(parseDmCommand('hello'), null);
   assert.equal(parseDmCommand(''), null);
+});
+
+test('authorize: DM "!watcher state" from operator id → authorized (same auth as kill switch)', () => {
+  const d = authorizeDm({ isDM: true, senderId: OPERATOR_ID, content: '!watcher state', allowFrom: [OPERATOR_ID] });
+  assert.deepEqual(d, { command: 'state', authorized: true, reason: 'ok' });
+});
+
+test('authorize: "!watcher state" from a non-operator id → NOT authorized (ignored)', () => {
+  const d = authorizeDm({ isDM: true, senderId: STRANGER, content: '!watcher state', allowFrom: [OPERATOR_ID] });
+  assert.equal(d.command, 'state');
+  assert.equal(d.authorized, false);
+});
+
+test('DM-only: "!watcher state" in a GUILD channel → not a command path (not a DM)', () => {
+  const d = authorizeDm({ isDM: false, senderId: OPERATOR_ID, content: '!watcher state', allowFrom: [OPERATOR_ID] });
+  assert.equal(d.command, 'state');
+  assert.equal(d.authorized, false);
+  assert.match(d.reason, /not a DM/);
 });
 
 test('readOperatorAllowFrom: reads the OPERATOR group', () => {
