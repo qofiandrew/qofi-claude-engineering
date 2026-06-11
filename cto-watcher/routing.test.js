@@ -161,3 +161,98 @@ test('config validation still refuses bus-as-CTO and self==CPO', () => {
   assert.throws(() => prepareContext({ ...FAKE, ctoChannels: { dup: FAKE.busChannelId } }, SELF), /also the bus channel/);
   assert.throws(() => prepareContext(FAKE, FAKE.cpoBotUserId), /must be its own bot identity/);
 });
+
+// ── Attachment shuttling (.md/.txt repost) ──────────────────────────────────
+// The decision core only decides WHICH files ride along (the eligible .md/.txt
+// subset, in order) and that a file-only message is no longer "empty". index.js
+// does the actual download + re-upload.
+
+const md = (name, extra = {}) => ({ name, url: `https://cdn/${name}`, size: 100, ...extra });
+
+test('attach: config exposes attachment knobs with sane defaults', () => {
+  assert.equal(ctx.maxAttachmentBytes, 8 * 1024 * 1024);
+  assert.equal(ctx.attachmentDownloadTimeoutMs, 15000);
+  const tuned = prepareContext({ ...FAKE, maxAttachmentBytes: 1234, attachmentDownloadTimeoutSeconds: 5 }, SELF);
+  assert.equal(tuned.maxAttachmentBytes, 1234);
+  assert.equal(tuned.attachmentDownloadTimeoutMs, 5000);
+});
+
+test('attach: CTO->bus message with text + a .md → shuttle with [name] prefix AND the .md carried', () => {
+  const d = decideRoute({
+    channelId: '5000000000000000005', authorId: '5500000000000000055',
+    content: 'see attached', attachments: [md('design.md')],
+  }, ctx);
+  assert.equal(d.action, 'shuttle');
+  assert.equal(d.text, '[cto-3] see attached'); // text still gets the [name] prefix
+  assert.equal(d.mentionUserId, FAKE.cpoBotUserId);
+  assert.deepEqual(d.attachments.map((a) => a.name), ['design.md']); // filename preserved for re-upload
+});
+
+test('attach: CPO->CTO directive with a .txt → route, prefix stripped, .txt carried', () => {
+  const d = decideRoute({
+    channelId: FAKE.busChannelId, authorId: FAKE.cpoBotUserId,
+    content: '[cto-7] apply this', attachments: [md('patch.txt')],
+  }, ctx);
+  assert.equal(d.action, 'route');
+  assert.equal(d.toChannelId, '4000000000000000004');
+  assert.equal(d.text, 'apply this'); // [cto-7] prefix stripped
+  assert.deepEqual(d.attachments.map((a) => a.name), ['patch.txt']);
+});
+
+test('attach: file-only CTO message (empty text + one .md) → NOT skip-empty; shuttles carrying the file', () => {
+  // The overflow case: a long response sent purely as a file, no text body.
+  const d = decideRoute({
+    channelId: '5000000000000000005', authorId: '5500000000000000055',
+    content: '', attachments: [md('overflow.md')],
+  }, ctx);
+  assert.equal(d.action, 'shuttle'); // NOT skip-empty
+  assert.match(d.text, /^\[cto-3\]/); // still routes under the CTO's name
+  assert.equal(d.attachments.length, 1);
+  assert.equal(d.attachments[0].name, 'overflow.md');
+  assert.equal(d.ctoActivity, true);
+});
+
+test('attach: file-only CTO message with NO eligible file (empty text + a .png) → still skip-empty', () => {
+  const d = decideRoute({
+    channelId: '5000000000000000005', authorId: '5500000000000000055',
+    content: '', attachments: [{ name: 'pic.png', url: 'u', size: 5 }],
+  }, ctx);
+  assert.equal(d.action, 'skip-empty'); // a .png is not shuttle-eligible → nothing to carry → empty
+  assert.equal(d.ctoActivity, true);
+});
+
+test('attach: a .md AND a .png on one message → only the .md is carried', () => {
+  const d = decideRoute({
+    channelId: '5000000000000000005', authorId: '5500000000000000055',
+    content: 'mixed', attachments: [md('keep.md'), { name: 'drop.png', url: 'u', size: 9 }],
+  }, ctx);
+  assert.equal(d.action, 'shuttle');
+  assert.deepEqual(d.attachments.map((a) => a.name), ['keep.md']); // .png ignored
+});
+
+test('attach: loop guard — the watcher\'s OWN reposted file-bearing bus message is not re-shuttled', () => {
+  const d = decideRoute({
+    channelId: FAKE.busChannelId, authorId: SELF,
+    content: '[cto-7] echo', attachments: [md('reposted.md')],
+  }, ctx);
+  assert.equal(d.action, 'ignore'); // self-author wins regardless of attachments
+  assert.match(d.reason, /loop guard/);
+});
+
+test('attach: allowlist still governs — a non-CTO author posting a .md in a CTO channel is dropped', () => {
+  const d = decideRoute({
+    channelId: '4000000000000000004', authorId: RANDOM, // not cto-7's author
+    content: '', attachments: [md('sneaky.md')],
+  }, ctx);
+  assert.equal(d.action, 'drop-foreign'); // author check precedes the attachment/empty logic
+  assert.notEqual(d.ctoActivity, true);
+});
+
+test('attach: a file-only CPO bus message with NO [name] directive → ignore (no destination)', () => {
+  // Without a "[name]" prefix there's no way to know which CTO the file is for.
+  const d = decideRoute({
+    channelId: FAKE.busChannelId, authorId: FAKE.cpoBotUserId,
+    content: '', attachments: [md('orphan.md')],
+  }, ctx);
+  assert.equal(d.action, 'ignore');
+});

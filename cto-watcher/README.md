@@ -57,6 +57,35 @@ is never parsed to guess the author.
 > only the CPO bot and the watcher can **Send** (deny `@everyone` Send). That
 > physically prevents accidental human posts, on top of the two logic locks above.
 
+### Attachments (`.md`/`.txt` files ride along) — `attachments.js`
+
+The watcher **reposts** (composes a fresh message *as itself*); it does **not** use
+Discord's native forward, so attachments don't carry over for free. To shuttle a
+file it **downloads** the bytes from the attachment's CDN url and **re-uploads** them
+on the reposted message. This closes the gap that broke the **message-overflow path**:
+a long response is sent as an attached file, and those files used to be dropped.
+
+- **Both directions, only `.md`/`.txt`.** Every shuttle-eligible attachment is
+  downloaded and re-attached to the reposted message, with its **original filename
+  preserved**; the text still gets its usual treatment (CTO→bus: `[name]` prefix added;
+  bus→CTO: `[name]` prefix stripped) and the file(s) ride on that **same** message.
+  Any other file type (`.png`, `.zip`, …) is ignored; a mixed message carries only its
+  `.md`/`.txt` parts.
+- **File-only messages still shuttle.** The empty-content backstop now skips a CTO
+  message only when it has **neither text nor a `.md`/`.txt` attachment** — a file-only
+  overflow message (empty body, one `.md`) is reposted carrying the file. (A *bus*
+  message with no `[name]` directive is still ignored — there's no destination to route a
+  bare file to.)
+- **Existing gates are unchanged.** The inbound author allowlist (only the channel's CTO
+  identity shuttles), the loop guard (the watcher's own reposted file-bearing messages are
+  ignored, so a re-upload never re-triggers a shuttle), fail-closed routing, and the
+  pause/kill switch all govern the file path exactly as they govern text.
+- **Failures degrade, never crash.** A download error/timeout or an oversize file
+  (> `maxAttachmentBytes`, default 8 MiB; see [Configuration](#configuration)) posts the
+  text plus a `[watcher: could not relay attached <filename>]` note instead of the file.
+  If the file-bearing send is itself rejected (e.g. the gateway upload limit), the watcher
+  retries text-only so the message is never lost.
+
 ## ⚠️ Required manual Developer Portal step (or it silently shuttles nothing)
 
 The message **body** arrives **empty** unless the privileged **Message Content
@@ -131,6 +160,10 @@ A `ctoChannels` entry may also be the shorthand `"<name>": "<channel_id>"` (no
 full `{ channelId, botUserId }` form for any CTO whose swarm only acts on mentions
 (the normal case).
 
+Optional **non-snowflake** tuning knobs (liveness thresholds, usage-limit feed, and
+the attachment caps `maxAttachmentBytes` / `attachmentDownloadTimeoutSeconds`) all have
+sane defaults and may be omitted — each is documented inline in `config.example.json`.
+
 The `ctoChannels` keys are the names the CPO must use in its `[name]` tags. The
 example is pre-filled with the three current CTO swarms from `../swarm.conf`
 (`reserve-backend-2`, `qofi-ios-app`, `press-backend`) — channel ids filled,
@@ -140,6 +173,14 @@ map (non-numeric id, a bus id reused as a CTO channel, the watcher sharing the C
 identity) aborts with a clear error rather than relaying wrongly.
 
 ### ⚠️ Adding a new CTO requires TWO edits — the map *and* the ACL
+
+> **Onboarding does this for you.** `bin/swarm-add.sh` (and therefore
+> `bin/swarm-new.sh`, which execs it) performs **both** edits below in its
+> phase 4e for any `engineering-cto` swarm — it prompts for the bot user id
+> (== the app's Application ID, phase 2b), writes the `ctoChannels` entry, and
+> appends the watcher id to the channel's `allowFrom`. The steps below are the
+> manual equivalent, for when you're wiring a CTO outside the standup script.
+> After either path, **restart the watcher** so it reloads `ctoChannels`.
 
 The `ctoChannels` map is only half the wiring. When you add a new CTO channel you
 **must** do both of the following, or the watcher will shuttle directives into the
@@ -187,17 +228,22 @@ npm test               # node --test on routing.test.js
 
 The test simulates a CTO-channel message and CPO bus messages with a **known** and
 an **unknown** `[name]`, and asserts correct routing plus that the unknown name
-**fails closed** to the operator-alert channel. It never touches Discord.
+**fails closed** to the operator-alert channel. It never touches Discord. The
+attachment helpers (`attachments.test.js`) inject a fake downloader/sender, so the
+download-failure, oversize, and text-only-fallback paths are exercised with no network.
 
 ## Operational notes
 
 - Every shuttle logs to stdout (`[shuttle]`, `[route]`, `[unmatched]`) with
   direction, source/destination, and matched/unmatched — pm2 captures it.
+- Attachment shuttling logs `[attach]` lines: which `.md`/`.txt` file(s) were carried,
+  and any that couldn't be relayed (with the reason). See
+  [Attachments](#attachments-mdtxt-files-ride-along--attachmentsjs).
 - Gateway disconnects/reconnects/resumes are logged (`[gateway]`). Silent death
   means shuttling stops invisibly, so reconnection is never silent.
 - Loop prevention: the watcher ignores `message.author.id === client.user.id`
   everywhere, so neither its bus posts nor its routed CTO posts are ever
-  re-shuttled.
+  re-shuttled — including reposts that carry a re-uploaded file.
 
 ## Usage-limit state (RATE_LIMITED) — waiting out a Claude cap
 

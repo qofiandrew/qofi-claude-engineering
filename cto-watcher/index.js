@@ -15,8 +15,9 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { config as loadDotenv } from 'dotenv';
-import { Client, GatewayIntentBits, Events, Partials } from 'discord.js';
+import { Client, GatewayIntentBits, Events, Partials, AttachmentBuilder } from 'discord.js';
 import { prepareContext, decideRoute } from './routing.js';
+import { relayMessage } from './attachments.js';
 import { LivenessMonitor, renderStateReadout } from './liveness.js';
 import { readTokenFromEnvFile } from './token.js';
 import { readSwarmLimitStates } from './swarmstatus.js';
@@ -273,6 +274,7 @@ client.on(Events.MessageCreate, async (message) => {
     channelId: message.channelId,
     authorId: message.author?.id,
     content: message.content ?? '',
+    attachments: extractAttachments(message),
   };
 
   let decision;
@@ -314,7 +316,7 @@ client.on(Events.MessageCreate, async (message) => {
 
     case 'shuttle': // CTO channel -> bus (@mention the CPO so it picks it up)
       try {
-        await send(decision.toChannelId, decision.text, decision.mentionUserId);
+        await relay(decision.toChannelId, decision.text, decision.mentionUserId, decision.attachments, `CTO->bus src="${decision.sourceName}"`);
         log(`[shuttle] CTO->bus src="${decision.sourceName}" dst=${decision.toChannelId} matched=true`);
       } catch (err) {
         log(`[error] shuttle CTO->bus failed (src="${decision.sourceName}"): ${err.message}`);
@@ -323,7 +325,7 @@ client.on(Events.MessageCreate, async (message) => {
 
     case 'route': // bus(CPO) directive -> CTO (@mention the CTO bot so its swarm acts)
       try {
-        await send(decision.toChannelId, decision.text, decision.mentionUserId);
+        await relay(decision.toChannelId, decision.text, decision.mentionUserId, decision.attachments, `bus->CTO dst="${decision.toName}"`);
         if (monitor) monitor.noteDirective(decision.toName, Date.now()); // OP1: directive names the CTO -> reset clock
         log(`[shuttle] bus->CTO dst="${decision.toName}" channel=${decision.toChannelId} matched=true`);
       } catch (err) {
@@ -346,15 +348,62 @@ client.on(Events.MessageCreate, async (message) => {
 
 // Send `text` to a channel. If mentionUserId is set, prepend "<@id> " and allow
 // exactly that one ping (so the recipient bot, which only acts on mentions,
-// picks it up) — no other mentions are ever resolved.
-async function send(channelId, text, mentionUserId = null) {
+// picks it up) — no other mentions are ever resolved. `files` (AttachmentBuilder[])
+// ride along on the same message when present.
+async function send(channelId, text, mentionUserId = null, files = []) {
   const channel = await client.channels.fetch(channelId);
   if (!channel || typeof channel.send !== 'function') {
     throw new Error(`channel ${channelId} is not sendable (missing access or not a text channel?)`);
   }
   const content = mentionUserId ? `<@${mentionUserId}> ${text}` : text;
   const allowedMentions = mentionUserId ? { users: [mentionUserId] } : { parse: [] };
-  await channel.send({ content, allowedMentions });
+  const payload = { content, allowedMentions };
+  if (files && files.length > 0) payload.files = files;
+  await channel.send(payload);
+}
+
+// Lift the minimal {name,url,size,contentType} shape off each discord.js Attachment
+// (a Collection) so the pure routing/attachment code never touches discord.js.
+function extractAttachments(message) {
+  const coll = message?.attachments;
+  if (!coll || typeof coll.values !== 'function') return [];
+  return [...coll.values()].map((a) => ({
+    name: a?.name ?? '',
+    url: a?.url ?? '',
+    size: typeof a?.size === 'number' ? a.size : undefined,
+    contentType: a?.contentType ?? null,
+  }));
+}
+
+// Download an attachment's bytes from its CDN url, with a hard timeout so a hung
+// fetch can't wedge the relay. Throws on non-2xx, timeout, or network error — the
+// caller (resolveAttachments) catches and degrades to a "could not relay" note.
+async function downloadAttachment(url) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ctx.attachmentDownloadTimeoutMs);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return Buffer.from(await res.arrayBuffer());
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Repost text + re-uploaded .md/.txt files to a channel. The watcher composes a
+// fresh message as itself, so attachments don't ride along for free — each eligible
+// file is downloaded and re-uploaded here. The orchestration (download, "could not
+// relay" notes, text-only fallback on a rejected file-send) lives in attachments.js
+// (relayMessage) so it's unit-tested; this binds the discord.js I/O into it. The
+// {name,data} payloads relayMessage hands to `send` become AttachmentBuilder uploads.
+function relay(channelId, text, mentionUserId, attachments, label) {
+  return relayMessage({
+    channelId, text, mentionUserId, attachments, label, log,
+    download: downloadAttachment,
+    maxBytes: ctx.maxAttachmentBytes,
+    send: (chId, body, mention, files) =>
+      send(chId, body, mention, (files ?? []).map((f) => new AttachmentBuilder(f.data, { name: f.name }))),
+  });
 }
 
 // ── Gateway lifecycle logging ──────────────────────────────────────────────

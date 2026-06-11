@@ -21,6 +21,10 @@
   "resumeBufferSeconds": 180,
   "swarmStatusMaxAgeSeconds": 120,
 
+  "_attachments_comment": "Attachment shuttling. The watcher REPOSTS messages (not Discord's native forward), so it downloads any .md/.txt attachment from its CDN url and re-uploads it on the reposted message — both directions. Other file types are ignored. maxAttachmentBytes caps a single file's re-upload (default 8388608 = 8 MiB, conservatively under every boost tier); a bigger file is noted '[watcher: could not relay attached <name>]' instead of carried. attachmentDownloadTimeoutSeconds bounds the CDN fetch (default 15). Both may be omitted.",
+  "maxAttachmentBytes": 8388608,
+  "attachmentDownloadTimeoutSeconds": 15,
+
   "_ctoChannels_comment": "Per CTO: channelId (where it lives), botUserId (mentioned on delivery so its swarm acts). botUserId ALSO serves as the inbound author allowlist (A1): only messages authored by it are shuttled CTO->bus — operator forwards / other bots are ignored. Override with an explicit authorId only if the CTO posts under a different id than it's mentioned at (normally it doesn't). A channel with neither authorId nor botUserId will NOT shuttle (fail-closed + startup warning).",
   "ctoChannels": {
     "reserve-backend-2": { "channelId": "1507159618453770291", "botUserId": "REPLACE_WITH_reserve_backend_2_bot_user_id" },

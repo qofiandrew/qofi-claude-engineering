@@ -1,6 +1,7 @@
 // routing.js — the pure decision core of the cto-watcher relay.
 //
-// Zero dependencies (no discord.js, no network). EVERYTHING-IN-BUS: directives,
+// Zero network, no discord.js. (It imports only the pure attachment filter from
+// attachments.js — that helper does no I/O.) EVERYTHING-IN-BUS: directives,
 // STATE declarations, revival pings, and shuttled CTO traffic all share the bus.
 // There is NO separate state channel.
 //
@@ -12,13 +13,22 @@
 // A CPO bus message matching neither grammar is ignored for routing and resets
 // nothing. Routing is by author id + grammar — content is never interpreted.
 
+import { filterShuttleAttachments } from './attachments.js';
+
 export const STATES = ['DRIVING', 'WAITING_FOR_OPERATOR', 'STOOD_DOWN'];
 
 /**
+ * @typedef {Object} InAttachment
+ * @property {string} name      - original filename (e.g. "response.md")
+ * @property {string} url       - CDN url index.js downloads the bytes from
+ * @property {number} [size]    - bytes, when Discord reports it
+ *
  * @typedef {Object} InMsg
  * @property {string} channelId
  * @property {string} authorId
- * @property {string} content   - EMPTY unless the MessageContent intent is on
+ * @property {string} content        - EMPTY unless the MessageContent intent is on
+ * @property {InAttachment[]} [attachments] - files on the message (any type); only
+ *                                   .md/.txt ones are carried, see filterShuttleAttachments
  */
 
 export function prepareContext(config, selfId) {
@@ -94,10 +104,17 @@ export function prepareContext(config, selfId) {
   const resumeBufferMs = Math.round((config.resumeBufferSeconds ?? 180) * 1000);
   const swarmStatusMaxAgeMs = Math.round((config.swarmStatusMaxAgeSeconds ?? 120) * 1000);
 
+  // Attachment shuttling (.md/.txt repost). maxAttachmentBytes caps a single file's
+  // re-upload (conservative 8 MiB default — under every Discord boost tier);
+  // attachmentDownloadTimeout bounds the CDN fetch. Both overridable; may be omitted.
+  const maxAttachmentBytes = Math.max(1, Math.round(config.maxAttachmentBytes ?? (8 * 1024 * 1024)));
+  const attachmentDownloadTimeoutMs = Math.round((config.attachmentDownloadTimeoutSeconds ?? 15) * 1000);
+
   return {
     selfId, busChannelId, cpoBotUserId, alertUserIds, ctoByName, ctoById, operatorChannelId,
     livenessEnabled, silenceThresholdMs, pingCooldownMs, checkIntervalMs,
     resumeBufferMs, swarmStatusMaxAgeMs,
+    maxAttachmentBytes, attachmentDownloadTimeoutMs,
   };
 }
 
@@ -139,10 +156,14 @@ export function formatForBus(name, body) {
 /**
  * The single routing decision for an inbound message. Returns one of:
  *  - { action: 'ignore',  reason }
- *  - { action: 'shuttle', toChannelId, text, mentionUserId, sourceName }     // CTO channel -> bus
+ *  - { action: 'shuttle', toChannelId, text, mentionUserId, sourceName, attachments }  // CTO channel -> bus
  *  - { action: 'state',   states: [{name,state}], unknownNames: [name] }     // CPO STATE lines (never shuttled)
- *  - { action: 'route',   toChannelId, toName, text, mentionUserId }         // CPO directive -> CTO
+ *  - { action: 'route',   toChannelId, toName, text, mentionUserId, attachments }      // CPO directive -> CTO
  *  - { action: 'alert',   userIds, name }                                     // unknown directive name (fail closed)
+ *
+ * `attachments` (on shuttle/route) is the shuttle-eligible (.md/.txt) subset of the
+ * message's files, in original order — index.js downloads + re-uploads them onto the
+ * reposted message. Empty array when there are none. STATE/alert never carry files.
  *
  * Ordering on a CPO bus message: STATE grammar is matched BEFORE the directive
  * grammar, so a STATE line can never leak into a CTO channel; the only shuttle
@@ -167,12 +188,22 @@ export function decideRoute(msg, ctx) {
       }
       return { action: 'state', states: valid, unknownNames };
     }
-    // (b2) DIRECTIVE grammar — leading "[".
+    // (b2) DIRECTIVE grammar — leading "[". A file-only overflow directive carries
+    // the bulk as an attached .md/.txt; the leading "[<name>]" still names the
+    // destination (a CPO message with NO text has no "[name]" → falls through to b3
+    // ignore, since there's no way to know which CTO it's for).
     const dir = parseDirective(msg.content);
     if (dir) {
       const dest = ctx.ctoByName.get(dir.name);
       if (!dest) return { action: 'alert', userIds: ctx.alertUserIds, name: dir.name };
-      return { action: 'route', toChannelId: dest.channelId, toName: dir.name, text: dir.body, mentionUserId: dest.botUserId };
+      return {
+        action: 'route',
+        toChannelId: dest.channelId,
+        toName: dir.name,
+        text: dir.body,
+        mentionUserId: dest.botUserId,
+        attachments: filterShuttleAttachments(msg.attachments),
+      };
     }
     // (b3) Neither grammar — not a routable/state/reset signal.
     return { action: 'ignore', reason: 'CPO bus message matches no grammar' };
@@ -189,18 +220,25 @@ export function decideRoute(msg, ctx) {
       return { action: 'drop-foreign', sourceName, authorId: msg.authorId };
     }
     // It IS the CTO's own message -> counts as liveness activity regardless of body.
+    const attachments = filterShuttleAttachments(msg.attachments);
     // A2 — EMPTY-CONTENT BACKSTOP: never shuttle empty text (forwards/embeds read
-    // empty at top level), but still register the activity.
-    if (msg.content.trim() === '') {
+    // empty at top level), but still register the activity. EXCEPTION (overflow
+    // case): a message that is ONLY a .md/.txt file has empty text yet is NOT
+    // empty-for-shuttling — a long response sent purely as a file lives here. Skip
+    // only when there's neither text NOR a shuttle-eligible file.
+    if (msg.content.trim() === '' && attachments.length === 0) {
       return { action: 'skip-empty', sourceName, authorId: msg.authorId, ctoActivity: true };
     }
     return {
       action: 'shuttle',
       toChannelId: ctx.busChannelId,
+      // Keep the "[name]" prefix even when the body is empty (file-only): it's the
+      // routing key that tells the CPO which CTO the file came from.
       text: formatForBus(sourceName, msg.content),
       mentionUserId: ctx.cpoBotUserId,
       sourceName,
       ctoActivity: true,
+      attachments,
     };
   }
 
