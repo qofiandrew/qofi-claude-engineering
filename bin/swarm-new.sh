@@ -27,6 +27,13 @@
 #                   cpo / company-brain). Default is engineering-cto when
 #                   omitted; no marker is written (back-compat). Threaded to
 #                   swarm-add → swarm-init for the actual stamp.
+#   --bot-user-id <id>
+#                   the new swarm's Discord bot user id (== Application ID),
+#                   threaded to swarm-add for cto-watcher bus registration
+#                   (engineering-cto only). Usually omitted on greenfield —
+#                   the app doesn't exist yet, so swarm-add's walkthrough
+#                   prompts for it. Pass it only if the Discord app was
+#                   pre-created.
 #   -h, --help      this help
 #
 # Greenfield only — creates a brand-new repo at ~/qofirepos/<name>.
@@ -50,7 +57,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/swarm-lib.sh"
 
 usage() {
-  sed -n '1,36p' "$0"
+  sed -n '1,43p' "$0"
   exit "${1:-0}"
 }
 
@@ -62,6 +69,7 @@ usage() {
 NAME=""
 VISIBILITY="--private"
 TYPE=""
+BOT_USER_ID=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -72,6 +80,11 @@ while [ $# -gt 0 ]; do
       TYPE="$2"; shift 2 ;;
     --type=*)
       TYPE="${1#--type=}"; shift ;;
+    --bot-user-id)
+      [ $# -ge 2 ] || { echo "swarm-new: --bot-user-id requires a value" >&2; usage 1; }
+      BOT_USER_ID="$2"; shift 2 ;;
+    --bot-user-id=*)
+      BOT_USER_ID="${1#--bot-user-id=}"; shift ;;
     -h|--help)  usage 0 ;;
     --*)        echo "swarm-new: unknown flag: $1" >&2; usage 1 ;;
     *)
@@ -280,11 +293,10 @@ echo ""
 echo "swarm-new: handing off to swarm-add for the Discord walkthrough"
 echo ""
 
-# Thread --type through to swarm-add (which threads it to swarm-init).
-# Build the arg list dynamically so the bare two-arg form still works
-# when --type is absent.
-if [ -n "$TYPE" ]; then
-  exec "$SCRIPT_DIR/swarm-add.sh" "$NAME" "$REPO" --type "$TYPE"
-else
-  exec "$SCRIPT_DIR/swarm-add.sh" "$NAME" "$REPO"
-fi
+# Thread --type (→ swarm-init) and --bot-user-id (→ cto-watcher bus
+# registration) through to swarm-add. Build the arg list dynamically so the
+# bare two-arg form still works when both are absent.
+ADD_ARGS=("$NAME" "$REPO")
+[ -n "$TYPE" ]        && ADD_ARGS+=(--type "$TYPE")
+[ -n "$BOT_USER_ID" ] && ADD_ARGS+=(--bot-user-id "$BOT_USER_ID")
+exec "$SCRIPT_DIR/swarm-add.sh" "${ADD_ARGS[@]}"

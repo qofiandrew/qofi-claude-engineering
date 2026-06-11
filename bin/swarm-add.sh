@@ -30,6 +30,11 @@
 #                        (engineering-cto / cpo / company-brain). Default
 #                        is engineering-cto when omitted; no marker is
 #                        written. Threaded to swarm-init.
+#   --bot-user-id <id>   the new swarm's Discord BOT USER id (== the app's
+#                        Application ID). For engineering-cto swarms this is
+#                        written into cto-watcher/config.json so the CTO
+#                        rides the #cpo-cto-bus. If omitted, phase 2 prompts
+#                        for it (engineering-cto only).
 #   -h, --help           this help
 #
 # Does NOT launch the swarm. Phase 6 prints the verification commands the
@@ -50,6 +55,16 @@ OWNER_ID="${SWARM_OWNER_DISCORD_ID:-1507069153335443608}"
 ACCESS="$HOME/.claude/channels/discord/access.json"
 PLUGIN_KEY="discord-b2b@qofi-swarm"
 
+# cto-watcher bus wiring. An engineering-cto swarm only rides the
+# #cpo-cto-bus once it has BOTH a ctoChannels entry in the watcher's
+# config.json AND the watcher bot's id in its channel's access.json
+# allowFrom (else the watcher reposts CPO directives the new CTO silently
+# drops). Phase 4e does both. cpo / company-brain swarms are not CTOs and
+# are skipped. Override CTO_WATCHER_CONFIG / CTO_BUS_WATCHER_BOT_ID via env
+# for tests.
+CTO_WATCHER_CONFIG="${CTO_WATCHER_CONFIG:-$SWARM_HOME/cto-watcher/config.json}"
+CTO_BUS_WATCHER_BOT_ID="${CTO_BUS_WATCHER_BOT_ID:-1510298728148369448}"
+
 SCRIPT_DIR_EARLY="$(cd "$(dirname "$0")" && pwd)"
 # Source the lib for swarm_type_is_known (used to validate --type before
 # any Discord-side side-effects).
@@ -57,7 +72,7 @@ SCRIPT_DIR_EARLY="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR_EARLY/swarm-lib.sh"
 
 usage() {
-  sed -n '1,39p' "$0"
+  sed -n '1,44p' "$0"
   exit "${1:-0}"
 }
 
@@ -72,6 +87,7 @@ CHANNEL=""
 ROTATE_TOKEN=0
 SKIP_WALKTHROUGH=0
 TYPE=""
+BOT_USER_ID=""
 POS_COUNT=0
 
 while [ $# -gt 0 ]; do
@@ -83,6 +99,11 @@ while [ $# -gt 0 ]; do
       TYPE="$2"; shift 2 ;;
     --type=*)
       TYPE="${1#--type=}"; shift ;;
+    --bot-user-id)
+      [ $# -ge 2 ] || { echo "swarm-add: --bot-user-id requires a value" >&2; usage 1; }
+      BOT_USER_ID="$2"; shift 2 ;;
+    --bot-user-id=*)
+      BOT_USER_ID="${1#--bot-user-id=}"; shift ;;
     -h|--help)          usage 0 ;;
     --*)                echo "swarm-add: unknown flag: $1" >&2; usage 1 ;;
     *)
@@ -123,6 +144,17 @@ if [ -n "$CHANNEL" ]; then
   echo "$CHANNEL" | grep -qE '^[0-9]+$' || {
     echo "swarm-add: channel_id must be numeric (got: $CHANNEL)" >&2; exit 1; }
 fi
+
+# bot-user-id validation if given up front.
+if [ -n "$BOT_USER_ID" ]; then
+  echo "$BOT_USER_ID" | grep -qE '^[0-9]+$' || {
+    echo "swarm-add: --bot-user-id must be numeric (got: $BOT_USER_ID)" >&2; exit 1; }
+fi
+
+# Effective archetype: TYPE may be blank (engineering-cto default). Only
+# engineering-cto swarms are CTOs that ride the #cpo-cto-bus, so phase 4e's
+# cto-watcher registration is gated on this.
+EFFECTIVE_TYPE="${TYPE:-engineering-cto}"
 
 TOK_VAR="BOT_$(echo "$NAME" | tr '[:lower:]-' '[:upper:]_')"
 
@@ -191,13 +223,18 @@ phase "Phase 0 — preflight"
 
 echo "  name:      $NAME"
 echo "  repo:      $REPO"
+echo "  type:      $EFFECTIVE_TYPE"
 echo "  channel:   ${CHANNEL:-(will prompt in phase 2)}"
 echo "  token var: \$$TOK_VAR (in $TOKENS)"
+if [ "$EFFECTIVE_TYPE" = "engineering-cto" ]; then
+  echo "  bot id:    ${BOT_USER_ID:-(will prompt in phase 2 — for cto-watcher bus)}"
+fi
 
 STATE_TOKEN_PRESENT=0
 STATE_CONF_PRESENT=0
 STATE_REPO_STAMPED=0
 STATE_ACCESS_GROUP_PRESENT=0
+STATE_BUS_REGISTERED=0
 
 if [ -f "$TOKENS" ] && grep -qE "^export ${TOK_VAR}=" "$TOKENS"; then
   STATE_TOKEN_PRESENT=1
@@ -219,6 +256,25 @@ sys.exit(0 if (a.get("groups") or {}).get(sys.argv[2]) else 1)
 ' "$ACCESS" "$CHANNEL" >/dev/null 2>&1; then
   STATE_ACCESS_GROUP_PRESENT=1
 fi
+# Bus registration is "done" only when BOTH halves are present: the
+# ctoChannels entry in the watcher config AND the watcher bot id in this
+# channel's allowFrom. Only meaningful for engineering-cto swarms.
+if [ "$EFFECTIVE_TYPE" = "engineering-cto" ] && [ -n "$CHANNEL" ] && \
+   [ -f "$CTO_WATCHER_CONFIG" ] && [ -f "$ACCESS" ] && \
+   python3 -c '
+import json, sys
+cfg_p, acc_p, name, ch, watcher = sys.argv[1:6]
+try:
+    cfg = json.load(open(cfg_p)); acc = json.load(open(acc_p))
+except Exception:
+    sys.exit(1)
+in_map = bool((cfg.get("ctoChannels") or {}).get(name))
+grp = (acc.get("groups") or {}).get(ch) or {}
+in_acl = watcher in (grp.get("allowFrom") or [])
+sys.exit(0 if (in_map and in_acl) else 1)
+' "$CTO_WATCHER_CONFIG" "$ACCESS" "$NAME" "$CHANNEL" "$CTO_BUS_WATCHER_BOT_ID" >/dev/null 2>&1; then
+  STATE_BUS_REGISTERED=1
+fi
 
 echo ""
 echo "  detected existing state:"
@@ -226,8 +282,10 @@ echo "  detected existing state:"
 [ "$STATE_CONF_PRESENT"         -eq 1 ] && echo "    + swarm.conf row already present  (phase 4 will SKIP the conf append)"
 [ "$STATE_REPO_STAMPED"         -eq 1 ] && echo "    + repo already stamped            (phase 4's swarm-init becomes a no-op)"
 [ "$STATE_ACCESS_GROUP_PRESENT" -eq 1 ] && echo "    + access.json group for channel   (phase 4 will overwrite-as-no-op)"
+[ "$STATE_BUS_REGISTERED"       -eq 1 ] && echo "    + cto-watcher bus registration   (phase 4e already wired; will SKIP)"
 if [ "$STATE_TOKEN_PRESENT" -eq 0 ] && [ "$STATE_CONF_PRESENT" -eq 0 ] && \
-   [ "$STATE_REPO_STAMPED" -eq 0 ] && [ "$STATE_ACCESS_GROUP_PRESENT" -eq 0 ]; then
+   [ "$STATE_REPO_STAMPED" -eq 0 ] && [ "$STATE_ACCESS_GROUP_PRESENT" -eq 0 ] && \
+   [ "$STATE_BUS_REGISTERED" -eq 0 ]; then
   echo "    (fresh standup; nothing pre-existing)"
 fi
 
@@ -305,6 +363,24 @@ D) RESET THE BOT TOKEN
 EOF
 pause "Press Enter when the token is on your clipboard."
 
+if [ "$EFFECTIVE_TYPE" = "engineering-cto" ] && [ -z "$BOT_USER_ID" ]; then
+cat <<'EOF'
+
+E) COPY THE BOT (APPLICATION) ID    [engineering-cto only — for the bus]
+
+   A CTO swarm rides the #cpo-cto-bus. The cto-watcher reposts CPO
+   directives into this bot's channel as a mention, so it needs the bot's
+   own user id. For a Discord bot that id IS the Application ID.
+
+   1. Sidebar -> "General Information"
+   2. Under  "Application ID", click  "Copy".
+      (Equivalently: in Discord with Developer Mode on, right-click the
+       bot's name in the member list -> "Copy User ID" — same number.)
+   3. You'll paste it in phase 2 below.
+EOF
+pause "Press Enter when the Application ID is on your clipboard."
+fi
+
 fi  # /SKIP_WALKTHROUGH
 
 # ---------------------------------------------------------------------------
@@ -353,6 +429,36 @@ except Exception:
 sys.exit(0 if (a.get("groups") or {}).get(sys.argv[2]) else 1)
 ' "$ACCESS" "$CHANNEL" >/dev/null 2>&1; then
     STATE_ACCESS_GROUP_PRESENT=1
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# PHASE 2b — Bot (Application) ID  [engineering-cto only — for the bus]
+#
+# Needed to register this CTO in cto-watcher/config.json (phase 4e). Skip
+# entirely for non-CTO archetypes and when the bus is already wired.
+# ---------------------------------------------------------------------------
+if [ "$EFFECTIVE_TYPE" = "engineering-cto" ]; then
+  if [ -n "$BOT_USER_ID" ]; then
+    phase "Phase 2b — Bot (Application) ID  [PROVIDED on CLI: $BOT_USER_ID]"
+  elif [ "$STATE_BUS_REGISTERED" -eq 1 ]; then
+    phase "Phase 2b — Bot (Application) ID  [SKIP: bus already registered]"
+  else
+    phase "Phase 2b — Bot (Application) ID"
+cat <<'EOF'
+
+This CTO rides the #cpo-cto-bus. Paste the bot's user id — the same number
+as the application's "Application ID" (Developer Portal -> General
+Information -> Copy), or right-click the bot in Discord -> Copy User ID.
+EOF
+    while [ -z "$BOT_USER_ID" ]; do
+      read_line BOT_USER_ID "Bot user id: "
+      if ! echo "$BOT_USER_ID" | grep -qE '^[0-9]+$'; then
+        echo "  Not a valid id — must be all digits. Try again." >&2
+        BOT_USER_ID=""
+      fi
+    done
+    echo "  got bot user id: $BOT_USER_ID"
   fi
 fi
 
@@ -509,6 +615,72 @@ with open(path) as f: json.load(f)  # validate the file we just wrote
 print("  access.json group for channel {} set "
       "(requireMention=false, allowFrom=[{}])".format(channel, owner))
 PY
+
+# 4e) cto-watcher bus registration (engineering-cto only) ------------------
+#
+# A CTO rides the #cpo-cto-bus only once BOTH halves are wired:
+#   (1) a ctoChannels entry in cto-watcher/config.json (name -> channelId +
+#       botUserId), and
+#   (2) the cto-watcher bot's id in this channel's access.json allowFrom —
+#       the watcher reposts CPO directives AS ITSELF, so the new CTO's
+#       bridge drops them unless the watcher id is allow-listed.
+# Both are idempotent. 4d above resets this channel's allowFrom to [owner];
+# we (re-)append the watcher id here, so a re-run is self-healing.
+if [ "$EFFECTIVE_TYPE" != "engineering-cto" ]; then
+  echo ""
+  echo "  4e) cto-watcher bus: SKIP (type '$EFFECTIVE_TYPE' is not a CTO; off the #cpo-cto-bus)"
+else
+  echo ""
+  echo "  4e) cto-watcher bus registration for CTO '$NAME'"
+
+  # Half 1 — ctoChannels entry in the watcher's config.json.
+  if [ ! -f "$CTO_WATCHER_CONFIG" ]; then
+    echo "  WARN: $CTO_WATCHER_CONFIG not found — skipping ctoChannels write."
+    echo "        Create it (cp cto-watcher/config.example.json cto-watcher/config.json),"
+    echo "        then re-run:"
+    echo "          bin/swarm-add.sh $NAME $REPO $CHANNEL --skip-walkthrough --bot-user-id ${BOT_USER_ID:-<bot-user-id>}"
+  elif [ -z "$BOT_USER_ID" ]; then
+    echo "  SKIP ctoChannels write: no bot user id on hand (bus already registered, or none supplied)."
+  else
+    python3 - "$CTO_WATCHER_CONFIG" "$NAME" "$CHANNEL" "$BOT_USER_ID" <<'PY' || { echo "swarm-add: FATAL — failed to update cto-watcher config.json" >&2; exit 2; }
+import json, os, sys
+path, name, channel, bot = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+with open(path) as f: cfg = json.load(f)
+ctos = cfg.setdefault("ctoChannels", {})
+prev = ctos.get(name)
+ctos[name] = {"channelId": channel, "botUserId": bot}
+tmp = path + ".tmp"
+with open(tmp, "w") as f:
+    json.dump(cfg, f, indent=2); f.write("\n")
+os.replace(tmp, path)
+with open(path) as f: json.load(f)  # validate
+verb = "already current" if prev == ctos[name] else "set"
+print("  ctoChannels['{}'] {} (channelId={}, botUserId={})".format(name, verb, channel, bot))
+PY
+  fi
+
+  # Half 2 — watcher bot id in this channel's access.json allowFrom (additive).
+  python3 - "$ACCESS" "$CHANNEL" "$CTO_BUS_WATCHER_BOT_ID" <<'PY' || { echo "swarm-add: FATAL — failed to add watcher id to access.json allowFrom" >&2; exit 2; }
+import json, os, sys
+path, channel, watcher = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(path) as f: cfg = json.load(f)
+grp = cfg.setdefault("groups", {}).setdefault(channel, {"requireMention": False, "allowFrom": []})
+af = grp.setdefault("allowFrom", [])
+if watcher in af:
+    print("  access.json: watcher id {} already in allowFrom for channel {}".format(watcher, channel))
+else:
+    af.append(watcher)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(cfg, f, indent=2); f.write("\n")
+    os.replace(tmp, path)
+    with open(path) as f: json.load(f)  # validate
+    print("  access.json: added watcher id {} to allowFrom for channel {}".format(watcher, channel))
+PY
+
+  echo "  REMINDER: restart the cto-watcher so it loads the new ctoChannels entry"
+  echo "            (watcher-control skill / bin/cto-watch-*.sh)."
+fi
 
 # ---------------------------------------------------------------------------
 # PHASE 5 — Post-init verification (the reserve-backend-2 trap)
@@ -674,6 +846,12 @@ EOF
 # ---------------------------------------------------------------------------
 phase "Phase 7 — Summary"
 
+if [ "$EFFECTIVE_TYPE" = "engineering-cto" ]; then
+  BUS_SUMMARY="    bus:     #cpo-cto-bus via cto-watcher (ctoChannels['$NAME'] = {channel $CHANNEL, bot ${BOT_USER_ID:-<unchanged>}}; watcher id on allowFrom) — restart the watcher to load it"
+else
+  BUS_SUMMARY="    bus:     n/a ($EFFECTIVE_TYPE is not a CTO)"
+fi
+
 cat <<EOF
 
   Swarm '$NAME' registered.
@@ -682,6 +860,7 @@ cat <<EOF
     bot:     \$$TOK_VAR  (token in $TOKENS, chmod 600, gitignored)
     access:  $ACCESS  (group $CHANNEL -> owner $OWNER_ID, mention-gated)
     plugin:  $PLUGIN_KEY enabled in $SETTINGS_FILE
+$BUS_SUMMARY
 
   A per-swarm shell alias 'swarm-$NAME' is now generated by
   bin/swarm-aliases.sh from swarm.conf, but it isn't live in this shell
