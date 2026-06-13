@@ -10,6 +10,9 @@ import {
   resolveAttachments,
   appendFailureNotes,
   relayMessage,
+  composeOverflow,
+  sliceOnBoundary,
+  CONTENT_LIMIT,
   DEFAULT_MAX_ATTACHMENT_BYTES,
 } from './attachments.js';
 
@@ -159,7 +162,7 @@ test('relayMessage: no attachments → one plain send, no download attempted', a
   assert.equal(downloaded, false);
   assert.equal(send.calls.length, 1);
   assert.deepEqual(send.calls[0], { channelId: 'C', text: '[cto-3] hi', mentionUserId: 'CPO', files: [] });
-  assert.deepEqual(r, { sent: true, carried: [], failed: [], fellBackTextOnly: false });
+  assert.deepEqual(r, { sent: true, carried: [], failed: [], overflowed: false, fellBackTextOnly: false });
 });
 
 test('relayMessage: text + a .md → one send carrying the file with its name preserved', async () => {
@@ -252,4 +255,68 @@ test('relayMessage: a text-only send that fails is a real error (bubbles up — 
     relayMessage({ channelId: 'X', text: 'no files', attachments: [], send, download: async () => Buffer.from('x') }),
     /channel not sendable/,
   );
+});
+
+// ── overflow: >2000-char bodies deliver as a .md attachment, never the 400 ────
+
+test('composeOverflow: a body within the content cap is returned unchanged', () => {
+  const r = composeOverflow({ text: 'short body', mentionPrefix: '<@1> ' });
+  assert.equal(r.overflow, false);
+  assert.equal(r.carrierText, 'short body');
+  assert.equal(r.file, null);
+});
+
+test('composeOverflow: an over-cap body becomes a carrier + .md attachment; full body preserved', () => {
+  const body = 'L'.repeat(5000);
+  const r = composeOverflow({ text: body, mentionPrefix: '<@123456789012345678> ', filename: 'relay-overflow-1.md' });
+  assert.equal(r.overflow, true);
+  assert.ok(r.file, 'has an attachment payload');
+  assert.equal(r.file.name, 'relay-overflow-1.md');
+  assert.equal(r.file.data.toString('utf8'), body, 'attachment carries the FULL body, untruncated');
+  assert.match(r.carrierText, /download_attachment/, 'carrier instructs the recipient to fetch');
+  assert.match(r.carrierText, /truncated/, 'carrier has an explicit truncation marker');
+  assert.ok(r.carrierText.includes('LLL'), 'carrier includes a head excerpt');
+});
+
+test('composeOverflow: carrier (incl. mention) NEVER exceeds the cap, even with a long mention + filename', () => {
+  const body = 'x'.repeat(9000);
+  const longMention = `<@${'9'.repeat(40)}> `;            // pathologically long mention
+  const longName = `relay-overflow-${'2'.repeat(60)}.md`; // pathologically long filename
+  const r = composeOverflow({ text: body, mentionPrefix: longMention, filename: longName });
+  assert.equal(r.overflow, true);
+  const wireContent = longMention + r.carrierText;        // what send() actually posts
+  assert.ok(wireContent.length <= CONTENT_LIMIT, `wire content ${wireContent.length} must be <= ${CONTENT_LIMIT}`);
+});
+
+test('sliceOnBoundary: cuts on a boundary, never mid-token, trims trailing ws', () => {
+  assert.equal(sliceOnBoundary('alpha beta gamma', 8), 'alpha'); // cut at the space, not "alpha be"
+  assert.equal(sliceOnBoundary('short', 100), 'short');          // under budget -> unchanged
+  assert.equal(sliceOnBoundary('anything', 0), '');              // no budget -> empty
+});
+
+test('relayMessage: an over-cap body delivers as ONE attachment (carrier <= cap), never dropped', async () => {
+  const calls = [];
+  const send = async (channelId, text, mention, files) => { calls.push({ channelId, text, mention, files }); };
+  const body = 'B'.repeat(6000);
+  const res = await relayMessage({
+    channelId: 'C', text: body, mentionUserId: '123456789012345678', attachments: [],
+    send, download: async () => Buffer.from(''), overflowName: () => 'relay-overflow-T.md',
+  });
+  assert.equal(res.sent, true);
+  assert.equal(res.overflowed, true);
+  assert.equal(calls.length, 1, 'one send, one mention, one trigger (NOT N chunks)');
+  const { text, mention, files } = calls[0];
+  assert.ok((`<@${mention}> ` + text).length <= CONTENT_LIMIT, 'posted content within the cap');
+  assert.equal(files.length, 1, 'body carried as a single attachment');
+  assert.equal(files[0].name, 'relay-overflow-T.md');
+  assert.equal(files[0].data.toString('utf8'), body, 'attachment has the full body');
+});
+
+test('relayMessage: a body within the cap still sends inline, no attachment', async () => {
+  const calls = [];
+  const send = async (channelId, text, mention, files) => { calls.push({ text, files }); };
+  const res = await relayMessage({ channelId: 'C', text: 'hi', mentionUserId: null, attachments: [], send, download: async () => Buffer.from('') });
+  assert.equal(res.overflowed, false);
+  assert.equal(calls[0].text, 'hi');
+  assert.equal(calls[0].files.length, 0);
 });

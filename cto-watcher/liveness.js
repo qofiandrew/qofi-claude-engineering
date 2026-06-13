@@ -203,9 +203,9 @@ function pingPhrase(c, nowMs, silenceThresholdMs, pingCooldownMs) {
  * isn't mistaken for active monitoring. When no CTO is tracked, returns a plain
  * "nothing yet" line. Always footers with the source-of-truth caveat.
  */
-export function renderStateReadout(monitor, nowMs, livenessEnabled) {
+export function renderStateReadout(monitor, nowMs, livenessEnabled, queueStats = null) {
   const entries = monitor ? monitor.entries() : [];
-  if (entries.length === 0) return 'No per-CTO state declared yet.';
+  if (entries.length === 0 && !queueStats) return 'No per-CTO state declared yet.';
   const lines = entries.map(
     ([name, c]) =>
       `${name}: ${c.limited ? 'RATE_LIMITED' : c.state} | ${activityPhrase(c, nowMs)} | ` +
@@ -215,5 +215,21 @@ export function renderStateReadout(monitor, nowMs, livenessEnabled) {
     ? null
     : 'liveness monitor OFF — states shown are last-declared, not actively monitored';
   const footer = "(states reflect the CPO's last declared STATE: line per CTO)";
-  return [header, ...lines, footer].filter(Boolean).join('\n');
+  return [header, ...lines, renderQueueLine(queueStats), footer].filter(Boolean).join('\n');
+}
+
+/**
+ * One-line delivery-queue health for the readout, or null to omit. `queueStats`
+ * is a plain { depth, draining, stats:{enqueued,delivered,retried,dropped} }
+ * snapshot — liveness.js stays pure (no queue import), it just formats numbers.
+ * `dropped > 0` is called out loud: a dropped delivery is a message that never
+ * reached its destination.
+ */
+function renderQueueLine(queueStats) {
+  if (!queueStats) return null;
+  const s = queueStats.stats ?? {};
+  const enq = s.enqueued ?? 0, del = s.delivered ?? 0, ret = s.retried ?? 0, drp = s.dropped ?? 0;
+  const inflight = queueStats.draining ? ' (draining)' : '';
+  const droppedNote = drp > 0 ? ` | ⚠️ ${drp} DROPPED` : '';
+  return `queue: depth ${queueStats.depth ?? 0}${inflight} | delivered ${del}/${enq} | retried ${ret}${droppedNote}`;
 }

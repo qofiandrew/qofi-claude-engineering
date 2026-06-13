@@ -18,12 +18,16 @@ import { config as loadDotenv } from 'dotenv';
 import { Client, GatewayIntentBits, Events, Partials, AttachmentBuilder } from 'discord.js';
 import { prepareContext, decideRoute } from './routing.js';
 import { relayMessage } from './attachments.js';
+import { DeliveryQueue } from './queue.js';
+import { writeDeadLetter } from './deadletter.js';
 import { LivenessMonitor, renderStateReadout } from './liveness.js';
 import { readTokenFromEnvFile } from './token.js';
 import { readSwarmLimitStates } from './swarmstatus.js';
 import { authorizeDm, readOperatorAllowFrom, KillSwitch } from './killswitch.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+// Recoverable dead-letter dir (gitignored; chmod-600 files) — ADR-0010.
+const DEADLETTER_DIR = join(__dirname, '.deadletter');
 const START_MS = Date.now(); // process start, for !watcher status uptime
 
 // Where the shared ACL lives (for kill-switch operator-allowFrom lookups).
@@ -105,6 +109,7 @@ const client = new Client({
 // ctx is set once we know our own user id (client.user.id) at login.
 let ctx = null;
 let monitor = null; // AUTO-mode liveness monitor; null unless livenessEnabled
+let deliveries = null; // serial delivery queue; set at ClientReady
 
 client.once(Events.ClientReady, (c) => {
   try {
@@ -113,6 +118,27 @@ client.once(Events.ClientReady, (c) => {
     console.error(`[fatal] invalid config: ${err.message}`);
     process.exit(1);
   }
+
+  // Serial delivery queue. Every shuttle/route side effect drains through here
+  // ONE AT A TIME with bounded retry, so a rapid multi-channel burst can no
+  // longer race N concurrent sends on discord.js's REST layer and silently drop
+  // one on a transient 429 / uncached fetch. A delivery that exhausts its retries
+  // is surfaced to operators (fail-closed) instead of vanishing into a log line.
+  deliveries = new DeliveryQueue({
+    log,
+    send: (job) => job.run(),
+    onDropped: async (job, err, attempts) => {
+      // Recoverable dead-letter FIRST (never lose the body), then the operator DM.
+      let path = null;
+      try {
+        path = writeDeadLetter({ dir: DEADLETTER_DIR, job, err, attempts });
+        log(`[queue] dead-lettered ${job.label} → ${path}`);
+      } catch (e) {
+        log(`[error] failed to write dead-letter for ${job.label}: ${e.message}`);
+      }
+      await alertDeliveryDropped(job.label, err, attempts, path);
+    },
+  });
   log(`[ready] logged in as ${c.user.tag} (${c.user.id})`);
   log(`[ready] bus=${ctx.busChannelId} cpoBot=${ctx.cpoBotUserId} alertDMs=${ctx.alertUserIds.length}`);
   const mapped = [...ctx.ctoByName.values()].filter((e) => e.authorId).length;
@@ -221,6 +247,31 @@ async function alertOperators(name, kind) {
   }));
 }
 
+// A relay delivery that exhausted its retries is surfaced to operators rather
+// than silently lost — the permanent fix for the missing-message bug is "never
+// drop quietly". Mirrors alertOperators' fail-closed DM fan-out.
+async function alertDeliveryDropped(label, err, attempts, path = null) {
+  log(`[queue] giving up on ${label} after ${attempts} attempt(s): ${err?.message ?? err}; DMing ${ctx.alertUserIds.length} operator(s)`);
+  if (ctx.alertUserIds.length === 0) {
+    log('[warn] alertUserIds empty — no one to DM about the dropped delivery');
+    return;
+  }
+  const recoverable = path
+    ? `The full message was saved to ${path} (chmod 600) — recover it from there.`
+    : `The message body could NOT be saved either — re-send it by hand if it still matters.`;
+  await Promise.all(ctx.alertUserIds.map(async (uid) => {
+    try {
+      const user = await client.users.fetch(uid);
+      await user.send(
+        `⚠️ cto-watcher: a relay delivery (${label}) FAILED after ${attempts} attempt(s) ` +
+        `(${err?.message ?? err}) and was DROPPED. The message did NOT reach its destination. ${recoverable}`,
+      );
+    } catch (e) {
+      log(`[error] failed to DM operator ${uid} about a dropped delivery: ${e.message}`);
+    }
+  }));
+}
+
 // DM kill switch. Authorized ONLY against the operator group's allowFrom in
 // access.json (read fresh per command, fail-closed). DM-only; never a guild
 // channel. Replies in the DM on every recognized command.
@@ -248,7 +299,10 @@ async function handleDmCommand(message) {
     // even when the liveness interval isn't running; then report the in-memory
     // map only — changes nothing else.
     refreshLimitFeed(Date.now());
-    reply = renderStateReadout(monitor, Date.now(), ctx.livenessEnabled);
+    const queueStats = deliveries
+      ? { depth: deliveries.depth, draining: deliveries.draining, stats: deliveries.stats }
+      : null;
+    reply = renderStateReadout(monitor, Date.now(), ctx.livenessEnabled, queueStats);
     log(`[killswitch] state readout (by ${senderId}; paused=${killswitch.paused})`);
   } else {
     reply = `Status: ${killswitch.paused ? 'PAUSED' : 'ACTIVE'}. Uptime ${fmtUptime()}.`;
@@ -315,22 +369,32 @@ client.on(Events.MessageCreate, async (message) => {
       return;
 
     case 'shuttle': // CTO channel -> bus (@mention the CPO so it picks it up)
-      try {
-        await relay(decision.toChannelId, decision.text, decision.mentionUserId, decision.attachments, `CTO->bus src="${decision.sourceName}"`);
-        log(`[shuttle] CTO->bus src="${decision.sourceName}" dst=${decision.toChannelId} matched=true`);
-      } catch (err) {
-        log(`[error] shuttle CTO->bus failed (src="${decision.sourceName}"): ${err.message}`);
-      }
+      deliveries.enqueue({
+        label: `CTO->bus src="${decision.sourceName}"`,
+        channelId: decision.toChannelId,
+        body: decision.text,
+        mention: decision.mentionUserId,
+        run: async () => {
+          await relay(decision.toChannelId, decision.text, decision.mentionUserId, decision.attachments, `CTO->bus src="${decision.sourceName}"`);
+          log(`[shuttle] CTO->bus src="${decision.sourceName}" dst=${decision.toChannelId} matched=true`);
+        },
+      }, `CTO->bus src="${decision.sourceName}"`);
       return;
 
     case 'route': // bus(CPO) directive -> CTO (@mention the CTO bot so its swarm acts)
-      try {
-        await relay(decision.toChannelId, decision.text, decision.mentionUserId, decision.attachments, `bus->CTO dst="${decision.toName}"`);
-        if (monitor) monitor.noteDirective(decision.toName, Date.now()); // OP1: directive names the CTO -> reset clock
-        log(`[shuttle] bus->CTO dst="${decision.toName}" channel=${decision.toChannelId} matched=true`);
-      } catch (err) {
-        log(`[error] route bus->CTO failed (dst="${decision.toName}"): ${err.message}`);
-      }
+      // Note the directive on the monitor at ENQUEUE time — the CPO has issued the
+      // work now, independent of when the send actually drains off the queue.
+      if (monitor) monitor.noteDirective(decision.toName, Date.now()); // OP1: directive names the CTO -> reset clock
+      deliveries.enqueue({
+        label: `bus->CTO dst="${decision.toName}"`,
+        channelId: decision.toChannelId,
+        body: decision.text,
+        mention: decision.mentionUserId,
+        run: async () => {
+          await relay(decision.toChannelId, decision.text, decision.mentionUserId, decision.attachments, `bus->CTO dst="${decision.toName}"`);
+          log(`[shuttle] bus->CTO dst="${decision.toName}" channel=${decision.toChannelId} matched=true`);
+        },
+      }, `bus->CTO dst="${decision.toName}"`);
       return;
 
     case 'state': // CPO STATE line(s) — never shuttled; state tracking done above the pause gate
@@ -401,6 +465,7 @@ function relay(channelId, text, mentionUserId, attachments, label) {
     channelId, text, mentionUserId, attachments, label, log,
     download: downloadAttachment,
     maxBytes: ctx.maxAttachmentBytes,
+    overflowName: () => `relay-overflow-${Date.now()}.md`,
     send: (chId, body, mention, files) =>
       send(chId, body, mention, (files ?? []).map((f) => new AttachmentBuilder(f.data, { name: f.name }))),
   });

@@ -2,6 +2,10 @@
 .env
 config.json
 
+# Dead-letter files — dropped relay bodies can carry sensitive content (ADR-0010);
+# chmod 600, recoverable by the operator, never committed.
+.deadletter/
+
 # Node
 node_modules
 npm-debug.log*

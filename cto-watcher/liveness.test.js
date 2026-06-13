@@ -254,3 +254,38 @@ test('renderStateReadout is read-only and NOT pause-gated: paused KillSwitch doe
   // And reading did not mutate the map (snapshot unchanged).
   assert.match(m.snapshot(), /cto-7=DRIVING/);
 });
+
+// ── queue health line in the readout (4th arg) ──────────────────────────────
+
+test('renderStateReadout: queueStats present → a queue line sits just above the footer', () => {
+  const m = mk();
+  m.applyState('cto-7', 'DRIVING', BASE);
+  const qs = { depth: 2, draining: true, stats: { enqueued: 10, delivered: 8, retried: 1, dropped: 0 } };
+  const out = renderStateReadout(m, BASE + 4 * 60_000, true, qs);
+  const lines = out.split('\n');
+  const footerIdx = lines.findIndex((l) => l.startsWith('(states reflect'));
+  assert.equal(lines[footerIdx - 1], 'queue: depth 2 (draining) | delivered 8/10 | retried 1');
+});
+
+test('renderStateReadout: a dropped delivery is called out LOUDLY in the queue line', () => {
+  const m = mk();
+  m.applyState('cto-7', 'DRIVING', BASE);
+  const qs = { depth: 0, draining: false, stats: { enqueued: 5, delivered: 4, retried: 3, dropped: 1 } };
+  const out = renderStateReadout(m, BASE + 4 * 60_000, true, qs);
+  assert.match(out, /queue: depth 0 \| delivered 4\/5 \| retried 3 \| ⚠️ 1 DROPPED/);
+});
+
+test('renderStateReadout: no queueStats → no queue line (unchanged 3-arg behaviour)', () => {
+  const m = mk();
+  m.applyState('cto-7', 'DRIVING', BASE);
+  assert.doesNotMatch(renderStateReadout(m, BASE + 4 * 60_000, true), /queue:/);
+  assert.doesNotMatch(renderStateReadout(m, BASE + 4 * 60_000, true, null), /queue:/);
+});
+
+test('renderStateReadout: queueStats but empty CTO map → still renders the queue line', () => {
+  const empty = new LivenessMonitor({ ctoNames: [], silenceThresholdMs: SILENCE, pingCooldownMs: COOLDOWN });
+  const qs = { depth: 0, draining: false, stats: { enqueued: 1, delivered: 1, retried: 0, dropped: 0 } };
+  const out = renderStateReadout(empty, 123, true, qs);
+  assert.match(out, /queue: depth 0 \| delivered 1\/1 \| retried 0/);
+  assert.notEqual(out, 'No per-CTO state declared yet.');
+});
