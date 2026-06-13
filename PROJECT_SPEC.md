@@ -169,3 +169,29 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   floor raised to push-to-main parity, skill-promotion standards, simplicity
   scoping + surgical-hygiene + beyond-ask disclosure, and a route-before-scan
   doc map (manifest `covers` column).
+- `2026-06-12` — Engineering Robustness Program doctrine migrated into the
+  engineering-cto fragments (six operator-ratified 2026-06-12 decision records in
+  `qofi-product/products/qofi-claude-engineering/decisions/`). DOCTRINE PROSE
+  landed: `CLAUDE.md` gained the release-PR-on-`main` model (§Scope & branches,
+  new §Promotion to `main`, §Clean-dev update), §Test-driven by default, §Search
+  first, §Conventional commits, §Session summary on stop, §Learnings, and a DoD
+  item-7 gate reference (the `[DoD-1..6]` block left untouched for `dod-affirm.sh`);
+  `TEAM_LEAD.md` gained §Independent review & security gates, §Codex contrarian
+  review lane, §Learning loop, plus the release-PR merge-ownership update;
+  `ESCALATION.md` got the Promotion-to-`main` trigger reword + a Tier-2
+  learning-proposal trigger. Operator-only-`main` and Type-2 real-spend floors
+  preserved verbatim; `permission-gate-policy.sh` deliberately UNCHANGED (still
+  denies push entirely — correct, since the release PR is the operator's GitHub
+  merge, not an agent push). CPO product-vision facets (`quality-bar`,
+  `reliability`, `roadmap`, `constraints`) also updated; `requirements.md`
+  verified unchanged. STILL OPEN, handed to a Claude Code session (see
+  `HANDOVER-robustness-adoption.md`): regenerate the 3 stale fixtures
+  (CLAUDE/ESCALATION/TEAM_LEAD engineering-cto) and green `test-doctrine-compose.sh`
+  (currently RED — fixtures stale by design); build the mechanism (quality
+  PostToolUse hook, Stop-phase session-summary hook, hook runtime controls with
+  the never-env-switchable permission-gate guard, harness-audit preflight,
+  gitleaks/semgrep wiring, `LEARNINGS.md` seed, Codex-lane subscription-auth
+  integration, per-stack skill fragments) with manifest lines + tests; then
+  operator full-diff review → compose green → canary reserve-backend-2 →
+  `swarm-update`. Per-product CI referee + branch protection + Railway staging is
+  a separate operator-run per-repo checklist.
