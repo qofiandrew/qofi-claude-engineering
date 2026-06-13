@@ -354,10 +354,17 @@ correctly act as if no transition happened.
 A bus message matching neither is neither a directive, a state signal, nor a timer
 reset — never rely on prose to tell the watcher anything.
 
-**Heartbeat = re-emit current state.** To answer a revival ping when you are
-neither issuing a directive nor transitioning, emit `STATE: <cto-name> <its-current-
-state>` (e.g. `STATE: cto-7 DRIVING`). It is a true statement, resets that loop's
-clock, and changes nothing. There is **no** freeform "still working" message — the
+**Heartbeat = re-emit current state — NOT a revival-ping answer.** A bare
+`STATE: <cto-name> <its-current-state>` re-emit (e.g. `STATE: cto-7 DRIVING`) is a
+true statement that resets that loop's clock and changes nothing. It is valid
+**only while you are actively driving that loop** — maintaining a state you have
+already evaluated and are mid-work on (a directive issued recently, the CTO's
+response pending). **A heartbeat is something you emit *because* you're driving,
+never something you emit *instead* of driving.** On a **revival ping** a bare
+re-emit is **NOT** a valid answer: re-emitting DRIVING unchanged in reply to a ping
+IS the "silent-DRIVING" the §*Revival-loop guard* (below) forbids — a ping requires
+that guard's resolution (re-read the docs → issue the next directive, or transition
+to WAITING_FOR_OPERATOR). There is **no** freeform "still working" message — the
 watcher cannot interpret prose.
 
 **Revival-loop guard (AUTO).** A ping is a backup re-trigger for one specific
