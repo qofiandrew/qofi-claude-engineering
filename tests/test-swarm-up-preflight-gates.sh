@@ -14,6 +14,11 @@
 #       wasn't stamped so the CTO had no operating manual;
 #   (d) the env block lacked CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 so
 #       the lead launched but teammate spawning was silently disabled.
+#   (e) the stamped security floor (permission gate) could be missing,
+#       emptied, tampered (no longer denies `git push`), or unregistered in
+#       settings.json — so the lead would run WITHOUT its floor. The
+#       harness-audit gate refuses that, and surfaces disabled QUALITY gates
+#       (the QOFI_* runtime controls) loudly but non-fatally.
 # Each of those is a cheap disk read — turning the silent half-launches
 # into loud refusals is the structural fix. These tests pin each refusal
 # path AND the SWARM_UP_SKIP_SANITY=1 bypass.
@@ -94,7 +99,12 @@ _settings_with_plugin() {
   cat > "$REPO/.claude/settings.json" <<'EOF'
 {
   "env": { "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1" },
-  "enabledPlugins": { "discord-b2b@qofi-swarm": true }
+  "enabledPlugins": { "discord-b2b@qofi-swarm": true },
+  "hooks": {
+    "PermissionRequest": [
+      { "hooks": [ { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/permission-gate.sh\"", "timeout": 30 } ] }
+    ]
+  }
 }
 EOF
 }
@@ -153,6 +163,54 @@ _doctrine_unstamp() {
   rm -f "$REPO/CLAUDE.md" "$REPO/ESCALATION.md" "$REPO/TEAM_LEAD.md"
 }
 
+# Gate (e) helpers — the stamped security floor (permission gate) + variants.
+# Gate (e) RUNS the composed gate against a synthetic push PermissionRequest
+# (archetype-aware), so these helpers stamp the REAL composed gate (not a stub) —
+# what actually emits the deny decision the audit checks.
+_compose_gate() {  # archetype -> composed permission-gate.sh (prelude+policy+tail)
+  mkdir -p "$REPO/.claude/hooks"
+  cat "$ROOT/templates/_base/hooks/permission-gate-prelude.sh" \
+      "$ROOT/templates/$1/hooks/permission-gate-policy.sh" \
+      "$ROOT/templates/_base/hooks/permission-gate-tail.sh" \
+      > "$REPO/.claude/hooks/permission-gate.sh"
+  chmod +x "$REPO/.claude/hooks/permission-gate.sh"
+}
+_permission_gate_stamp() { _compose_gate engineering-cto; }   # denies plain `git push`
+_permission_gate_tampered() {  # present but emits NO decision → harness-audit must fire
+  mkdir -p "$REPO/.claude/hooks"
+  printf '#!/usr/bin/env bash\ncat >/dev/null\n# neutered floor — denies nothing\nexit 0\n' \
+    > "$REPO/.claude/hooks/permission-gate.sh"
+}
+_permission_gate_comment_only() {  # the deny STRING survives only in a comment; denies nothing
+  mkdir -p "$REPO/.claude/hooks"
+  printf '#!/usr/bin/env bash\ncat >/dev/null\n# this gate once had: deny "git push" — but no longer does\nexit 0\n' \
+    > "$REPO/.claude/hooks/permission-gate.sh"
+}
+_settings_with_plugin_no_pg() {  # good a/d but NO PermissionRequest registration
+  cat > "$REPO/.claude/settings.json" <<'EOF'
+{
+  "env": { "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1" },
+  "enabledPlugins": { "discord-b2b@qofi-swarm": true }
+}
+EOF
+}
+_settings_with_plugin_quality_off() {  # good a/d + PG registration + quality gates disabled
+  cat > "$REPO/.claude/settings.json" <<'EOF'
+{
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+    "QOFI_HOOK_PROFILE": "off"
+  },
+  "enabledPlugins": { "discord-b2b@qofi-swarm": true },
+  "hooks": {
+    "PermissionRequest": [
+      { "hooks": [ { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/permission-gate.sh\"", "timeout": 30 } ] }
+    ]
+  }
+}
+EOF
+}
+
 # Run swarm-up.sh up <NAME> in the fixture env. Returns rc; merged stderr
 # in $TMP/last.err and stdout in $TMP/last.out.
 run_up() {
@@ -165,6 +223,11 @@ run_up() {
     bash "$FAKE_SH/bin/swarm-up.sh" up "$NAME" >"$TMP/last.out" 2>"$TMP/last.err"
   echo $?
 }
+
+# A valid security floor is present by default so gate (e) (harness-audit)
+# passes everywhere the earlier gates do; the gate (e) tests below explicitly
+# break it, then restore it before the bypass + pass-path tests.
+_permission_gate_stamp
 
 # ---------------------------------------------------------------------------
 # Gate (a) — enabledPlugins
@@ -304,6 +367,70 @@ assert_contains "$TMP/last.err" "missing CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1"
 _settings_plugin_env_block_wrong_value
 rc=$(run_up "")
 assert_contains "$TMP/last.err" "missing CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1" "env block key wrong value → gate (d) fires"
+
+# ---------------------------------------------------------------------------
+# Gate (e) — harness-audit: the stamped security FLOOR must be intact.
+# A permission gate that is missing, empty, tampered (no push-deny), or
+# unregistered in settings.json must be REFUSED — that is the security floor,
+# not a quality nicety. Disabled QUALITY gates (QOFI_*) are surfaced LOUDLY but
+# are NON-FATAL (the operator may pick a fast profile; it just isn't silent).
+# ---------------------------------------------------------------------------
+echo "=== gate (e): harness-audit (security-floor integrity) ==="
+
+_permission_gate_stamp   # real engineering-cto composed gate (denies plain git push)
+_settings_with_plugin    # includes the PermissionRequest registration
+_access_with_group
+_doctrine_stamp
+
+# (e.1) permission gate file missing entirely
+rm -f "$REPO/.claude/hooks/permission-gate.sh"
+rc=$(run_up "")
+assert_contains "$TMP/last.err" "permission gate missing" "no permission-gate.sh → gate (e) fires"
+assert_contains "$TMP/last.err" "gate: harness-audit" "no permission-gate.sh → labeled harness-audit"
+
+# (e.2) gate present but NEUTERED — emits no deny for the push probe (tampered floor)
+_permission_gate_tampered
+rc=$(run_up "")
+assert_contains "$TMP/last.err" "does NOT deny" "neutered gate → gate (e) fires (behavioral, not a grep)"
+
+# (e.2b) gate that keeps the deny STRING only in a comment — the behavioral check
+# must STILL fire (a static substring grep would have FALSE-PASSED this).
+_permission_gate_comment_only
+rc=$(run_up "")
+assert_contains "$TMP/last.err" "does NOT deny" "comment-only deny string → gate (e) still fires (no substring false-pass)"
+
+# (e.3) gate intact on disk but NOT registered on PermissionRequest in settings
+_permission_gate_stamp
+_settings_with_plugin_no_pg
+rc=$(run_up "")
+assert_contains "$TMP/last.err" "not registered on PermissionRequest" "unregistered gate → gate (e) fires"
+
+# (e.4) disabled QUALITY gates are LOUD but NON-FATAL — launch still proceeds
+_permission_gate_stamp
+_settings_with_plugin_quality_off
+rc=$(run_up "")
+assert_contains "$TMP/last.err" "quality gates DISABLED" "QOFI disable → loud WARN at preflight"
+assert_contains "$TMP/last.err" "QOFI_HOOK_PROFILE=off" "QOFI disable → names the profile"
+assert_contains "$TMP/last.out" "launching: swarm-$NAME" "QOFI disable → non-fatal, launch proceeds"
+
+# (e.5) ARCHETYPE-AWARE: the cpo floor ALLOWS plain push and denies only
+# destructive pushes, so a correct cpo gate must PASS gate (e). (Regression: a
+# hardcoded engineering `deny "git push"` check false-blocked every cpo swarm —
+# the live qofi-product among them.) Probe is per-archetype (cpo → force-push).
+echo "cpo" > "$REPO/.claude/swarm-type"
+_compose_gate cpo
+_settings_with_plugin
+_access_with_group
+_doctrine_stamp           # cpo needs only CLAUDE+ESCALATION; full triad satisfies it
+rc=$(run_up "")
+assert_absent  "$TMP/last.err" "does NOT deny" "cpo: correct cpo floor PASSES gate (e) (no false-block)"
+assert_absent  "$TMP/last.err" "permission gate missing" "cpo: gate present, not flagged missing"
+assert_contains "$TMP/last.out" "launching: swarm-$NAME" "cpo: proceeds to launch"
+rm -f "$REPO/.claude/swarm-type"   # restore engineering-cto default
+
+# Restore a clean, fully-good engineering harness for the bypass + pass-path tests.
+_permission_gate_stamp
+_settings_with_plugin
 
 # ---------------------------------------------------------------------------
 # SWARM_UP_SKIP_SANITY=1 — bypass with everything failing

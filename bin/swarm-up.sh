@@ -182,6 +182,81 @@ PY
     return 1
   fi
 
+  # Gate (e) — harness-audit. The stamped security FLOOR must be intact before
+  # we launch. A permission gate that is missing, empty, tampered (no longer
+  # denies `git push`), or unregistered in settings.json means the swarm would
+  # run WITHOUT its floor — refuse, loudly. This audits the stamped harness
+  # itself, the gap the earlier gates left (they prove config keys exist; this
+  # proves the floor that actually runs is the real one). Disabled QUALITY gates
+  # (the QOFI_* runtime controls) are surfaced LOUDLY here but are NON-FATAL: an
+  # operator may pick a fast profile; it just must never be silent. The
+  # permission floor itself is never switchable — see the quality hooks'
+  # runtime-control block and tests/test-hook-runtime-controls.sh.
+  local pg="$repo/.claude/hooks/permission-gate.sh"
+  if [ ! -s "$pg" ]; then
+    echo "  ERROR: $sess: permission gate missing or empty: $pg — the security floor is not stamped. $remediation" >&2
+    echo "         (gate: harness-audit; bypass with SWARM_UP_SKIP_SANITY=1)" >&2
+    return 1
+  fi
+  # The floor must actually DENY the archetype's operator-only push — proven by
+  # RUNNING the stamped gate against a synthetic PermissionRequest, not by
+  # grepping for a string (a string surviving only in a comment can't satisfy a
+  # behavioral check, and a neutralized rule is caught). Archetype-aware:
+  # engineering-cto denies plain `git push`; the cpo archetype intentionally
+  # ALLOWS its vision-repo push and denies only destructive pushes, so it is
+  # probed with a force-push. repo_type was resolved for gate (c) above.
+  local probe
+  case "$repo_type" in
+    cpo) probe='git push --force origin main' ;;
+    *)   probe='git push origin main' ;;
+  esac
+  local gate_event gate_out
+  gate_event="$(python3 -c 'import json,sys; print(json.dumps({"tool_name":"Bash","tool_input":{"command":sys.argv[1]},"cwd":sys.argv[2]}))' "$probe" "$repo" 2>/dev/null)"
+  gate_out="$(printf '%s' "$gate_event" | bash "$pg" 2>/dev/null)"
+  if ! printf '%s' "$gate_out" | grep -qF '"behavior":"deny"'; then
+    echo "  ERROR: $sess: permission gate does NOT deny '$probe' (tampered, stale, or wrong-archetype floor): $pg — $remediation" >&2
+    echo "         (gate: harness-audit; bypass with SWARM_UP_SKIP_SANITY=1)" >&2
+    return 1
+  fi
+  if ! python3 - "$settings" <<'PY' >/dev/null 2>&1
+import json, sys
+try:
+    s = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+blocks = (s.get("hooks") or {}).get("PermissionRequest") or []
+cmds = [h.get("command", "") for b in blocks for h in (b.get("hooks") or [])]
+sys.exit(0 if any("permission-gate.sh" in c for c in cmds) else 1)
+PY
+  then
+    echo "  ERROR: $sess: permission-gate.sh not registered on PermissionRequest in $settings — the floor won't run. $remediation" >&2
+    echo "         (gate: harness-audit; bypass with SWARM_UP_SKIP_SANITY=1)" >&2
+    return 1
+  fi
+  # Loud (non-fatal) surfacing of disabled QUALITY gates configured in settings env.
+  local qofi_note
+  qofi_note="$(python3 - "$settings" <<'PY' 2>/dev/null
+import json, sys
+try:
+    s = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+env = s.get("env") or {}
+prof = (env.get("QOFI_HOOK_PROFILE") or "").strip()
+dis = (env.get("QOFI_DISABLED_HOOKS") or "").strip()
+notes = []
+if prof in ("minimal", "fast", "off"):
+    notes.append("QOFI_HOOK_PROFILE=%s (all quality gates off)" % prof)
+if dis:
+    notes.append("QOFI_DISABLED_HOOKS=%s" % dis)
+print("; ".join(notes))
+PY
+)"
+  if [ -n "$qofi_note" ]; then
+    echo "  WARN:  $sess: quality gates DISABLED via settings env — $qofi_note" >&2
+    echo "         (harness-audit: non-fatal; the permission FLOOR is always on)" >&2
+  fi
+
   return 0
 }
 

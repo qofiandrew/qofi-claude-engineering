@@ -496,14 +496,17 @@ with an explicit merge commit and a registry entry (the build-log line in
 `PROJECT_SPEC.md` §10), after review. Teammates never merge their own
 branch into `dev`; that's the discipline that keeps parallel work safe.
 
-**No pull requests — you commit and push to `dev` directly.** This project
-does not use PRs. You never open, request, or wait on a PR; merging a
-reviewed `worktree-<name>` (or feature) branch **into `dev`** is within
-your authority, and you push `dev` to the remote yourself. **This is
-`dev` ONLY — never `main`.** `dev`→`main` is the operator's merge,
-performed by hand; no agent ever merges or pushes `main` (the
-operator-only-`main` floor in `CLAUDE.md` §*Scope & branches* is
-unchanged — this grants no new push permission).
+**No PRs for `dev`; the release PR is the operator's, on `main`.** You commit
+and push to `dev` **directly** — you never open, request, or wait on a PR for
+teammate integration or for `dev`. Merging a reviewed `worktree-<name>` (or
+feature) branch **into `dev`** is within your authority, and you push `dev` to
+the remote yourself. **This is `dev` ONLY — never `main`.** `dev`→`main` is a
+**release PR the operator merges by hand** (one tap, GitHub mobile), gated by
+branch protection + green required CI checks (`CLAUDE.md` §*Promotion to
+`main`*). You never open, approve, or merge that release PR; no agent ever
+merges or pushes `main`. The operator-only-`main` floor in `CLAUDE.md`
+§*Scope & branches* is unchanged — the release PR is additive platform
+enforcement, not a new push permission.
 
 **Done requires a clean `dev`.** You never report work as done until `dev`
 is clean-pushed: everything committed (docs included — see §*Docs reflect
@@ -802,6 +805,112 @@ something you surface as an issue.
 - Before declaring a milestone done or escalating it, do a **reviewer pass**
   against the spec's scope (§3) and acceptance criteria (§4) — spawn a
   `reviewer` teammate for this if the diff is large.
+
+## Independent review & security gates (mandatory, pre-DoD)
+
+The gap these close: every gate the system had ran *inside the producing
+session* — the reviewer was the same mind that directed the work. §*Verification*
+demands evidence the claimant didn't author. These passes are that evidence at
+the inner loop, and they are **mandatory before the DoD gate**, not optional
+polish. (Source: the operator-ratified 2026-06-12 review-and-security-gates
+decision.)
+
+**1. Independent reviewer teammate.** Before a unit of work reaches done, spawn a
+**fresh-context** `reviewer` teammate — one with **no exposure to the
+implementation conversation** — to review the integrated diff. This is distinct
+from your own §*Lead review* (which still happens on top) and from the
+implementing teammate's self-report. Discipline on its output:
+
+- **≥80% confidence filter (mandatory).** The reviewer reports only findings it
+  holds at ≥80% confidence. A reviewer that floods you with low-confidence nits
+  gets tuned out — worse than no reviewer. The filter is not optional.
+- **Consolidate + order security-first.** Similar findings merge; security
+  issues are triaged ahead of the rest.
+- **Findings return to you for §*Verification*-disciplined handling.** You decide
+  per finding: fix, file, or reject-with-reason. Reviewer disagreement that you
+  can't resolve resolves per the circuit-breaker — **escalate, never loop**.
+- A unit is not done while an accepted reviewer finding is unresolved.
+
+**2. Security pass.** Over the same diff, two layers:
+
+- **Deterministic scanners first** — `gitleaks` (secrets) and `semgrep` (known
+  vulnerability patterns) wired into the gate. Deterministic tools are the first
+  line precisely because **they don't hallucinate**; a clean scanner run is
+  evidence, a dirty one is a hard stop.
+- **A `security-reviewer` teammate** over the diff for the logic-level flaws the
+  scanners can't see — injection, auth, secret handling, unvalidated input at
+  contract surfaces.
+- This was a stark zero before: constraints governed secrets and permissions,
+  but nothing inspected the produced diff itself. It does now.
+
+**3. Coverage floor.** "Tests pass" at unmeasured coverage no longer satisfies
+the gate. The suite must meet the per-product threshold in that repo's
+`quality-bar.md` — **default 80%**, tuned per repo. Never weaken the floor to go
+green (that's the §*Verification* regression rule).
+
+**4. Harness-audit preflight.** A fail-loud, first-party check (qofi-authored, in
+the existing preflight-gate style) audits the harness configs themselves — the
+stamped `CLAUDE.md`, `settings.json`, hook registrations, MCP configs — for
+misconfiguration and injection risk. External tooling (e.g. ECC's AgentShield)
+may be run **by the operator, by hand**, as an occasional second opinion; it is
+**never a wired dependency**.
+
+The reviewer and security passes are **gating**. The Codex contrarian lane below
+is **advisory** — a different tier; don't conflate them.
+
+## Codex contrarian review lane (advisory, never gating)
+
+On the highest-stakes diffs, the integrated diff is also piped to the **OpenAI
+Codex CLI**, and its findings are **input to your judgment — never a gate**. A
+different model family decorrelates the blind spots a Claude reviewer shares with
+Claude-authored code; that is the entire point. Rules, all ratified:
+
+- **Advisory, never gating.** Codex gets a **voice, not a veto** — a foreign
+  model never holds authority over a qofi gate. You weigh its findings; you are
+  never blocked by them.
+- **Disagreement escalates, never loops.** When Codex and the Claude-side
+  reviewer (or you) materially disagree, the §*Verification* circuit-breaker
+  applies: escalate to the operator, never autonomously loop.
+- **Sequencing.** This lane lands **after** the Claude-side reviewer lane is
+  live, so its marginal value is measurable against a baseline.
+- **Type-2 spend, consciously approved + logged.** This lane runs on a Codex
+  subscription (recurring cost outside the one-Max-subscription shape). The
+  operator **explicitly approved this spend on 2026-06-12** — it is a knowingly
+  extended money-path line, not drift. Pin the lane to **subscription auth**; it
+  must **never silently fall back to metered API-key billing** on an auth
+  failure — that flip would be an unapproved Type-2 spend, so it fails loud and
+  the lane goes advisory-down instead. The Codex credential is provisioned per
+  §*Secrets* (silent entry, chmod 600, never in argv/scrollback);
+  `ANTHROPIC_API_KEY` hygiene is unaffected.
+
+## Learning loop (two tiers, operator-gated)
+
+Today every session's lessons die with the session or on compaction. The loop
+closes that without letting agents extend their own doctrine — the core
+anti-vision (*"not a system the agents extend autonomously"*). Two tiers, ratified:
+
+**Tier 1 — repo-local learnings, your authority.** A doctrine-defined
+`LEARNINGS.md` per engineering repo, where you record lessons **with cited
+evidence** (the incident, the commit, the failed approach). Same authority class
+as `PROJECT_SPEC.md` / ADRs: lives in the repo, binds only this swarm, and is
+**strictly subordinate to doctrine** — a learning that contradicts the floor
+triggers §*Conflict handling*, never a quiet local override. This is yours to
+write; it does not surface to the operator.
+
+**Tier 2 — generalization proposals, operator-ratified, via the CPO.** When a
+lesson looks like it transcends this one repo, it surfaces as a **proposed
+doctrine fragment through the CPO** (the curator that collects learnings across
+CTOs, filters, and brings the operator batched proposals). Hard rules:
+
+- **Recurrence-gated.** A pattern surfaces only on **recurrence — seen across ≥2
+  incidents or repos** — never on first observation. First sight stays Tier 1.
+- **Nothing self-applied.** You never promote a learning into doctrine yourself.
+  The operator ratifies; only then does the fragment enter `templates/` and
+  propagate via the normal sync path.
+- **Default to on-demand skill, not the floor.** A ratified learning defaults to
+  an on-demand **skill file**, not the always-loaded doctrine floor — the floor
+  is reserved for genuinely universal rules, because every always-loaded fragment
+  costs context in every session forever.
 
 ## Lead review of teammate output (the missing beat)
 

@@ -29,6 +29,25 @@ set -uo pipefail
 
 EVENT="$(cat 2>/dev/null || true)"
 
+# --- QOFI quality-hook runtime control (see test-gate.sh for the rationale) -
+__qofi_hook="dod-affirm"
+__qofi_disabled() {
+  case "${QOFI_HOOK_PROFILE:-default}" in
+    minimal|fast|off) return 0 ;;
+  esac
+  local _l="${QOFI_DISABLED_HOOKS:-}"; _l="${_l//,/ }"
+  local _h
+  for _h in $_l; do
+    { [ "$_h" = "$__qofi_hook" ] || [ "$_h" = "all" ]; } && return 0
+  done
+  return 1
+}
+if __qofi_disabled; then
+  echo "${__qofi_hook}: SKIPPED — disabled (QOFI_HOOK_PROFILE=${QOFI_HOOK_PROFILE:-default}, QOFI_DISABLED_HOOKS='${QOFI_DISABLED_HOOKS:-}')" >&2
+  exit 0
+fi
+# --- end QOFI quality-hook runtime control ---------------------------------
+
 # Same worktree-topology fix as test-gate.sh — the teammate's HEAD commit
 # (where the [DoD-*] block should live) is on the worktree-<name> branch
 # in the teammate's worktree, NOT on whatever branch the lead's main tree

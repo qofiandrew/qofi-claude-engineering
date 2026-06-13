@@ -14,6 +14,31 @@ set -uo pipefail
 # Consume the stdin payload (we don't need fields here, but must drain it).
 cat >/dev/null
 
+# --- QOFI quality-hook runtime control -------------------------------------
+# QUALITY gates honor QOFI_HOOK_PROFILE / QOFI_DISABLED_HOOKS so an operator can
+# turn advisory quality gates off for a fast or experimental session. The
+# permission gate is the SECURITY FLOOR and is deliberately immune — it never
+# consults these vars (proof: tests/test-hook-runtime-controls.sh). A disabled
+# quality hook is surfaced LOUDLY at swarm-up preflight (the harness-audit gate),
+# so an off gate is never silent.
+__qofi_hook="test-gate"
+__qofi_disabled() {
+  case "${QOFI_HOOK_PROFILE:-default}" in
+    minimal|fast|off) return 0 ;;
+  esac
+  local _l="${QOFI_DISABLED_HOOKS:-}"; _l="${_l//,/ }"
+  local _h
+  for _h in $_l; do
+    { [ "$_h" = "$__qofi_hook" ] || [ "$_h" = "all" ]; } && return 0
+  done
+  return 1
+}
+if __qofi_disabled; then
+  echo "${__qofi_hook}: SKIPPED — disabled (QOFI_HOOK_PROFILE=${QOFI_HOOK_PROFILE:-default}, QOFI_DISABLED_HOOKS='${QOFI_DISABLED_HOOKS:-}')" >&2
+  exit 0
+fi
+# --- end QOFI quality-hook runtime control ---------------------------------
+
 # Resolve the work tree this hook is invoked against. In worktree topology
 # (TEAM_LEAD.md §*Pre-spawn provisioning*) the teammate works in
 # .claude/worktrees/<name>/ on its own branch — a first-class git work

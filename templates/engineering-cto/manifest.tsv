@@ -69,11 +69,18 @@ compose      | engineering-cto/ESCALATION.preamble.md+_base/ESCALATION.md+engine
 refresh      | engineering-cto/TEAM_LEAD.md                                                                              | TEAM_LEAD.md              | CTO-only brief (not loaded by teammates): doc authoring, decomposition, worktree provisioning + one-writer contract lease, spawning, review, dev integration, assumption-note fold
 seed         | engineering-cto/PROJECT_SPEC.template.md                                                                  | PROJECT_SPEC.md           | this swarm's own spec: scope (sec3), acceptance (sec4), architecture (sec6), build log (sec10)
 seed         | engineering-cto/ADR.template.md                                                                           | docs/adr/ADR.template.md  | one-way-door decision record format
+seed         | engineering-cto/LEARNINGS.template.md                                                     | LEARNINGS.md              | repo-local lessons from real incidents (CTO-maintained, evidence-cited); Tier-1 of the learning loop
 refresh      | engineering-cto/hooks/test-gate.sh                                                                        | .claude/hooks/test-gate.sh
 refresh      | engineering-cto/hooks/docs-check.sh                                                                       | .claude/hooks/docs-check.sh
 compose      | _base/hooks/permission-gate-prelude.sh+engineering-cto/hooks/permission-gate-policy.sh+_base/hooks/permission-gate-tail.sh | .claude/hooks/permission-gate.sh
 refresh      | engineering-cto/hooks/dod-affirm.sh                                                                       | .claude/hooks/dod-affirm.sh
+refresh      | engineering-cto/hooks/quality-check.sh                                                                    | .claude/hooks/quality-check.sh   | PostToolUse: per-file lint/typecheck nudge on edit (non-blocking); honors QOFI_* runtime controls
+refresh      | engineering-cto/hooks/session-summary.sh                                                                  | .claude/hooks/session-summary.sh | Stop: writes in-repo .claude/session-summary.md resume aid (never evidence, never ~/.claude)
 settings     | engineering-cto/settings.example.json                                                                     | .claude/settings.json
 git-hook     | engineering-cto/git-hooks/pre-commit                                                                      | .git/hooks/pre-commit
 gitignore    | .claude/worktrees/                                                                                        | .gitignore
+gitignore    | .claude/session-summary.md                                                                                | .gitignore
 seed-text    | npm test --silent                                                                                         | .claude/test-cmd
+# On-demand skills — model-invoked by their description; inert (zero context) in
+# repos whose stack doesn't match. Stamped to .claude/skills/<name>/SKILL.md.
+refresh      | engineering-cto/skills/ts-node-stack/SKILL.md                                                             | .claude/skills/ts-node-stack/SKILL.md | on-demand TS/Node + BullMQ/Drizzle/Postgres stack playbook

@@ -141,6 +141,68 @@ gravest behavioral violation in this manual.
 - The exception: if you think something belongs in v1 that the spec defers (or
   vice versa), that's a scope escalation — I sometimes want more in v1.
 
+## Test-driven by default
+- **Write the test first.** For feature work the default is red-green-refactor:
+  the test that pins the behavior lands *before* the implementation, fails for
+  the right reason, then you make it pass and refactor under green. This is the
+  default, not a ceremony for every line — a trivial pure helper or a
+  throwaway diagnostic doesn't need a ritual red step.
+- **Deviating is a conscious call, logged.** If you skip TDD for a piece of work,
+  that's a deliberate CTO-level decision noted in the build log (or your task
+  notes), not a silent omission. "I'll add tests after" is the pattern that
+  produces untested code — the test is part of the feature (§*Verification*), not
+  a follow-up.
+- Pairs with §*Testing strategy*: TDD says *when* you write the test; the
+  four-case mocking policy says *what you test against* (real vs boundary mock).
+
+## Search first — research and reuse before you write
+- **Before writing new code, look for what already exists.** Check the repo for
+  an existing pattern, helper, or module that already does it; check whether an
+  already-approved dependency covers it. Reinventing a utility that's already in
+  the tree is wasted work and a second thing to maintain.
+- **Reuse decision, in order:** (1) an existing in-repo pattern or helper → use
+  it; (2) an already-bundled / approved dependency → use it; (3) a *new* external
+  dependency → that's the §*Dependencies* gate (CTO approval, justification, not a
+  default reach). Search-first never becomes dependency bloat — the cheapest
+  reuse is in-repo, and a new dep is the most expensive option, not the first.
+- Search-first is the complement to planning: planning covers *how* you'll
+  build; search-first covers *whether the thing already exists* before you
+  build it.
+
+## Conventional commits
+- **Commit messages follow conventional-commit format**: `<type>: <description>`
+  (`feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `chore:`, etc.), description
+  in the imperative. This is on top of the existing rules — descriptive, no
+  bundling of unrelated changes (§*Scope & branches*), and the DoD affirmation
+  block still terminates the task-closing commit (§*Definition of done*).
+- **Release-PR standard** (the CTO assembles these; you don't open PRs —
+  §*Scope & branches*): a `dev`→`main` release PR carries diff-vs-base analysis,
+  a comprehensive summary, and a test plan. You make that possible by keeping
+  commits atomic and well-described.
+
+## Session summary on stop (resume aid, never evidence)
+- At session stop, a hook writes a short summary — work in flight, decisions
+  made, the next step — to a doctrine-defined **in-repo** file, so a teammate's
+  RAM-only state isn't wholly lost when the session cycles.
+- **It is a resume aid, NOT evidence.** The next session must **verify before
+  trusting** anything in it — a summary that claims "tests green" or "contract
+  satisfied" is a claim to re-check per §*Verification*, exactly like any upstream
+  output, never a fact to build on. Treat it the way you'd treat a teammate's
+  self-report: a starting point, not proof.
+- It never substitutes for docs + git, which remain the durable substrate; it
+  only speeds a warm restart.
+
+## Learnings (repo-local, evidence-cited)
+- The repo may carry a `LEARNINGS.md` the CTO maintains — lessons from real
+  incidents, with cited evidence (the commit, the failed approach). Read it; it's
+  hard-won context for this repo.
+- It is **subordinate to doctrine.** A learning that appears to contradict the
+  floor (`_base/CLAUDE.md`, `ESCALATION.md`, the spec, an ADR, a contract) is a
+  §*Conflict handling* surfacing, never a license to override the floor. You do
+  not add to or generalize `LEARNINGS.md` yourself — authoring it is the CTO's;
+  promoting a lesson into shared doctrine is operator-gated (see `TEAM_LEAD.md`
+  §*Learning loop*).
+
 ## Modular design
 - **Single responsibility.** A module does one thing. If you can't state its job
   in one sentence, it's two modules — split before you build.
@@ -426,12 +488,15 @@ CTO (and every teammate) gates it on the execution side. Both stop for real spen
   operator runs it themselves. **No agent process ever executes `git push` to
   `main`** — not via Bash, a hook, or a tool. If you find yourself reasoning
   toward a main-push command, stop and escalate.
-- **No pull requests.** This project does not use PRs. Work flows
-  `worktree-<name>` branch → CTO review → CTO merges into `dev` and pushes `dev`
-  directly. **No agent opens, requests, or waits on a PR.** A teammate signals
-  "ready" by pushing its `worktree-<name>` branch (above), not by raising a PR;
-  the CTO integrates by direct merge + push to `dev`. (`main` stays the
-  operator's, above.)
+- **No PRs for teammate or `dev` flow; one release PR for `main`.** Inside the
+  swarm, work still flows `worktree-<name>` branch → CTO review → CTO merges into
+  `dev` and pushes `dev` **directly** — no PRs, no teammate PRs, rapid large-batch
+  shipping preserved. A teammate signals "ready" by pushing its `worktree-<name>`
+  branch (above), not by raising a PR. **The ONE place a PR exists is the
+  `dev`→`main` release PR**, and it is the **operator's** merge button (one tap,
+  GitHub mobile), never an agent's. No agent opens, approves, merges, or waits on
+  it. `main` stays the operator's, gated by branch protection that binds even the
+  operator (`§Promotion to main`, below).
 - Descriptive commits. Don't bundle unrelated changes.
 
 ## Clean-dev exit state (the done handoff)
@@ -459,15 +524,47 @@ CPO alone decides what your done-report means and what happens next. Your job
 ends at the clean-dev report.
 
 **`main` stays the operator's.** The objective terminates at clean-pushed-`dev`;
-pushing `dev` autonomously is fine because the operator reviews and reverses it
-via the merge step. The operator merges `dev`→`main` by hand; no agent ever
-merges or pushes `main` (this reinforces the operator-only-`main` floor in
-`§Scope & branches`; it grants no new push permission).
+pushing `dev` autonomously is fine because GitHub Actions runs the referee suite
+on every `dev` push and the operator reviews-and-reverses via the promotion step.
+Promotion is a `dev`→`main` **release PR the operator merges by hand**
+(§*Promotion to `main`*), gated by branch protection and green required checks;
+no agent ever opens, merges, or pushes `main` (this reinforces the
+operator-only-`main` floor in `§Scope & branches`; it grants no new push
+permission).
 
 **If you can't reach clean-dev** — a merge conflict, a rejected push, an
 unresolvable dirty tree — you are BLOCKED reaching it: surface that via the
 normal escalation path (`§Conflict handling` / `ESCALATION.md`). Never silently
 spin, and never fake a done-report when the repo isn't clean-pushed-dev.
+
+## Promotion to `main` (CI referee + release PR)
+
+Reaching clean-pushed-`dev` is where your objective ends (§*Clean-dev exit
+state*). Promotion of `dev`→`main` is a separate, operator-run step with an
+independent referee in front of it. You never perform it; you must understand it
+so you never reason around it.
+
+- **GitHub Actions is the independent referee, and it outranks local runs.**
+  Typecheck, lint, full suite + coverage floor, secret scan, and build run on
+  every push to `dev` and are **required** on promotion to `main`. The Actions
+  run is **ground truth** — an in-session or local green NEVER substitutes for it.
+  This mechanizes §*Verification*: evidence no agent and no tired operator can
+  fabricate. A red `dev` run fires a Discord notification into the swarm's
+  channel — failures reach the phone, not a dashboard.
+- **`main` is branch-protected; the only path in is a green release PR.** Direct
+  pushes and force pushes to `main` are blocked at the platform **for everyone,
+  including the operator**. The operator applies this protection once per repo —
+  agents cannot set it.
+- **Promotion is the operator's, gated on seated verification.** A release =
+  green `dev` CI **AND** staging current **AND** the operator has **manually
+  verified in staging**. Only then does the operator merge the release PR (one
+  tap), and `main` deploys. Deploy *is* the merge to `main` — nothing else is.
+- **Never merge on red CI.** Migrations require a staging run before promotion
+  (§*Data migrations* — staging is where they run first, not prod).
+- **This grants you no new authority.** The release PR is the operator's button.
+  No agent opens, approves, merges, or waits on it (§*Scope & branches*). The
+  operator-only-`main` floor is unchanged; this is the *platform* enforcement
+  layered above the agent-side floor.
 
 ## Documentation
 - Keep docs current as you go — README, API docs, and the spec's architecture
@@ -532,6 +629,12 @@ not done. Claiming done without addressing an item is an immediate flag.
    `§Working with existing code`).
 7. **CTO-reviewed.** Plan approved, summary verified against the contract, CTO
    accepted. The CTO marks done after review, not the agent on its own claim.
+   **Before this passes**, the mandatory independent gates run (`TEAM_LEAD.md`
+   §*Independent review & security gates*): a fresh-context reviewer teammate
+   (≥80%-confidence findings), the security pass (gitleaks + semgrep +
+   security-reviewer), and the per-product coverage floor (default 80%). These
+   are the CTO's to run and clear; you make them passable by writing the tests
+   and keeping the diff clean.
 
 Items 2 and 3 are mechanically enforced by hooks. Items 1, 4, 5, 6 cannot be
 hook-enforced and depend on the agent's honest affirmation plus the CTO's review.

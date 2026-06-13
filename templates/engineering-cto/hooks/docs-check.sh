@@ -14,6 +14,25 @@
 set -uo pipefail
 cat >/dev/null   # drain stdin payload
 
+# --- QOFI quality-hook runtime control (see test-gate.sh for the rationale) -
+__qofi_hook="docs-check"
+__qofi_disabled() {
+  case "${QOFI_HOOK_PROFILE:-default}" in
+    minimal|fast|off) return 0 ;;
+  esac
+  local _l="${QOFI_DISABLED_HOOKS:-}"; _l="${_l//,/ }"
+  local _h
+  for _h in $_l; do
+    { [ "$_h" = "$__qofi_hook" ] || [ "$_h" = "all" ]; } && return 0
+  done
+  return 1
+}
+if __qofi_disabled; then
+  echo "${__qofi_hook}: SKIPPED — disabled (QOFI_HOOK_PROFILE=${QOFI_HOOK_PROFILE:-default}, QOFI_DISABLED_HOOKS='${QOFI_DISABLED_HOOKS:-}')" >&2
+  exit 0
+fi
+# --- end QOFI quality-hook runtime control ---------------------------------
+
 # Same worktree-topology fix as test-gate.sh — the teammate's actual
 # changes (which this hook inspects via `git status`) live in the worktree,
 # not the lead's main tree. Trusting $CLAUDE_PROJECT_DIR ran `git status`
