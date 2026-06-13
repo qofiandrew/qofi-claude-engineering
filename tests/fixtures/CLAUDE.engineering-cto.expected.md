@@ -98,6 +98,11 @@ is **effectively lost.**
   shell output, working notes. Never the thing you need the operator to read.
 - **Intra-swarm agent-to-agent communication is out of scope** here; this rule
   governs human I/O. Coordination inside the swarm uses the archetype's playbook.
+- **A Stop nudge backs this up (engineering-cto leads).** When a lead's response
+  cycle produces a substantive operator-facing reply but posts nothing to Discord,
+  a non-blocking nudge reminds it that the terminal is unmonitored — deliver via
+  the Discord reply tool (or a `.md` file per §*Message length*). The CPO is
+  exempt: its deliberate silence-by-default is correct, not a missed post.
 
 ## Message length — never truncate to fit (foundational)
 
