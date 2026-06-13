@@ -20,6 +20,7 @@ import { prepareContext, decideRoute } from './routing.js';
 import { relayMessage } from './attachments.js';
 import { DeliveryQueue } from './queue.js';
 import { writeDeadLetter } from './deadletter.js';
+import { loginWithRetry } from './login.js';
 import { LivenessMonitor, renderStateReadout } from './liveness.js';
 import { readTokenFromEnvFile } from './token.js';
 import { readSwarmLimitStates } from './swarmstatus.js';
@@ -496,7 +497,16 @@ process.on('unhandledRejection', (reason) => {
   log(`[error] unhandledRejection: ${reason?.message ?? reason}`);
 });
 
-client.login(TOKEN).catch((err) => {
-  console.error(`[fatal] login failed: ${err.message}`);
-  process.exit(1);
+// Initial login with transient/terminal retry (ADR-0011): a captive-portal or
+// network blip retries with capped backoff instead of exiting and burning pm2's
+// max_restarts (after which pm2 stops and the watcher is permanently dead). Auth
+// /config errors — and any UNKNOWN error — still crash loud, unchanged.
+loginWithRetry({
+  login: () => client.login(TOKEN),
+  sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+  log,
+  onTerminal: (err) => {
+    console.error(`[fatal] login failed (terminal): ${err.message}`);
+    process.exit(1);
+  },
 });
