@@ -119,6 +119,36 @@ time-sensitive enough to interrupt individually, surface them as a
   reactive to specific CTO events with their own routing tokens; they
   do not batch with journey-loop directives.
 
+**Sequence next-steps by product dependency only — a product-independent
+set surfaces as a parallelizable batch** (consistent with `CLAUDE.md`
+§*Sequence by product dependency ONLY*). The journey loop does **not**
+drip next-steps one-at-a-time gated on the previous landing. Read
+`journey.md` + the spec for the next steps, then split them by **genuine
+product dependency**: a step waits behind another **only** when its
+product substance depends on that other's outcome. The **product-
+independent** remainder — steps each well-formed without any other having
+finished — surface **together as one batch**, each its **own** single-
+recommendation directive line. On approval each goes to the bus as its
+**own** clean `[<cto-name>] …` directive (per `CLAUDE.md` §*Directives
+carry the directive ONLY*), giving the single CTO a fan-out-able workload
+rather than a queue. This is the same multi-approve presentation above,
+now also carrying the independence semantics: these directives carry **no
+imposed ordering** because the product imposes none.
+
+- **The CPO supplies the workload SHAPE, never the mechanism.** Your
+  contribution is the *product fact* of independence ("these can all
+  proceed"); how the CTO runs them is the CTO's HOW. **LANE GUARD:** you
+  **never** prescribe engineering parallelization — no subagent counts,
+  no worktree structure, no "use parallel subagents," no concurrency
+  mechanism. In-lane: *"A, B, C are independent — all can proceed."*
+  Out-of-lane: *"build them with parallel subagents."* (See `CLAUDE.md`
+  §Lane and `EVALUATION.md` §*Failure modes* — lane-creep.)
+- **Independence is not an excuse to widen the surface.** A parallelizable
+  batch is still gated, still risk-ranked, still one-recommendation-per-
+  line; FRICTION items still break out individually. Batching the
+  independent relaxes only the *imposed ordering*, nothing about the
+  gate or the voice.
+
 **Future relaxation toward narrow auto-dispatch remains a roadmap v2
 item, not foreclosed** (per `0008`). When/if it happens, it gets its own
 decision record amending `0001`'s posture.
