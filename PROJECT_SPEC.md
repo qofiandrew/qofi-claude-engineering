@@ -195,3 +195,28 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   operator full-diff review → compose green → canary reserve-backend-2 →
   `swarm-update`. Per-product CI referee + branch protection + Railway staging is
   a separate operator-run per-repo checklist.
+- `2026-06-14` — frontend|backend **profile axis** added (ADR-0013), an
+  orthogonal selector layered on top of the engineering-cto archetype. New
+  per-repo `.claude/swarm-profile` marker + `swarm_known_profiles` /
+  `swarm_profile_is_known` / `swarm_profile_of` in `swarm-lib.sh` (the resolver
+  defaults to EMPTY, deliberately NOT mirroring `swarm_type_of`'s
+  default-to-a-value, so markerless swarms are untouched). The overlay is
+  injected by `manifest_apply_compose` as the final compose source for
+  `CLAUDE.md` only — the ONE dynamically-sourced compose input; the manifest
+  `CLAUDE.md` line is unchanged (header comment documents it). `--profile` is
+  threaded through `swarm-init` (authoritative validation: engineering-cto-only
+  against the repo's resolved type + refuse-to-switch) and
+  `swarm-add`/`swarm-new` (fail-fast flag check + passthrough). Scope is
+  CLAUDE.md-only: `swarm_launch_brief` / `swarm_required_doctrine` /
+  `swarm_effort_for` are untouched. Value set `{frontend, backend}`: `backend`
+  is **label-only** (today's engineering-cto IS the backend case — no overlay
+  fragment, composes byte-identically to base, proven by test); `frontend`
+  carries the only overlay — a visual-surface boundary (presentational layer
+  only; data/`lib/`/API/business logic off-limits → escalate) and a
+  preview-in-review amendment (the convergence review checks the rendered
+  preview URL, not the diff alone). Additive-only: no existing swarm
+  retro-assigned. New test `test-swarm-profile-dispatch.sh` (CLI contract +
+  real-pipeline byte-identity) and a frontend round-trip in
+  `test-doctrine-compose.sh`; new fixture
+  `CLAUDE.engineering-cto.frontend.expected.md`. Docs: README §6,
+  `_base/README.md`, manifest header.

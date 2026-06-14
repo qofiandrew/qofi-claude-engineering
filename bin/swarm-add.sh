@@ -30,6 +30,12 @@
 #                        (engineering-cto / cpo / company-brain). Default
 #                        is engineering-cto when omitted; no marker is
 #                        written. Threaded to swarm-init.
+#   --profile <name>     engineering-cto-only profile overlay (frontend /
+#                        backend; ADR-0013). Threaded to swarm-init, which
+#                        stamps .claude/swarm-profile and composes a
+#                        stack-specific overlay onto CLAUDE.md. v1 'backend'
+#                        is label-only. Refused with a non-engineering-cto
+#                        --type. Omit for no profile.
 #   --bot-user-id <id>   the new swarm's Discord BOT USER id (== the app's
 #                        Application ID). For engineering-cto swarms this is
 #                        written into cto-watcher/config.json so the CTO
@@ -72,7 +78,7 @@ SCRIPT_DIR_EARLY="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR_EARLY/swarm-lib.sh"
 
 usage() {
-  sed -n '1,44p' "$0"
+  sed -n '1,50p' "$0"
   exit "${1:-0}"
 }
 
@@ -87,6 +93,7 @@ CHANNEL=""
 ROTATE_TOKEN=0
 SKIP_WALKTHROUGH=0
 TYPE=""
+PROFILE=""
 BOT_USER_ID=""
 POS_COUNT=0
 
@@ -99,6 +106,11 @@ while [ $# -gt 0 ]; do
       TYPE="$2"; shift 2 ;;
     --type=*)
       TYPE="${1#--type=}"; shift ;;
+    --profile)
+      [ $# -ge 2 ] || { echo "swarm-add: --profile requires a value" >&2; usage 1; }
+      PROFILE="$2"; shift 2 ;;
+    --profile=*)
+      PROFILE="${1#--profile=}"; shift ;;
     --bot-user-id)
       [ $# -ge 2 ] || { echo "swarm-add: --bot-user-id requires a value" >&2; usage 1; }
       BOT_USER_ID="$2"; shift 2 ;;
@@ -127,6 +139,26 @@ if [ -n "$TYPE" ]; then
       echo "swarm-add: unknown --type '$TYPE'"
       echo "  known types:"
       swarm_known_types | sed 's/^/    /'
+    } >&2
+    exit 1
+  fi
+fi
+
+# Fail-fast flag-level --profile check (ADR-0013). The AUTHORITATIVE refusal
+# (incl. an already-stamped repo of another type) lives in swarm-init, which
+# this script invokes in phase 4c; this catches the obvious cases early,
+# before the Discord walkthrough, so the operator isn't sent through the
+# portal only to be refused at stamp time.
+if [ -n "$PROFILE" ]; then
+  if [ "${TYPE:-engineering-cto}" != "engineering-cto" ]; then
+    echo "swarm-add: --profile is only valid for engineering-cto swarms (got --type '$TYPE')" >&2
+    exit 1
+  fi
+  if ! swarm_profile_is_known "$PROFILE"; then
+    {
+      echo "swarm-add: unknown --profile '$PROFILE'"
+      echo "  known profiles:"
+      swarm_known_profiles | sed 's/^/    /'
     } >&2
     exit 1
   fi
@@ -224,6 +256,7 @@ phase "Phase 0 — preflight"
 echo "  name:      $NAME"
 echo "  repo:      $REPO"
 echo "  type:      $EFFECTIVE_TYPE"
+[ -n "$PROFILE" ] && echo "  profile:   $PROFILE"
 echo "  channel:   ${CHANNEL:-(will prompt in phase 2)}"
 echo "  token var: \$$TOK_VAR (in $TOKENS)"
 if [ "$EFFECTIVE_TYPE" = "engineering-cto" ]; then
@@ -574,14 +607,14 @@ SCRIPT_DIR="$SCRIPT_DIR_EARLY"
 echo ""
 echo "  running swarm-init.sh against $REPO"
 echo "  ----------------------------------------------------------------"
-# Thread --type through to swarm-init so .claude/swarm-type gets stamped
-# before manifest_apply resolves the archetype. When TYPE is empty the
-# bare form preserves engineering-cto-default behavior.
-if [ -n "$TYPE" ]; then
-  "$SCRIPT_DIR/swarm-init.sh" "$REPO" --type "$TYPE" | sed 's/^/    /'
-else
-  "$SCRIPT_DIR/swarm-init.sh" "$REPO" | sed 's/^/    /'
-fi
+# Thread --type and --profile through to swarm-init so .claude/swarm-type and
+# .claude/swarm-profile get stamped before manifest_apply resolves the
+# archetype + profile. Build the arg list dynamically so the bare form (no
+# flags) preserves engineering-cto-default, no-profile behavior.
+INIT_ARGS=("$REPO")
+[ -n "$TYPE" ]    && INIT_ARGS+=(--type "$TYPE")
+[ -n "$PROFILE" ] && INIT_ARGS+=(--profile "$PROFILE")
+"$SCRIPT_DIR/swarm-init.sh" "${INIT_ARGS[@]}" | sed 's/^/    /'
 INIT_RC=${PIPESTATUS[0]}
 echo "  ----------------------------------------------------------------"
 if [ "$INIT_RC" -ne 0 ]; then
@@ -856,6 +889,7 @@ cat <<EOF
 
   Swarm '$NAME' registered.
     repo:    $REPO
+    type:    $EFFECTIVE_TYPE${PROFILE:+  (profile: $PROFILE)}
     channel: $CHANNEL
     bot:     \$$TOK_VAR  (token in $TOKENS, chmod 600, gitignored)
     access:  $ACCESS  (group $CHANNEL -> owner $OWNER_ID, mention-gated)

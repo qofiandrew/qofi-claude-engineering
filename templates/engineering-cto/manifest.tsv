@@ -7,6 +7,17 @@
 # archetype from its .claude/swarm-type marker (default 'engineering-cto')
 # and the manifest at templates/<type>/manifest.tsv is consumed.
 #
+# Per-profile overlay (engineering-cto only, ADR-0013): an ORTHOGONAL
+# .claude/swarm-profile marker (frontend|backend) appends a stack-specific
+# overlay to the COMPOSED CLAUDE.md target ONLY. The overlay
+# (templates/engineering-cto/profiles/<profile>/CLAUDE.md) is injected by
+# manifest_apply_compose in swarm-lib.sh as the FINAL compose source when the
+# fragment exists. This is the ONE dynamically-sourced compose input and is
+# deliberately NOT declared on the CLAUDE.md line below (which stays
+# profile-agnostic). An absent marker, or a label-only profile with no overlay
+# fragment (v1 'backend' — today's engineering-cto already IS the backend
+# case), appends nothing and composes byte-identically to a pre-profile swarm.
+#
 # Format: behavior | template-path | target-path [| covers]
 #   - lines starting with '#' and blank lines are ignored
 #   - fields are pipe-delimited, leading/trailing whitespace per field is trimmed
