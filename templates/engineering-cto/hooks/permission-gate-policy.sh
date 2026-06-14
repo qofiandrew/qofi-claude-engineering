@@ -7,9 +7,21 @@
 # ---------------------------------------------------------------------------
 case "$TOOL" in
   Bash)
-    # Archetype-specific HARD FLOOR — deny git push, npm publish, deploy/prod
-    # commands. The CTO commits locally; pushing main is operator-only.
-    printf '%s' "$CMD" | grep -Eq 'git[[:space:]]+push'                                                 && deny "git push"
+    # Git-push policy — routine push to a feature/worktree/topic branch and
+    # non-force push to `dev` (staging) are auto-allowed; push to main/master,
+    # any force-push, and broad/destructive push are denied; anything ambiguous
+    # defers to a human. Resolved by the shared _git_push_class in the prelude
+    # (deny-biased, never fail-open). Pushing `main` stays operator-only — the
+    # real floor is GitHub branch protection. See ESCALATION.md / ADR-0012.
+    if printf '%s' "$CMD" | grep -Eq '(^|[^[:alnum:]_])git[[:space:]]+push([[:space:]]|$)'; then
+      _pc="$(_git_push_class "$CMD" "$CWD")"
+      case "$_pc" in
+        allow)  allow ;;
+        deny:*) deny "${_pc#deny:}" ;;
+        *)      defer ;;
+      esac
+    fi
+    # Archetype-specific HARD FLOOR — npm publish, deploy/prod commands.
     printf '%s' "$CMD" | grep -Eqi '(npm[[:space:]]+publish|yarn[[:space:]]+publish|deploy|--prod|production)' && deny "publish/deploy/prod"
 
     # Plain git ops (read-only + add/commit/stash + checkout/switch). Note:

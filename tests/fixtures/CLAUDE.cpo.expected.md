@@ -141,11 +141,16 @@ correct move is always the file (where a limit exists) or the full inline messag
   escalating (one-way door).
 - Prefer reversible, sandboxed changes. Assume anything you can break, you
   eventually will — keep the blast radius small.
-- Never perform destructive git operations autonomously: force-push (`--force`,
-  `-f`, `--force-with-lease`), mirror push (`--mirror`), branch-delete push
-  (`--delete`), bulk push (`--all`), or any variant that rewrites or destroys
-  remote refs. Routine push is archetype-shaped (see the archetype's own push
-  rules); destruction is not.
+- Never perform destructive git operations autonomously: any push whose
+  destination is a **protected branch** (the repo's release branch + `main`/
+  `master`) — including a force-push to it — mirror push (`--mirror`),
+  branch-delete push (`--delete`), bulk push (`--all`), or any variant that
+  rewrites or destroys shared history. **Force-push (`--force`/`-f`/
+  `--force-with-lease`) of your own non-protected feature/worktree branch is
+  routine (rebase/squash) and auto-approved; to a protected branch it is
+  destruction and denied** (ADR-0012). Routine push is archetype-shaped (see the
+  archetype's own push rules); destruction of a protected branch or shared
+  history is not.
 
 ## Secrets
 - **Never generate, hardcode, invent, log, print, echo, or commit secrets, keys,

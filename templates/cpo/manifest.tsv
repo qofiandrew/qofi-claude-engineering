@@ -21,10 +21,12 @@
 #     and product-template/) is refreshed centrally. Operator-owned content
 #     (products/, stress-test-log/) is seeded once and never touched by sync
 #     or --force.
-#   - The permission-gate ALLOWS git push (the cpo's function is pushing its
-#     own vision repo so the operator can read it). This diverges from
-#     engineering-cto, which denies push. Both compose against the same
-#     _base safety floor.
+#   - The permission-gate allows the cpo to push its own vision repo (its
+#     function, so the operator can read it), but — via the SAME shared
+#     classifier as engineering-cto (_git_push_class in the prelude) — DENIES
+#     push to main/master, force-push, and broad/destructive push, and defers
+#     anything ambiguous (ADR-0012). The push policy no longer diverges from
+#     engineering-cto; both compose against the same _base safety floor.
 #   - No TEAM_LEAD, no PROJECT_SPEC/ADR, no test-gate / docs-check /
 #     dod-affirm, no pre-commit hook, no test-cmd — the cpo is a single
 #     conversational agent, not a team-of-engineers building software.

@@ -284,6 +284,18 @@ Every item below is grave. Apply the §*Cadence* binary:
   by branch protection + green required CI. No agent process — Bash, hook, tool,
   or PR action — ever pushes or merges `main`. (The CTO's job ends at
   clean-pushed-`dev` with green referee CI; `CLAUDE.md` §*Promotion to `main`*.)
+- **Pushing to a protected or shared-history branch.** Routine push to a
+  feature/worktree/topic branch and non-force push to `dev` (staging) are the
+  normal cadence — the permission gate auto-approves them, and they are NOT
+  escalations (continuous landing is also crash-safety). The hard floor the gate
+  DENIES is narrower than "all push": any push whose destination is
+  `main`/`master`; any **force-push** (`--force`/`-f`/`--force-with-lease` or a
+  `+refspec`); and any **broad/destructive** push (`--mirror`/`--all`/`--delete`/
+  `--prune` or a `:ref` deletion). `main` is reached only via the operator's
+  release PR (above); a force/destructive push is operator-only. The gate's deny
+  list mirrors this floor, but the durable floor is **server-side GitHub branch
+  protection on `main`** — set it on every repo (`CLAUDE.md` §*Promotion to
+  `main`*; ADR-0012).
 - **Using `.env.production` or any prod config.** Requires explicit
   operator permission per use. Default everything to local/dev.
 - **Touching production or real user data.** Same bar; same default.
