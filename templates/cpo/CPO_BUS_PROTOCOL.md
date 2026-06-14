@@ -59,10 +59,14 @@ STATE: <cto-name> STOOD_DOWN
   watcher acts as if no transition happened.
 - **Declare before acting** (HARD LAW): emit the STATE line BEFORE changing what
   you do on that loop. A message may carry several STATE lines (one per CTO).
-- **Heartbeat = re-emit current state.** To answer a revival ping without a
-  directive or transition, emit `STATE: <cto-name> <its-current-state>` (e.g.
-  `STATE: cto-7 DRIVING`). True, resets that loop's clock, changes nothing. There
-  is **no** freeform "still working" — the watcher can't read prose.
+- **Heartbeat = re-emit current state — NOT a revival-ping answer.** A bare
+  `STATE: <cto-name> <its-current-state>` re-emit (e.g. `STATE: cto-7 DRIVING`) is
+  true, resets that loop's clock, and changes nothing — valid only while you are
+  **actively driving** that loop (maintaining a state you already evaluated), never
+  as the answer to a revival ping. A heartbeat is emitted **because** you're
+  driving, not **instead** of driving. On a ping see §*Liveness* below: the answer
+  is a driving action or a real transition, never a bare re-emit. There is **no**
+  freeform "still working" — the watcher can't read prose.
 
 ## Reading what a CTO says back
 
@@ -91,8 +95,11 @@ Treat any bus message prefixed `[<name>]` from the relay (AUTO) or the operator
 
 If a DRIVING loop's bus traffic goes quiet past the watcher's threshold, the
 watcher posts a revival ping on the bus (@mentioning you, naming the CTO). Answer
-with the STATE grammar: a heartbeat (`STATE: <name> DRIVING`), a real transition,
-or resolve per the revival-loop guard. It never pings WAITING_FOR_OPERATOR or
+by **resolving the loop per the revival-loop guard**: re-read that CTO's next
+drivable step and either issue the next directive (a real driving action) or make a
+real transition to WAITING_FOR_OPERATOR. A bare heartbeat re-emit
+(`STATE: <name> DRIVING` unchanged) is **NOT** a valid ping answer — that is the
+"silent-DRIVING" the guard forbids. It never pings WAITING_FOR_OPERATOR or
 STOOD_DOWN loops. **You never wait on the ping** — a DRIVING loop with nothing to
 push self-resolves to WAITING_FOR_OPERATOR and surfaces to the operator (see
 `CLAUDE.md` §"The liveness guarantee is YOUR discipline").
