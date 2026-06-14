@@ -13,8 +13,9 @@
 #       anchor here; the subtree-wide protection of files like
 #       products/<slug>/vision.md is proven by test-operator-owned-protection.sh.
 #   (c) The composed cpo permission-gate.sh shares the engineering-cto git-push
-#       policy (ADR-0012): routine branch push allowed, push to main/master +
-#       force + destructive denied. The cpo's distinguishing capability is that
+#       policy (ADR-0012): routine branch push (incl. force-push of a feature
+#       branch) allowed; push/force to a protected branch + broad-destructive
+#       denied. The cpo's distinguishing capability is that
 #       branch push to its vision repo is its function; the shared floor (no
 #       push to main, was a cpo bug) is pinned so it can't silently regress.
 #       Full matrix lives in test-permission-gate-push-policy.sh.
@@ -179,8 +180,8 @@ REPO=""
 # ---------------------------------------------------------------------------
 echo ""
 echo "==> (c) cpo + engineering-cto share the git-push policy (ADR-0012): branch"
-echo "       push allowed, push to main + force + destructive denied. Both paths"
-echo "       exercise the composed hook directly via its stdin protocol."
+echo "       push (incl feature force-push) allowed; push/force to protected +"
+echo "       destructive denied. Both exercise the composed hook via stdin."
 
 # Build a tiny PermissionRequest event for "git push" and feed it through
 # each archetype's composed permission-gate.
@@ -219,12 +220,19 @@ else
   fail "cpo permission-gate did NOT deny 'git push origin main' (got: $OUT)"
 fi
 
-# Cpo: `git push --force` → DENY (force-push, any target).
+# Cpo: force-push to a NON-protected branch → ALLOW (ADR-0012 amendment: routine
+# rebase/squash); force-push to a protected branch → DENY.
 OUT="$(make_event "git push --force origin feature" | bash "$CPO_HOOK" 2>/dev/null)"
-if printf '%s' "$OUT" | grep -q '"behavior":"deny"'; then
-  pass "cpo permission-gate DENIES force 'git push --force'"
+if printf '%s' "$OUT" | grep -q '"behavior":"allow"'; then
+  pass "cpo permission-gate ALLOWS force-push to a feature branch"
 else
-  fail "cpo permission-gate did NOT deny 'git push --force' (got: $OUT)"
+  fail "cpo permission-gate did NOT allow force 'git push --force origin feature' (got: $OUT)"
+fi
+OUT="$(make_event "git push --force origin main" | bash "$CPO_HOOK" 2>/dev/null)"
+if printf '%s' "$OUT" | grep -q '"behavior":"deny"'; then
+  pass "cpo permission-gate DENIES force-push to main"
+else
+  fail "cpo permission-gate did NOT deny 'git push --force origin main' (got: $OUT)"
 fi
 
 # Engineering-cto: `git push origin feature` → ALLOW (routine branch push, ADR-0012).

@@ -135,6 +135,12 @@ PY
 # GIT-PUSH CLASSIFIER — resolve a `git push` invocation to allow|deny|defer.
 # Called by the archetype policy fragment for any command containing `git push`.
 #
+# POLICY: DENY any push (force or not) whose destination is a PROTECTED branch;
+# ALLOW non-force push AND force-push (rebase/squash) to non-protected branches;
+# DENY broad/destructive push (--mirror/--all/--delete/--prune/wildcard/ref-delete);
+# DEFER anything not statically provable. The protected set is repo-aware (see
+# protected_set(): {main,master} ∪ the repo's release branch, fail-safe +dev).
+#
 # SECURITY-PARSER DISCIPLINE (why this is regex-gated, not a full shell parse):
 # an analyzer that tokenizes differently from bash is a fail-open hole — glued
 # operators (`x;git push`), ANSI-C quoting (`$'main'` -> bash `main`, shlex
@@ -145,17 +151,57 @@ PY
 # argv, making the precise classification below sound. EVERY other command
 # (operators, quotes, $/backtick, *, leading non-git, -C/--git-dir redirect, ...)
 # is "complex": NEVER allowed — only a conservative deny (on a protected-branch or
-# force/destructive signal) or defer. The durable floor is server-side GitHub
-# branch protection on `main`; this gate is fast-fail convenience.
-# Prints exactly one token: "allow" | "deny:<reason>" | "defer".
+# broad-destructive signal) or defer (incl. an unresolved force target). The
+# durable floor is server-side GitHub branch protection; this gate is fast-fail
+# convenience. Prints exactly one token: "allow" | "deny:<reason>" | "defer".
 # ---------------------------------------------------------------------------
 _git_push_class() {
   python3 - "$1" "${2:-}" <<'PY' 2>/dev/null || printf 'defer'
-import sys, re, subprocess
+import sys, os, re, subprocess
 
 cmd = sys.argv[1] if len(sys.argv) > 1 else ""
 cwd = sys.argv[2] if len(sys.argv) > 2 else ""
-PROTECTED = ("main", "master")          # default/release branches — gate-protected
+
+def protected_set():
+    # Repo-aware protected branches = {main, master} ∪ the repo's release branch.
+    # main/master are ALWAYS protected. The release branch is resolved from, in
+    # order: (1) an explicit override — env SWARM_PROTECTED_BRANCHES or the file
+    # .claude/protected-branches (a list; main/master kept regardless); (2) the
+    # repo's default branch via origin/HEAD; (3) FAIL-SAFE — when neither resolves
+    # we protect MORE by adding `dev`, never less. This is the single knob the
+    # operator flips per repo (e.g. to mark a repo's `dev` staging-and-pushable,
+    # write its real release branch(es) to .claude/protected-branches).
+    prot = set(["main", "master"])
+    raw = os.environ.get("SWARM_PROTECTED_BRANCHES")
+    if raw is None and cwd:
+        try:
+            with open(os.path.join(cwd, ".claude", "protected-branches"), encoding="utf-8") as fh:
+                raw = fh.read()
+        except Exception:
+            raw = None
+    if raw is not None:                          # explicit override present
+        for line in raw.splitlines():
+            for tok in line.split("#", 1)[0].split():
+                prot.add(tok.lower())
+        return frozenset(prot)
+    if cwd:                                       # dynamic: repo default (release) branch
+        try:
+            r = subprocess.run(["git", "-C", cwd, "symbolic-ref", "--short",
+                                "refs/remotes/origin/HEAD"],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+            if r.returncode == 0:
+                d = r.stdout.decode("utf-8", "replace").strip()
+                if d.startswith("origin/"):
+                    d = d[len("origin/"):]
+                if d:
+                    prot.add(d.lower())
+                    return frozenset(prot)
+        except Exception:
+            pass
+    prot.add("dev")                               # fail-safe: protect more, never less
+    return frozenset(prot)
+
+PROTECTED = protected_set()
 
 def out(s):
     sys.stdout.write(s)
@@ -254,23 +300,87 @@ def classify_clean(args):
                 return ("defer", "")
         if d.lower() in PROTECTED:           # case-insensitive: macOS folds Main->main
             return ("deny", "push to protected branch %s" % d)
-    if force:
-        return ("deny", "force-push (destructive, never autonomous)")
+    # Force-push is ALLOWED to a non-protected branch (routine rebase/squash of a
+    # feature/worktree branch). A force-push to a protected branch was already
+    # denied by the dst check above; an unresolvable force target defers below.
+    # (`force` is parsed so the flags are recognized, but no longer auto-denies.)
     if not refspecs:                        # bare `git push` / `git push <remote>`
         cur = current_branch()
         if cur is None:
             return ("defer", "")
         if cur.lower() in PROTECTED:
             return ("deny", "push to protected branch %s" % cur)
-        try:                                # push.default=matching can push extra refs
-            pd = subprocess.run(["git", "-C", cwd, "config", "--get", "push.default"],
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
-            if pd.returncode == 0 and pd.stdout.decode("utf-8", "replace").strip() == "matching":
+        # (remote.<r>.push / remote.<r>.mirror redirects are handled before the
+        # strict-allow gate, so by here no push-refspec config is in play.)
+        # The DESTINATION of a bare push depends on push.default — the current
+        # branch NAME is the real dst only for current/simple. With
+        # `upstream`/`tracking` the dst is branch.<cur>.merge, which can be a
+        # PROTECTED branch even when the current branch is not (so a bare push
+        # writes the protected branch); `matching` can push many refs. Resolve the
+        # real dst and defer on anything unresolved.
+        def _cfg(key):
+            try:
+                r = subprocess.run(["git", "-C", cwd, "config", "--get", key],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+            except Exception:
+                return None                 # subprocess failure -> caller defers
+            return r.stdout.decode("utf-8", "replace").strip() if r.returncode == 0 else ""
+        pd = _cfg("push.default")
+        if pd is None:
+            return ("defer", "")
+        pd = pd or "simple"                 # git's default since 2.0
+        if pd == "matching":
+            return ("defer", "")            # can push multiple refs incl protected
+        if pd in ("upstream", "tracking"):
+            up = _cfg("branch.%s.merge" % cur)
+            if not up:                      # None (error) or unset upstream -> human
                 return ("defer", "")
-        except Exception:
-            pass
-        return ("allow", "")
+            if norm(up).lower() in PROTECTED:
+                return ("deny", "bare push targets protected upstream %s (push.default=%s)"
+                        % (norm(up), pd))
+            return ("allow", "")
+        if pd in ("current", "simple", "nothing"):
+            # current: dst = current branch (already checked non-protected).
+            # simple: dst = current branch's SAME-NAME upstream; git refuses on a
+            #   name mismatch, so the only ref it writes is `cur` (non-protected).
+            # nothing: a bare push needs an explicit refspec -> git errors, no write.
+            return ("allow", "")
+        return ("defer", "")                # unknown push.default -> human
     return ("allow", "")
+
+# DESTINATION-REDIRECTING CONFIG — these ignore the command-line dst and redirect
+# the push to a ref the command doesn't name, so they affect EXPLICIT-refspec pushes
+# too and must be checked BEFORE the strict-allow gate:
+#   remote.<r>.mirror=true   mirror-pushes ALL refs (incl protected) on any push to
+#                            that remote — the config form of `--mirror`         -> DENY
+#   remote.<r>.push=SRC:DST  redirects even `git push origin <ref>` to DST when SRC
+#                            matches (DST can be a protected branch)             -> DEFER
+# A subprocess failure to read config -> defer (never auto-allow).
+def _cfg_regexp(pat):
+    if not cwd:
+        return []                           # no repo context -> no such config in play
+    try:
+        r = subprocess.run(["git", "-C", cwd, "config", "--get-regexp", pat],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+    except Exception:
+        return None                         # couldn't run git at all -> can't verify
+    if r.returncode != 0:                   # no match (1) / not a git repo (128)
+        return []
+    return [ln for ln in r.stdout.decode("utf-8", "replace").splitlines() if ln.strip()]
+
+_mlines = _cfg_regexp(r"^remote\..*\.mirror$")
+if _mlines is None:
+    out("defer")
+for _ln in _mlines:
+    _parts = _ln.split(None, 1)
+    _val = _parts[1].strip().lower() if len(_parts) > 1 else "true"
+    if _val not in ("false", "no", "off", "0"):
+        out("deny:remote mirror push (remote.*.mirror) writes all refs incl protected")
+_plines = _cfg_regexp(r"^remote\..*\.push$")
+if _plines is None:
+    out("defer")
+if _plines:
+    out("defer")                            # a configured push refspec can redirect -> human
 
 # STRICT ALLOW gate: `git push` + only safe refspec/option tokens, nothing else.
 # This charset contains no shell metacharacter / quote / expansion, so the command
@@ -289,13 +399,17 @@ if STRICT.match(cmd):
 # force/destructive signal anywhere in the raw string; otherwise DEFER. Deny-biased:
 # false positives here only affect unusual compound/expanded pushes (-> escalate).
 low = cmd.lower()
-if re.search(r"(^|[^a-z0-9_./-])(main|master)([^a-z0-9_./-]|$)", low):
+_prot_alt = "|".join(re.escape(b) for b in sorted(PROTECTED))
+if re.search(r"(^|[^a-z0-9_./-])(" + _prot_alt + r")([^a-z0-9_./-]|$)", low):
     out("deny:push to a protected branch (complex command)")
-if (re.search(r"(^|[^A-Za-z0-9])(-f|--force|--force-with-lease|--force-if-includes|--mirror|--all|--delete|-d|--prune)([^A-Za-z0-9]|$)", cmd)
-        or re.search(r"[^A-Za-z0-9]\+[A-Za-z0-9._/]", cmd)
+# Broadly destructive — target-independent, always deny.
+if (re.search(r"(^|[^A-Za-z0-9])(--mirror|--all|--delete|-d|--prune)([^A-Za-z0-9]|$)", cmd)
         or re.search(r"[^A-Za-z0-9.]:[A-Za-z0-9._/]", cmd)
         or "*" in cmd):
-    out("deny:force/destructive push (complex command)")
+    out("deny:broad/destructive push (complex command)")
+# Everything else — incl. a pure force-push (--force/-f/+ref) whose target we can't
+# resolve in a complex command — DEFERS: force is allowed to non-protected branches,
+# so an unresolved force target goes to a human, never auto-allow and never auto-deny.
 out("defer")
 PY
 }

@@ -48,12 +48,12 @@ Classifier verdicts (`allow` | `deny:<reason>` | `defer`):
    protected branch. `master` is protected alongside `main` as the default/release
    branch (a deny-biased default; trivially narrowed to `main`-only).
 
-2. **DENY — force-push (any target).** `--force`, `-f` (incl. clusters like
-   `-fu`), `--force-with-lease`, `--force-if-includes`, or a `+refspec`. This is
-   stricter than the operator's literal "force to `dev`/`main`," chosen to stay
-   consistent with `_base/CLAUDE.md` §*Cost & blast radius* ("never force-push
-   autonomously") and the prior cpo behavior — **no regression**. (Open knob: if
-   force-push to a topic/worktree branch should auto-approve, relax this one rule.)
+2. **DENY — force-push.** `--force`, `-f` (incl. clusters like `-fu`),
+   `--force-with-lease`, `--force-if-includes`, or a `+refspec`. **[SUPERSEDED by
+   the 2026-06-14 amendment below: force-push is now denied only to a *protected*
+   branch and allowed to a non-protected feature/worktree branch; an unresolved
+   force target defers.]** Also note: the protected set is repo-aware per the
+   amendment, not just `main`/`master`.
 
 3. **DENY — broad/destructive.** `--mirror`, `--all`, `--delete`/`-d`, `--prune`,
    and `:ref` deletions — they touch many/other refs (incl. protected) or destroy
@@ -159,3 +159,100 @@ targets — are each a one-line change.
   regex; a tokenizing, deny-biased classifier with explicit defer is the floor.
 - **Trust the local gate as the control** — rejected: a local hook is bypassable;
   server-side branch protection is the real floor, the gate is convenience.
+
+---
+
+## Amendment — 2026-06-14 (force relaxation, repo-aware protected, live gate)
+
+Operator follow-up after the initial merge-pending review. Four refinements; the
+strict-allow architecture and the 3-round adversarial soundness are unchanged.
+
+1. **Force-push relaxed to protected-only.** Force-push (`--force`/`-f`/
+   `--force-with-lease`/leading `+`) is no longer denied universally — it is
+   **allowed to a non-protected branch** (routine rebase/squash of a feature/
+   worktree branch) and **denied to a protected branch**. The deny-bias holds: a
+   force-push whose target can't be statically resolved (a complex command, a bare
+   force-push on a detached HEAD, `push.default=matching`) **defers**, never
+   allows. In the complex-command path, pure force (no protected name, no broad-
+   destructive flag) now defers rather than denies.
+
+2. **Protected set is repo-aware** (`protected_set()`): `{main, master}` ∪ the
+   repo's **release branch**, resolved in order — (a) explicit override: env
+   `SWARM_PROTECTED_BRANCHES` or the file `.claude/protected-branches` (a list;
+   `main`/`master` always kept); (b) the repo's default branch via
+   `git symbolic-ref refs/remotes/origin/HEAD`; (c) **fail-safe**: when neither
+   resolves, protect *more* by adding `dev` — never less. This fixes the hardcoded
+   main/dev assumption: `dev` is pushable where it is staging (release branch =
+   main) and protected where it is the release branch.
+   - **`qofi-ios-app`** (default branch `dev`): with no override its release
+     branch resolves to `dev`, so `dev` is **protected** (push denied) — the
+     deny-safe default until the operator confirms dev's role. The one-edit knob
+     to flip it: write the real release branch(es) to `.claude/protected-branches`
+     (e.g. `main`), which drops `dev` from the protected set.
+
+3. **Live source-repo gate surgically refreshed.** The earlier note said the live
+   `.claude/hooks/permission-gate.sh` was left stale to avoid ~700 lines of
+   doctrine drift. Correction to the operator's premise: the live gate did **not**
+   carry the smuggle hole for hard-floor actions — its `git push`/publish/secrets
+   denies live in the *hard floor* (whole-command substring grep) which runs
+   *before* the util-allow, so `echo x && git push origin main` was already
+   **denied** there. The util-fast-path hole was narrower (it auto-allowed
+   compounds whose dangerous part is *not* a hard-floor item, e.g.
+   `echo x && rm file`). Still surgically applied to the live gate (no doctrine
+   regen): the strict-allow `_git_push_class` (replacing the blanket push deny, in
+   the hard floor), the metacharacter-hardened util fast-path, and the
+   newline→`;` field-parser fix. The live gate now runs the same relaxed-but-safe
+   push policy for this repo's manual sessions. It still lacks the composed gate's
+   repo-scope confinement (a separate, pre-existing gap, intentionally out of
+   scope here).
+
+4. **Doctrine reconciled.** `_base/CLAUDE.md` §*Cost & blast radius* previously said
+   force-push is *never* autonomous; it is now scoped to match the gate (force-push
+   of a non-protected branch is routine; to a protected branch it is destruction).
+   This is a conscious operator-approved doctrine change, logged here.
+
+### Round-4 adversarial finding (bare-push destination resolution)
+
+A 4th red-team round on the force/repo-aware delta found one **HIGH** fail-open the
+earlier rounds missed (the deep verdict synthesis caught it; the finder lenses did
+not): a **bare** `git push --force` with `push.default=upstream` and
+`branch.<cur>.merge=refs/heads/main` force-pushes the current feature branch *onto*
+`main` — git's own `--dry-run --porcelain` resolves it to
+`refs/heads/feature:refs/heads/main` — yet the classifier allowed it, because the
+bare-push branch checked only the *current branch name* and special-cased only
+`push.default=matching`.
+
+Fixed by resolving the **real** destination of a bare push from git config:
+`current`/`simple` → current branch (simple refuses on a name mismatch, so it can
+only write the same-name ref); `upstream`/`tracking` → `branch.<cur>.merge` (denied
+if protected); `matching` → defer; unknown → defer. The sibling vector — a
+configured push refspec `remote.<remote>.push` redirecting a bare push — is also
+closed (any configured push refspec → defer). Explicit-refspec pushes are
+unaffected (an explicit refspec overrides config). Pinned by
+`tests/test-permission-gate-push-policy.sh` across `push.default` modes and the
+`remote.push` config, on both the composed and live gates. This reinforces the
+core lesson: the gate must resolve git's *actual* destination, not the apparent one.
+
+### Round-5 adversarial finding (mirror-config bare/explicit push)
+
+A 5th round on the bare-push destination class found another **HIGH** fail-open —
+ground-truthed with a *real* (non-dry-run) push that overwrote `main` on a remote.
+`remote.<remote>.mirror=true` makes **any** push to that remote behave as
+`--mirror` — it writes *all* refs (overwriting protected `main`) and ignores
+refspecs and `push.default` entirely. The decisive asymmetry: the `--mirror`
+**flag** was already denied, but the equivalent **config** was never checked, so a
+plain `git push` (or `git push origin feature`) slipped through to `allow`.
+
+Fixed by checking `remote.*.mirror` at the **top** of the classifier (before the
+strict-allow gate, since mirror overrides explicit refspecs too): any truthy
+`remote.<r>.mirror` → **deny** (matching the `--mirror` flag). A subprocess failure
+defers; a non-git-repo / no-config returns "not mirrored" so normal pushes are
+unaffected. Pinned for bare, force, and explicit-refspec pushes on both gates.
+
+**Process note.** Rounds 4 and 5 each found a real config-redirect bug that the
+finder lenses *and* the author missed — only the verdict synthesis (which
+ground-truths every ALLOW against `git push --dry-run --porcelain`) caught them.
+The lesson generalized: for a bare push the gate must resolve git's *actual*
+destination (push.default → branch.merge; remote.push; remote.mirror), not the
+apparent current branch. The durable floor remains server-side branch protection —
+these are defense-in-depth against an adversarial/unusual local git config.
