@@ -335,19 +335,23 @@ launch_one() {  # name repo tokvar [channel]
     echo "  WARN: main input didn't render in 20s — brief may not land" >&2
   fi
 
-  # Force ultracode (xhigh effort + automatic workflow orchestration) for this
-  # session, BEFORE the brief so the first substantive task runs under it.
-  # ultracode is SESSION-ONLY — it can't live in settings.json, has no env var,
-  # and is rejected by --effort/CLAUDE_CODE_EFFORT_LEVEL — so it must be re-sent
-  # on every launch. Sent here as the documented user-facing /effort command
-  # rather than a launch-time `--settings '{"ultracode":true}'` flag: both work
-  # and both are session-only, but the in-session command avoids JSON-escaping
-  # nested inside this tmux/shell send-keys string and leaves a visible record
-  # in the pane scrollback. (Note: the "auto mode" readiness marker above is the
-  # permission/edit mode, independent of effort, so the launch-flag form would
-  # NOT have broken that gate — the choice here is escaping + transparency, not
-  # readiness.) Send text and Enter as separate calls (same idiom as the brief).
-  tmux send-keys -t "$sess" "/effort ultracode"
+  # Set the per-archetype effort level for this session, BEFORE the brief so the
+  # first substantive task runs under it. Effort is SESSION-ONLY — ultracode
+  # can't live in settings.json, has no env var, and is rejected by
+  # --effort/CLAUDE_CODE_EFFORT_LEVEL — so it must be re-sent on every launch.
+  # Sent here as the documented user-facing /effort command rather than a
+  # launch-time `--settings` flag: both work and both are session-only, but the
+  # in-session command avoids JSON-escaping nested inside this tmux/shell
+  # send-keys string and leaves a visible record in the pane scrollback. (Note:
+  # the "auto mode" readiness marker above is the permission/edit mode,
+  # independent of effort, so the launch-flag form would NOT have broken that
+  # gate.) The level is per-archetype (swarm_effort_for in swarm-lib.sh): the CPO
+  # swarm launches at /effort low; every CTO swarm (and any unknown/future type)
+  # stays on ultracode. Resolve the archetype ONCE here and reuse it for the
+  # brief below. Send text and Enter as separate calls (same idiom as the brief).
+  local repo_type
+  repo_type="$(swarm_type_of "$repo")"
+  tmux send-keys -t "$sess" "$(swarm_effort_for "$repo_type")"
   sleep 1
   tmux send-keys -t "$sess" Enter
 
@@ -358,9 +362,8 @@ launch_one() {  # name repo tokvar [channel]
   # engineering-cto and cpo have fundamentally different roles, so each
   # gets the orientation that matches its doctrine. Unknown markers fall
   # back to the engineering brief (a known-good orientation).
-  local brief_type brief
-  brief_type="$(swarm_type_of "$repo")"
-  brief="$(swarm_launch_brief "$brief_type")"
+  local brief
+  brief="$(swarm_launch_brief "$repo_type")"
   tmux send-keys -t "$sess" "$brief"
   sleep 1
   tmux send-keys -t "$sess" Enter
