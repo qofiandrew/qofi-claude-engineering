@@ -12,10 +12,12 @@
 #       survive swarm-init --force byte-unchanged. Verified at the .keep
 #       anchor here; the subtree-wide protection of files like
 #       products/<slug>/vision.md is proven by test-operator-owned-protection.sh.
-#   (c) The composed cpo permission-gate.sh DIVERGES from engineering-cto's
-#       on `git push` (cpo allows; engineering denies). This is the cpo's
-#       distinguishing capability — it gets its own test so the divergence
-#       can't silently regress.
+#   (c) The composed cpo permission-gate.sh shares the engineering-cto git-push
+#       policy (ADR-0012): routine branch push allowed, push to main/master +
+#       force + destructive denied. The cpo's distinguishing capability is that
+#       branch push to its vision repo is its function; the shared floor (no
+#       push to main, was a cpo bug) is pinned so it can't silently regress.
+#       Full matrix lives in test-permission-gate-push-policy.sh.
 #   (d) The composed cpo hook still upholds the universal safety floor
 #       (rm -rf, sudo, pipe-to-shell, secrets) — the extraction must not
 #       have dropped any floor patterns.
@@ -176,9 +178,9 @@ REPO=""
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "==> (c) cpo permission-gate ALLOWS git push (vision-repo push is its function);"
-echo "       engineering-cto denies it (operator-only). Both paths exercise the"
-echo "       composed hook directly via its stdin protocol."
+echo "==> (c) cpo + engineering-cto share the git-push policy (ADR-0012): branch"
+echo "       push allowed, push to main + force + destructive denied. Both paths"
+echo "       exercise the composed hook directly via its stdin protocol."
 
 # Build a tiny PermissionRequest event for "git push" and feed it through
 # each archetype's composed permission-gate.
@@ -201,36 +203,44 @@ ENG_HOOK="$(mktemp -t eng-hook.XXXXXX)"
 compose_hook "$CPO_HOOK" _base/hooks/permission-gate-prelude.sh cpo/hooks/permission-gate-policy.sh _base/hooks/permission-gate-tail.sh
 compose_hook "$ENG_HOOK" _base/hooks/permission-gate-prelude.sh engineering-cto/hooks/permission-gate-policy.sh _base/hooks/permission-gate-tail.sh
 
-# Cpo: plain `git push` → ALLOW.
-OUT="$(make_event "git push" | bash "$CPO_HOOK" 2>/dev/null)"
+# Cpo: `git push origin feature` → ALLOW (vision-repo branch push is its function).
+OUT="$(make_event "git push origin feature" | bash "$CPO_HOOK" 2>/dev/null)"
 if printf '%s' "$OUT" | grep -q '"behavior":"allow"'; then
-  pass "cpo permission-gate ALLOWS plain 'git push'"
+  pass "cpo permission-gate ALLOWS branch push 'git push origin feature'"
 else
-  fail "cpo permission-gate did NOT allow plain 'git push' (got: $OUT)"
+  fail "cpo permission-gate did NOT allow 'git push origin feature' (got: $OUT)"
 fi
 
-# Cpo: `git push origin main` → ALLOW.
+# Cpo: `git push origin main` → DENY (protected branch; this was a pre-ADR-0012 bug).
 OUT="$(make_event "git push origin main" | bash "$CPO_HOOK" 2>/dev/null)"
-if printf '%s' "$OUT" | grep -q '"behavior":"allow"'; then
-  pass "cpo permission-gate ALLOWS 'git push origin main'"
+if printf '%s' "$OUT" | grep -q '"behavior":"deny"'; then
+  pass "cpo permission-gate DENIES 'git push origin main' (bug fixed: was allowed)"
 else
-  fail "cpo permission-gate did NOT allow 'git push origin main' (got: $OUT)"
+  fail "cpo permission-gate did NOT deny 'git push origin main' (got: $OUT)"
 fi
 
-# Cpo: `git push --force` → DENY (destructive variant).
-OUT="$(make_event "git push --force origin main" | bash "$CPO_HOOK" 2>/dev/null)"
+# Cpo: `git push --force` → DENY (force-push, any target).
+OUT="$(make_event "git push --force origin feature" | bash "$CPO_HOOK" 2>/dev/null)"
 if printf '%s' "$OUT" | grep -q '"behavior":"deny"'; then
-  pass "cpo permission-gate DENIES destructive 'git push --force'"
+  pass "cpo permission-gate DENIES force 'git push --force'"
 else
   fail "cpo permission-gate did NOT deny 'git push --force' (got: $OUT)"
 fi
 
-# Engineering-cto: plain `git push` → DENY (operator pushes main, not the CTO).
-OUT="$(make_event "git push" | bash "$ENG_HOOK" 2>/dev/null)"
-if printf '%s' "$OUT" | grep -q '"behavior":"deny"'; then
-  pass "engineering-cto permission-gate DENIES 'git push' (unchanged from pre-split)"
+# Engineering-cto: `git push origin feature` → ALLOW (routine branch push, ADR-0012).
+OUT="$(make_event "git push origin feature" | bash "$ENG_HOOK" 2>/dev/null)"
+if printf '%s' "$OUT" | grep -q '"behavior":"allow"'; then
+  pass "engineering-cto permission-gate ALLOWS branch push 'git push origin feature'"
 else
-  fail "engineering-cto permission-gate did NOT deny 'git push' (regression: got: $OUT)"
+  fail "engineering-cto permission-gate did NOT allow 'git push origin feature' (got: $OUT)"
+fi
+
+# Engineering-cto: `git push origin main` → DENY (protected branch; operator-only).
+OUT="$(make_event "git push origin main" | bash "$ENG_HOOK" 2>/dev/null)"
+if printf '%s' "$OUT" | grep -q '"behavior":"deny"'; then
+  pass "engineering-cto permission-gate DENIES 'git push origin main' (operator-only)"
+else
+  fail "engineering-cto permission-gate did NOT deny 'git push origin main' (got: $OUT)"
 fi
 
 # ---------------------------------------------------------------------------
