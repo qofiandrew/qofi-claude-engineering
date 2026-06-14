@@ -27,6 +27,11 @@
 #                   cpo / company-brain). Default is engineering-cto when
 #                   omitted; no marker is written (back-compat). Threaded to
 #                   swarm-add → swarm-init for the actual stamp.
+#   --profile <name>
+#                   engineering-cto-only profile overlay (frontend / backend;
+#                   ADR-0013), threaded to swarm-add → swarm-init. Stamps
+#                   .claude/swarm-profile and composes a stack-specific overlay
+#                   onto CLAUDE.md. v1 'backend' is label-only. Omit for none.
 #   --bot-user-id <id>
 #                   the new swarm's Discord bot user id (== Application ID),
 #                   threaded to swarm-add for cto-watcher bus registration
@@ -57,7 +62,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/swarm-lib.sh"
 
 usage() {
-  sed -n '1,43p' "$0"
+  sed -n '1,48p' "$0"
   exit "${1:-0}"
 }
 
@@ -69,6 +74,7 @@ usage() {
 NAME=""
 VISIBILITY="--private"
 TYPE=""
+PROFILE=""
 BOT_USER_ID=""
 
 while [ $# -gt 0 ]; do
@@ -80,6 +86,11 @@ while [ $# -gt 0 ]; do
       TYPE="$2"; shift 2 ;;
     --type=*)
       TYPE="${1#--type=}"; shift ;;
+    --profile)
+      [ $# -ge 2 ] || { echo "swarm-new: --profile requires a value" >&2; usage 1; }
+      PROFILE="$2"; shift 2 ;;
+    --profile=*)
+      PROFILE="${1#--profile=}"; shift ;;
     --bot-user-id)
       [ $# -ge 2 ] || { echo "swarm-new: --bot-user-id requires a value" >&2; usage 1; }
       BOT_USER_ID="$2"; shift 2 ;;
@@ -103,6 +114,24 @@ if [ -n "$TYPE" ]; then
       echo "swarm-new: unknown --type '$TYPE'"
       echo "  known types:"
       swarm_known_types | sed 's/^/    /'
+    } >&2
+    exit 1
+  fi
+fi
+
+# Fail-fast flag-level --profile check (ADR-0013), before any GitHub
+# side-effects. The authoritative refusal lives in swarm-init (reached via
+# swarm-add); this catches the obvious cases before we create a remote.
+if [ -n "$PROFILE" ]; then
+  if [ "${TYPE:-engineering-cto}" != "engineering-cto" ]; then
+    echo "swarm-new: --profile is only valid for engineering-cto swarms (got --type '$TYPE')" >&2
+    exit 1
+  fi
+  if ! swarm_profile_is_known "$PROFILE"; then
+    {
+      echo "swarm-new: unknown --profile '$PROFILE'"
+      echo "  known profiles:"
+      swarm_known_profiles | sed 's/^/    /'
     } >&2
     exit 1
   fi
@@ -293,10 +322,12 @@ echo ""
 echo "swarm-new: handing off to swarm-add for the Discord walkthrough"
 echo ""
 
-# Thread --type (→ swarm-init) and --bot-user-id (→ cto-watcher bus
-# registration) through to swarm-add. Build the arg list dynamically so the
-# bare two-arg form still works when both are absent.
+# Thread --type (→ swarm-init), --profile (→ swarm-init, ADR-0013), and
+# --bot-user-id (→ cto-watcher bus registration) through to swarm-add. Build
+# the arg list dynamically so the bare two-arg form still works when all are
+# absent.
 ADD_ARGS=("$NAME" "$REPO")
 [ -n "$TYPE" ]        && ADD_ARGS+=(--type "$TYPE")
+[ -n "$PROFILE" ]     && ADD_ARGS+=(--profile "$PROFILE")
 [ -n "$BOT_USER_ID" ] && ADD_ARGS+=(--bot-user-id "$BOT_USER_ID")
 exec "$SCRIPT_DIR/swarm-add.sh" "${ADD_ARGS[@]}"

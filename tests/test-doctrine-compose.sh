@@ -72,6 +72,16 @@ compose_check() {
 compose_check "CLAUDE.md" "tests/fixtures/CLAUDE.engineering-cto.expected.md" \
   engineering-cto/CLAUDE.preamble.md _base/CLAUDE.md engineering-cto/CLAUDE.md
 
+# Profile overlay (ADR-0013): the 'frontend' profile appends a 4th compose
+# source after engineering-cto/CLAUDE.md, which makes engineering-cto/CLAUDE.md
+# a NON-final source — so this also self-checks its trailing-newline invariant.
+# (NOTE: this re-implements cat, like every check above; the REAL
+# manifest_apply_compose injection is exercised separately by
+# test-swarm-profile-dispatch.sh, which asserts byte-identity to this same
+# fixture through the live pipeline.)
+compose_check "CLAUDE.md (frontend profile)" "tests/fixtures/CLAUDE.engineering-cto.frontend.expected.md" \
+  engineering-cto/CLAUDE.preamble.md _base/CLAUDE.md engineering-cto/CLAUDE.md engineering-cto/profiles/frontend/CLAUDE.md
+
 compose_check "ESCALATION.md" "tests/fixtures/ESCALATION.engineering-cto.expected.md" \
   engineering-cto/ESCALATION.preamble.md _base/ESCALATION.md engineering-cto/ESCALATION.md
 

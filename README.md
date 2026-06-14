@@ -258,6 +258,25 @@ the `compose` behavior in the manifest cats `+`-joined sources literally.
 See [`templates/_base/README.md`](./templates/_base/README.md) for the
 mechanism and the trailing-newline invariant.
 
+**Profile overlay (engineering-cto only, [ADR-0013](./docs/adr/ADR-0013-frontend-backend-profile-axis.md)).**
+A second, *orthogonal* axis — `--profile frontend|backend` on
+`swarm-new` / `swarm-add` / `swarm-init` — stamps a per-repo
+`.claude/swarm-profile` marker (resolved by `swarm_profile_of` — a per-repo
+marker read like `swarm_type_of`, but defaulting to **empty**, not to a value,
+so markerless swarms are untouched). It does **not** replace the archetype; it
+appends a
+stack-specific overlay fragment
+(`templates/engineering-cto/profiles/<profile>/CLAUDE.md`) onto the composed
+`CLAUDE.md`. v1 `backend` is **label-only** — today's engineering-cto already
+*is* the backend case, so it ships no fragment and composes byte-identically
+to a pre-profile swarm; `frontend` is the only profile with overlay content.
+An absent marker is a no-op (existing swarms are untouched). A profile against
+a non-engineering-cto type is refused. This overlay is the **one** exception to
+"add an artifact in ONE place: the manifest": it is injected dynamically by
+`manifest_apply_compose` in `swarm-lib.sh` (the `CLAUDE.md` manifest line stays
+profile-agnostic), so look there — not at a manifest line — for where the
+`frontend` fragment joins the compose.
+
 Each line is `behavior | template-path | target-path` with an optional
 trailing `| covers` note — a terse, hand-written one-liner of what the target
 doc answers. That column makes the manifest double as the **route-before-scan

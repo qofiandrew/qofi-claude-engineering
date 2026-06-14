@@ -21,6 +21,20 @@ artifact. No separator is injected.
 compose | engineering-cto/CLAUDE.preamble.md+_base/CLAUDE.md+engineering-cto/CLAUDE.md | CLAUDE.md
 ```
 
+### Optional per-profile overlay (engineering-cto, ADR-0013)
+
+The composed `CLAUDE.md` gains **one** dynamically-sourced final fragment when
+the repo carries a `.claude/swarm-profile` marker: `manifest_apply_compose`
+(in `bin/swarm-lib.sh`) appends
+`engineering-cto/profiles/<profile>/CLAUDE.md` to the `+`-joined list above
+when that fragment exists and the resolved type is `engineering-cto`. This is
+the only compose source NOT declared on the manifest line — the manifest stays
+profile-agnostic. An absent marker, or a label-only profile with no fragment
+(v1 `backend`), appends nothing, so a markerless swarm composes
+byte-identically to a pre-profile swarm. Because the profile fragment is the
+new *final* source, the previously-final `engineering-cto/CLAUDE.md` is now a
+non-final source and must obey the trailing-newline invariant below (it does).
+
 ### Trailing-newline invariant (load-bearing)
 
 For literal `cat` to produce well-formed markdown across the seam, each

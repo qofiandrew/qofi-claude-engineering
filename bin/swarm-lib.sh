@@ -425,6 +425,50 @@ swarm_type_of() {
   printf '%s\n' "engineering-cto"
 }
 
+# swarm_known_profiles — print the known engineering-cto profile names, one
+# per line. A profile is an ORTHOGONAL axis layered on top of the
+# engineering-cto archetype (ADR-0013): it does not replace the archetype, it
+# appends a stack-specific overlay to the composed CLAUDE.md only. A value
+# passed to swarm-init/swarm-add/swarm-new --profile is validated against this
+# list so a typo cannot silently misclassify. 'backend' is intentionally
+# present but LABEL-ONLY in v1 (today's engineering-cto IS the backend case),
+# so it ships no overlay fragment; 'frontend' is the only profile with overlay
+# content. Update this list when a new profile overlay is added under
+# templates/engineering-cto/profiles/.
+swarm_known_profiles() {
+  printf '%s\n' frontend backend
+}
+
+# swarm_profile_is_known PROFILE — return 0 iff PROFILE is in
+# swarm_known_profiles.
+swarm_profile_is_known() {
+  local p="$1"
+  swarm_known_profiles | grep -qxF "$p"
+}
+
+# swarm_profile_of REPO
+#
+# Resolve a repo's profile from the .claude/swarm-profile marker file.
+# Returns the profile name on stdout, or the EMPTY string when the marker is
+# absent or empty. Unlike swarm_type_of (which defaults to engineering-cto),
+# an absent profile resolves to NO profile — so a markerless swarm composes
+# byte-identically to a pre-profile swarm (ADR-0013: the no-op default that
+# keeps existing swarms untouched; do NOT change this to default to a value).
+# Whitespace stripped.
+swarm_profile_of() {
+  local repo="$1"
+  local marker="$repo/.claude/swarm-profile"
+  if [ -f "$marker" ]; then
+    local p
+    p="$(head -n 1 "$marker" 2>/dev/null | tr -d '[:space:]')"
+    if [ -n "$p" ]; then
+      printf '%s\n' "$p"
+      return 0
+    fi
+  fi
+  printf '%s' ""
+}
+
 # swarm_required_doctrine TYPE
 #
 # Emit the doctrine filenames (relative to the swarm repo root, one per
@@ -714,6 +758,31 @@ _swarm_is_hook() {
 
 manifest_apply_compose() {
   local src_list="$1" tgt_rel="$2"
+  # Profile overlay (ADR-0013) — engineering-cto only, CLAUDE.md only.
+  # When the repo's resolved profile has an overlay fragment on disk, append
+  # it as the FINAL compose source so the profile's stack-specific doctrine
+  # layers on top of the base teammate manual. THREE states fall out of one
+  # guard, by design:
+  #   - absent/empty profile        -> nothing appended; a markerless swarm
+  #     composes byte-identically to a pre-profile swarm (the no-op default)
+  #   - a profile with no fragment   -> nothing appended; v1 'backend' is
+  #     label-only (today's engineering-cto IS the backend case), so the
+  #     marker is a label and the compose is unchanged
+  #   - a profile WITH a fragment    -> appended (e.g. 'frontend')
+  # Gated on SWARM_APPLY_TYPE=engineering-cto so a non-engineering-cto compose
+  # (e.g. the cpo CLAUDE.md, same target name) is never touched even if a
+  # stray marker exists. This is the ONE dynamically-sourced compose input;
+  # every other source is the static '+'-joined list on the manifest line,
+  # which stays profile-agnostic (see templates/engineering-cto/manifest.tsv
+  # header + templates/_base/README.md).
+  if [ "$tgt_rel" = "CLAUDE.md" ] && \
+     [ "${SWARM_APPLY_TYPE:-}" = "engineering-cto" ] && \
+     [ -n "${SWARM_APPLY_PROFILE:-}" ]; then
+    local _overlay_rel="engineering-cto/profiles/${SWARM_APPLY_PROFILE}/CLAUDE.md"
+    if [ -f "$SWARM_HOME/templates/$_overlay_rel" ]; then
+      src_list="${src_list}+${_overlay_rel}"
+    fi
+  fi
   local tgt="$SWARM_APPLY_REPO/$tgt_rel"
   local tmp
   tmp="$(mktemp -t swarm-compose.XXXXXX)" || {
@@ -1341,6 +1410,10 @@ manifest_apply() {
   SWARM_APPLY_REPO="$repo"
   SWARM_APPLY_MODE="$mode"
   SWARM_APPLY_TYPE="$(swarm_type_of "$repo")"
+  # Orthogonal profile axis (ADR-0013): empty for markerless swarms (no-op).
+  # Consumed by manifest_apply_compose to optionally append a profile overlay
+  # to the composed CLAUDE.md (engineering-cto only).
+  SWARM_APPLY_PROFILE="$(swarm_profile_of "$repo")"
   SWARM_RESULT_CHANGED=0
   SWARM_RESULT_DRIFT=0
   SWARM_RESULT_COLLISIONS=""
@@ -1352,7 +1425,7 @@ manifest_apply() {
   # enforced across every class, every --force flag).
   SWARM_OO_PREFIXES=""
   SWARM_OO_FILES=""
-  export SWARM_APPLY_REPO SWARM_APPLY_MODE SWARM_APPLY_TYPE
+  export SWARM_APPLY_REPO SWARM_APPLY_MODE SWARM_APPLY_TYPE SWARM_APPLY_PROFILE
   manifest_walk _swarm_collect_oo_prefixes >/dev/null || return $?
   manifest_walk _manifest_apply_one || return $?
   [ "$SWARM_RESULT_FATAL" -eq 1 ] && return 1
