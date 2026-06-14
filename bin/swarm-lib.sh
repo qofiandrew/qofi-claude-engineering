@@ -482,6 +482,31 @@ swarm_launch_brief() {
   esac
 }
 
+# swarm_effort_for TYPE
+#
+# Emit the `/effort` command swarm-up's launch_one() sends into the tmux pane
+# right after `claude` boots, per archetype. The CPO swarm is a single
+# conversational product agent that should NOT fan every turn out to a workflow,
+# so it launches at low effort; every engineering CTO swarm stays on ultracode
+# (xhigh effort + automatic workflow orchestration). Effort is SESSION-ONLY
+# (ultracode has no settings.json / env / --effort form — see launch_one), which
+# is why it is a launch-time `/effort` send rather than config, and why this
+# helper is the single tuning point for per-archetype effort.
+#
+# Unknown / future types fall through to ultracode — the same fail-safe direction
+# as swarm_required_doctrine / swarm_launch_brief: a misclassified or future
+# swarm gets the engineering path, never a silent downgrade.
+swarm_effort_for() {
+  case "$1" in
+    cpo)
+      printf '%s' "/effort low"
+      ;;
+    engineering-cto|*)
+      printf '%s' "/effort ultracode"
+      ;;
+  esac
+}
+
 # swarm_bound_exports NAME CHANNEL — emit the shell `export` statements that
 # scope a swarm's Discord bridge binding. ALL swarms get DISCORD_BOUND_CHANNEL =
 # their own channel (single-bound, unchanged). The ONE exception is the CPO
