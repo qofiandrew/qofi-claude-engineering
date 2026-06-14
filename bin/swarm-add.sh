@@ -658,61 +658,24 @@ PY
 #       the watcher reposts CPO directives AS ITSELF, so the new CTO's
 #       bridge drops them unless the watcher id is allow-listed.
 # Both are idempotent. 4d above resets this channel's allowFrom to [owner];
-# we (re-)append the watcher id here, so a re-run is self-healing.
+# the wire script (re-)appends the watcher id here, so a re-run is
+# self-healing.
+#
+# The actual wiring is a THIN CALL into bin/swarm-bus-wire.sh (ADR-0015) — the
+# single shared, independently-runnable implementation of both halves. We pass
+# CTO_WATCHER_CONFIG / CTO_BUS_WATCHER_BOT_ID / SWARM_ACCESS_FILE through so the
+# script uses the exact same paths swarm-add resolved (and tests can override).
 if [ "$EFFECTIVE_TYPE" != "engineering-cto" ]; then
   echo ""
   echo "  4e) cto-watcher bus: SKIP (type '$EFFECTIVE_TYPE' is not a CTO; off the #cpo-cto-bus)"
 else
   echo ""
   echo "  4e) cto-watcher bus registration for CTO '$NAME'"
-
-  # Half 1 — ctoChannels entry in the watcher's config.json.
-  if [ ! -f "$CTO_WATCHER_CONFIG" ]; then
-    echo "  WARN: $CTO_WATCHER_CONFIG not found — skipping ctoChannels write."
-    echo "        Create it (cp cto-watcher/config.example.json cto-watcher/config.json),"
-    echo "        then re-run:"
-    echo "          bin/swarm-add.sh $NAME $REPO $CHANNEL --skip-walkthrough --bot-user-id ${BOT_USER_ID:-<bot-user-id>}"
-  elif [ -z "$BOT_USER_ID" ]; then
-    echo "  SKIP ctoChannels write: no bot user id on hand (bus already registered, or none supplied)."
-  else
-    python3 - "$CTO_WATCHER_CONFIG" "$NAME" "$CHANNEL" "$BOT_USER_ID" <<'PY' || { echo "swarm-add: FATAL — failed to update cto-watcher config.json" >&2; exit 2; }
-import json, os, sys
-path, name, channel, bot = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-with open(path) as f: cfg = json.load(f)
-ctos = cfg.setdefault("ctoChannels", {})
-prev = ctos.get(name)
-ctos[name] = {"channelId": channel, "botUserId": bot}
-tmp = path + ".tmp"
-with open(tmp, "w") as f:
-    json.dump(cfg, f, indent=2); f.write("\n")
-os.replace(tmp, path)
-with open(path) as f: json.load(f)  # validate
-verb = "already current" if prev == ctos[name] else "set"
-print("  ctoChannels['{}'] {} (channelId={}, botUserId={})".format(name, verb, channel, bot))
-PY
-  fi
-
-  # Half 2 — watcher bot id in this channel's access.json allowFrom (additive).
-  python3 - "$ACCESS" "$CHANNEL" "$CTO_BUS_WATCHER_BOT_ID" <<'PY' || { echo "swarm-add: FATAL — failed to add watcher id to access.json allowFrom" >&2; exit 2; }
-import json, os, sys
-path, channel, watcher = sys.argv[1], sys.argv[2], sys.argv[3]
-with open(path) as f: cfg = json.load(f)
-grp = cfg.setdefault("groups", {}).setdefault(channel, {"requireMention": False, "allowFrom": []})
-af = grp.setdefault("allowFrom", [])
-if watcher in af:
-    print("  access.json: watcher id {} already in allowFrom for channel {}".format(watcher, channel))
-else:
-    af.append(watcher)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(cfg, f, indent=2); f.write("\n")
-    os.replace(tmp, path)
-    with open(path) as f: json.load(f)  # validate
-    print("  access.json: added watcher id {} to allowFrom for channel {}".format(watcher, channel))
-PY
-
-  echo "  REMINDER: restart the cto-watcher so it loads the new ctoChannels entry"
-  echo "            (watcher-control skill / bin/cto-watch-*.sh)."
+  CTO_WATCHER_CONFIG="$CTO_WATCHER_CONFIG" \
+  CTO_BUS_WATCHER_BOT_ID="$CTO_BUS_WATCHER_BOT_ID" \
+  SWARM_ACCESS_FILE="$ACCESS" \
+    "$SCRIPT_DIR/swarm-bus-wire.sh" "$NAME" "$CHANNEL" "$BOT_USER_ID" \
+    || { echo "swarm-add: FATAL — bus wiring (swarm-bus-wire.sh) failed" >&2; exit 2; }
 fi
 
 # ---------------------------------------------------------------------------
