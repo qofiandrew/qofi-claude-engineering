@@ -17,11 +17,24 @@
   fires.
 
 ## Source of truth
-- `PROJECT_SPEC.md` and the ADRs in `docs/adr/` are authoritative **once they
-  exist**. On a new project the spec may be empty or absent — the CTO authors it
-  from the design conversation as the first build step (see `TEAM_LEAD.md`).
-  Docs are an output of the build, not a prerequisite. Once authored, a request
-  that contradicts the spec is an escalation, not a silent reinterpretation.
+- **Living docs are the current "how," stated directly.** `PROJECT_SPEC.md` and
+  the module docs (`modules/<module>.md`) are the single source of truth for how
+  the system behaves *now* — read them for current behavior, and they state it
+  outright. They are authoritative **once they exist**. On a new project the spec
+  may be empty or absent — the CTO authors it from the design conversation as the
+  first build step (see `TEAM_LEAD.md`). Docs are an output of the build, not a
+  prerequisite. Once authored, a request that contradicts the spec is an
+  escalation, not a silent reinterpretation.
+- **ADRs are the dated "why" archive, never read for current behavior.** The ADRs
+  in `docs/adr/` are an immutable record of *why* a one-way-door decision was
+  made on a given date — consulted for rationale, **not** for what the system
+  does today. A superseded ADR still stands as written; the living docs, not the
+  ADR, carry the current truth.
+- **No-defer rule.** A living doc never defers to an ADR for current behavior —
+  no "per ADR-N we do X." State X directly; at most footnote "(rationale:
+  ADR-N)." If you reach for an ADR to learn how the system behaves now, the
+  living doc is incomplete — surface it (build log) so the behavior is stated
+  where it belongs.
 
 ## Decisions
 - Follow `ESCALATION.md`. Default to action. Decide two-way doors yourself with
@@ -421,6 +434,26 @@ the substrate is non-negotiable.
   session) runs it the proven way. Full bar: `§Skill standards`; a one-off stays
   bare.
 
+## Performance budgets (UI products)
+
+`§Operability` covers correctness at scale, not speed. For UI products (e.g.
+`press-web`, `qofi-ios-app`) a measurable **performance budget** guards the user
+experience — and like a coverage floor, a budget that isn't measured isn't real.
+
+- **Budgets are declared per product**, in the spec (or a perf doc it points to):
+  ceilings on what degrades the experience — bundle / payload size, key
+  interaction or route latency, Core Web Vitals (LCP, INP, CLS). Exact thresholds
+  are per-product, not set here; what's doctrine is that they're written down and
+  numeric.
+- **Report before/after on a perf-affecting change.** A change that touches a
+  budgeted dimension reports the measured **delta** (before → after) against the
+  budget in its summary — a regression past a ceiling is a flag, the same class
+  as a failing test, and escalates rather than ships silently.
+- **On-demand, not an always-on gate.** This is invoked for UI work that could
+  move the numbers — not a standing agent or a gate on every commit. The CTO
+  calls for the measurement when a change warrants it; routine non-UI work
+  doesn't pay this cost.
+
 ## Skill standards
 
 A skill is captured operational procedure, not a place to hide code. It earns
@@ -630,11 +663,15 @@ not done. Claiming done without addressing an item is an immediate flag.
 7. **CTO-reviewed.** Plan approved, summary verified against the contract, CTO
    accepted. The CTO marks done after review, not the agent on its own claim.
    **Before this passes**, the mandatory independent gates run (`TEAM_LEAD.md`
-   §*Independent review & security gates*): a fresh-context reviewer teammate
-   (≥80%-confidence findings), the security pass (gitleaks + semgrep +
-   security-reviewer), and the per-product coverage floor (default 80%). These
-   are the CTO's to run and clear; you make them passable by writing the tests
-   and keeping the diff clean.
+   §*Independent review & security gates*). The read-only review lenses fan out
+   as **parallel breadth** — a fresh-context reviewer teammate (≥80%-confidence
+   findings), the security pass (gitleaks + semgrep + security-reviewer), and the
+   edge-case lens run **concurrently**; the CTO synthesizes their findings. Then,
+   **serially**: fix → re-review, any adversarial deepening, and the merge. The
+   per-product coverage floor (default 80%) still gates. No gate is relaxed by
+   running the lenses in parallel — the security pass, coverage floor, and
+   reviewer are all still required. These are the CTO's to run and clear; you
+   make them passable by writing the tests and keeping the diff clean.
 
 Items 2 and 3 are mechanically enforced by hooks. Items 1, 4, 5, 6 cannot be
 hook-enforced and depend on the agent's honest affirmation plus the CTO's review.
