@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- TEMPLATE — do NOT load this file directly and do NOT commit a rendered copy.
+     launchd does not expand $VARS or ~ in plist paths, so the absolute paths
+     below are filled in PER MACHINE by bin/swarm-launchd-install.sh, which
+     substitutes these placeholders into the fields below:
+        SWARM_HOME    -> $SWARM_HOME          (this repo's path on this host)
+        HOME          -> $HOME                (this user's home)
+        TMUX_BIN      -> $(command -v tmux)   (/opt/homebrew on Apple Silicon,
+                                               /usr/local on Intel)
+        TICK_INTERVAL -> $SWARM_TICK_INTERVAL (seconds between ticks; default 300)
+     and writes the result to
+        ~/Library/LaunchAgents/com.qofi.swarm-rotate-tick.plist.
+     This keeps the repo username/host-agnostic — every mini renders its own. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.qofi.swarm-rotate-tick</string>
+
+  <!-- PERIODIC rotation orchestrator. On each tick it polls the active account's
+       usage and ROUTES to swarm-rotate.sh only when the verdict says NEAR/AT.
+       It contains no rotation mechanism itself and performs NO live swap on its
+       own — the actuator (swarm-rotate.sh) owns all side effects and refuses a
+       live swap unless SWARM_CREDSWAP_CMD is wired by the operator. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>@@SWARM_HOME@@/bin/swarm-rotate-tick.sh</string>
+  </array>
+
+  <!-- PERIODIC, not persistent: run once per interval and exit. StartInterval is
+       the cadence (seconds). Rendered from $SWARM_TICK_INTERVAL (default 300 =
+       every 5 minutes) by the installer — tune it per machine without editing
+       this template. Do NOT also set KeepAlive: this is a periodic tick, not a
+       long-lived daemon. RunAtLoad fires one tick at install so the operator
+       sees it work immediately. -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>@@TICK_INTERVAL@@</integer>
+
+  <!-- Guard against a rapid-respawn loop if the script ever exits immediately at
+       start (e.g. missing $SWARM_HOME/swarm.conf). 10s is plenty. -->
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>@@HOME@@/.config/swarm/rotate-tick.log</string>
+  <key>StandardErrorPath</key>
+  <string>@@HOME@@/.config/swarm/rotate-tick.err</string>
+
+  <!-- Same env shape as the other swarm agents (swarm.conf + tokens.env live in
+       SWARM_HOME). No account credentials are here — the credential swap is the
+       operator-wired SWARM_CREDSWAP_CMD inside swarm-rotate.sh, never this plist.
+       SWARM_CREDSWAP_CMD is intentionally NOT set here: with it absent, even a
+       live tick's actuator REFUSES the swap (fail-safe). The operator adds it
+       out-of-band to arm live rotation. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>SWARM_HOME</key>
+    <string>@@SWARM_HOME@@</string>
+    <key>CLAUDE_PROJECTS_DIR</key>
+    <string>@@HOME@@/.claude/projects</string>
+    <key>SWARM_STALE_SECONDS</key>
+    <string>300</string>
+    <!-- launchd has a minimal PATH; give tmux's absolute path explicitly so the
+         actuator's clean-boundary probe can find live sessions. -->
+    <key>SWARM_TMUX_BIN</key>
+    <string>@@TMUX_BIN@@</string>
+  </dict>
+</dict>
+</plist>
