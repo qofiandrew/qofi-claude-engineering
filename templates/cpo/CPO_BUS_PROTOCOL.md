@@ -25,21 +25,22 @@ not a timer reset) — never rely on prose to communicate with it.
 [<cto-name>] <the directive>
 ```
 
-- `[<cto-name>]` — destination, exact name from the table below. (No `@mention`
-  needed — routing is by author + grammar. The watcher adds the destination CTO's
-  mention on delivery.)
+- `[<cto-name>]` — destination, an exact key from the `ctoChannels` map (authority
+  below). (No `@mention` needed — routing is by author + grammar. The watcher adds
+  the destination CTO's mention on delivery.)
 - `<the directive>` — **just the directive, nothing else.** The clean instruction
   the CTO acts on: no preamble, no narration, no "I'm going to have cto-7…", no
   operator-facing status, no meta. Operator context belongs in #qofi-product.
 - Everything after `[name] ` is delivered to that CTO verbatim.
 
-**Valid `<cto-name>` (exact, case-sensitive):**
-
-| name | what it builds |
-| --- | --- |
-| `reserve-backend-2` | reserve backend |
-| `qofi-ios-app` | iOS app |
-| `press-backend` | press backend |
+**Valid `<cto-name>` (exact, case-sensitive) — authority: `cto-watcher/config.json`
+`ctoChannels`.** The roster is **not** restated here: the single source of truth
+is the `ctoChannels` map in `cto-watcher/config.json` (seeded from `swarm.conf`),
+the *exact* map the watcher routes against. Use a key from that map verbatim — it
+is case-sensitive. A name absent from `ctoChannels` fails closed (see *Rules that
+keep this safe*). Adding or removing a CTO is an operator config change to
+`swarm.conf` → `ctoChannels` (via `bin/swarm-add.sh`), never a doc edit. (See
+ADR-0014: doctrine points to the routing config, it never duplicates it.)
 
 Example:
 
@@ -82,9 +83,10 @@ Treat any bus message prefixed `[<name>]` from the relay (AUTO) or the operator
 
 ## Rules that keep this safe
 
-- **Exact names only.** A name not in the table fails closed — the watcher does
-  not route it and DMs the operator. You cannot invent CTO names; adding one is an
-  operator config change.
+- **Exact names only.** A name not in `cto-watcher/config.json` `ctoChannels`
+  fails closed — the watcher does not route it, logs the miss, and DMs the
+  operator. You cannot invent CTO names; adding one is an operator config change
+  (`swarm.conf` → `ctoChannels`).
 - **DIRECTIVE before noise.** If a message contains a STATE line it is treated as
   state and never shuttled, so a STATE line can never leak into a CTO channel.
 - **One directive per message**, directive-only body (see grammar 1).
