@@ -1,6 +1,6 @@
 # ADR-0014 — CTO roster single source of truth: `config.json` `ctoChannels`; doctrine points, never duplicates (cto-roster-single-source-config-json)
 
-**Status:** accepted
+**Status:** proposed
 **Date:** 2026-06-14
 **Reversibility:** two-way (a doc pointer is trivially revertible; no persistent surface, no code change).
 **Escalated:** no — decided autonomously (a two-way doc pointer fix; the underlying premise correction is logged here).

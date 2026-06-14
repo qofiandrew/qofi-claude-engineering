@@ -312,8 +312,15 @@ volatile.
      a checkpoint, not a debate.)
 
 2. **Decompose** into file-ownership-disjoint tasks (see below).
-3. **Spawn elastically.** 3–5 teammates for a parallel phase; tear them down when
-   the phase ends. No standing army idling — it burns tokens.
+3. **Spawn as wide as the disjoint partition supports.** Fan out one teammate
+   per disjoint file/surface — concurrency is bounded by how cleanly the work
+   partitions, not by a fixed headcount cap. (The old 3–5 ceiling was a
+   pool-era token-budget guard; under single-account rotation + per-task effort
+   routing the usage limit is absorbed differently — see §*Parallelism, effort
+   routing, and the single-account budget* — so size the batch to the
+   partition.) Tear teammates down when the phase ends — for **hygiene**, not as
+   a concurrency cap: a stale worktree poisons the `repo_activity` liveness
+   signal (§*Worktree teardown*). No standing army idling.
 4. **Integrate** in dependency order, running the gate between merges.
 5. **Reconcile + checkpoint.** Reconcile docs against the real implementation (see
    below), then batch non-blocking questions at the milestone boundary.
@@ -456,16 +463,22 @@ sync). Phase 3a–3c ran 9 teammates across per-teammate worktrees and got
 **0 swaps**. The pattern was reproducible under shared trees and went
 away entirely under worktree isolation.
 
-**File-ownership-disjoint decomposition still applies**, but its job is
-now to reduce merge conflicts at integration time — no longer the sole
-defense against clobbering. So:
+**File-ownership-disjoint decomposition is the PRIMARY throughput lever.**
+It is the main way you parallelize: own each file/surface **whole** — one
+writer per file — so disjoint work runs concurrently with nothing to
+serialize on. Worktree isolation (above) is the anti-swap *safety* floor;
+disjoint ownership is what lets you actually fan work out wide. The two
+are complementary, not redundant: isolation makes concurrency safe;
+disjoint ownership makes it fast. (Reducing merge conflicts at integration
+is a residual *benefit* of this partitioning, not its purpose.) So:
 
 - Every task **must declare the files/directories it owns.** Put the ownership
   list in the task description.
-- **No two concurrent tasks should own overlapping paths.** Overlapping
-  ownership means a merge conflict you'll pay for at integration. If two
-  pieces of work would touch the same file, either serialize them or split
-  the file's responsibilities first as its own task.
+- **No two concurrent tasks should own overlapping paths — one writer per
+  file.** Disjoint ownership is what makes the work concurrent; overlap
+  re-introduces a serialization point (and a merge conflict you'll pay for
+  at integration). If two pieces of work would touch the same file, either
+  serialize them or split the file's responsibilities first as its own task.
 - Decompose along natural seams: `src/api/**` vs `src/web/**` vs `tests/**` vs
   `docs/**`. Shared/contract files (schemas, type definitions, API specs) are
   owned by **one** task that runs **before** the tasks that depend on them.
@@ -482,9 +495,10 @@ as the anti-swap defense holds in both substrates.
 
 **Shared contracts run under a one-writer lease.** Worktree isolation lets two
 teammates edit the **same** shared contract file (schema, type definition, API
-spec) in separate trees and collide only at merge. Reducing merge conflicts
-(above) is the demoted, residual job of ownership decomposition — it is **not**
-a license to let two tasks share a contract. So: the CTO hands any shared
+spec) in separate trees and collide only at merge. Disjoint ownership being the
+throughput lever (above) is **not** a license to let two tasks share a contract
+— one-writer-per-file is exactly the rule, and a shared contract is the case
+where it bites hardest. So: the CTO hands any shared
 contract to **exactly one task for the duration of a change** — a one-writer
 lease. No concurrent task touches a leased contract; a consumer that needs the
 contract to change blocks on the lease, or the change is sequenced as one
@@ -499,6 +513,60 @@ divergence). Stop, and re-partition: re-draw the ownership so the contract has
 one owner, re-issue the lease, and re-run the colliding work serially against
 the settled contract. A merge that resolves a shared-contract collision by hand
 is the silent-override failure the lease exists to prevent.
+
+## Parallelism, effort routing, and the single-account budget
+
+Concurrency is now bounded by **how cleanly the work partitions** (one writer
+per disjoint file/surface — §*Worktree isolation*), not by a conservative
+headcount cap. The old 3–5 ceiling was a **pool-era token-budget guard**: a
+single shared token pool, capped to protect the budget. That guard is relaxed.
+The swarm now runs on **one active Max account with rotation at the 5h / weekly
+limit** — the limit is a function of **duration, not concurrency**, so it is
+absorbed by rotation plus per-task effort routing (below) rather than by holding
+the teammate count down. (Rationale: ADR-0004, **amended** not retired — a
+single token pool still holds and the token budget is still real; it is simply
+no longer the thing concurrency is capped to protect.)
+
+**Per-task effort routing.** Route effort by the *nature* of the task, not a flat
+default:
+
+- **LOW effort** for **mechanical / breadth** work — boilerplate, a well-specified
+  endpoint against a settled contract, a test file for known behavior, a
+  rename/move, the read-only breadth review lenses (§*Independent review & security
+  gates*).
+- **ULTRACODE** for **architecture / security / deep-synthesis** work — the spec
+  and ADRs, a one-way-door design call, the security-reviewer's logic-level pass,
+  synthesizing the parallel review findings, an at-scale data-operation design.
+
+Routing effort to the task **also stretches the single-account budget** — low
+effort burns far less of the window, so a phase fits more work between rotations
+(fewer rotations). Double value: better matched effort *and* a longer runway on
+one account.
+
+**The new bottleneck is review-bandwidth, not the pool.** With concurrency
+relaxed, the limiting resource shifts from token-pool headroom to **the CTO's
+review-bandwidth and context budget** — you serialize on synthesizing reviews,
+owning merges, and keeping your own context lean (§*Context self-management*).
+Spawning twenty teammates you can't review is throughput on paper only; size the
+fan-out to what you can actually integrate.
+
+**Rotation interaction — prefer clean phase boundaries for heavy fan-out.** More
+concurrent teammates means **more RAM-only state lost when a rotation restarts**
+the session (in-process teammates don't survive a restart — §*Operational
+discipline*). So before an **imminent rotation**, reach a **clean phase boundary**:
+commit/checkpoint the durable state to disk (docs + git — §*Context
+self-management*) so a restart resumes from the seam, not from a half-finished
+wide fan-out with nothing written down. Don't kick off a large concurrent batch
+across a rotation you can see coming; land the current one first.
+
+**These do not touch the safety invariants — they are unchanged.** Relaxing the
+concurrency cap relaxes a *budget* guard, nothing else. All of the following hold
+exactly as before: **serial merges** (parallel commits, never parallel merges —
+§*Integration branch & merge ownership*); **operator-only `main`** (no agent ever
+pushes or merges `main`); the **real-spend floor** (`CLAUDE.md` §*Real spend &
+money movement*); **worktree isolation** as the anti-swap defense, with the
+**one-writer lease** on shared contracts (§*Worktree isolation*); and
+**teammates don't spawn teammates** (only the CTO spawns and coordinates).
 
 ## Integration branch & merge ownership
 
@@ -835,6 +903,19 @@ the inner loop, and they are **mandatory before the DoD gate**, not optional
 polish. (Source: the operator-ratified 2026-06-12 review-and-security-gates
 decision.)
 
+**Run the gate PARALLEL-BREADTH, then SERIAL-DEPTH.** The read-only review
+lenses — the independent reviewer teammate (1), the `security-reviewer`
+teammate (2), and an edge-case lens — are **read-only and independent**, so
+**fan them out CONCURRENTLY** over the same integrated diff (each is its own
+disjoint task — §*Worktree isolation*; a read-only review doesn't even need a
+writable tree). You then **synthesize** their findings into one consolidated,
+deduplicated, security-first list. Everything past synthesis is **SERIAL**:
+fix → re-review the fix, any adversarial deepening of a thread a lens opened,
+and the merge itself. Breadth parallelizes because the lenses don't depend on
+each other; depth serializes because each step depends on the last. The
+deterministic scanners (gitleaks, semgrep) run in the breadth fan-out too —
+they're independent of the LLM lenses.
+
 **1. Independent reviewer teammate.** Before a unit of work reaches done, spawn a
 **fresh-context** `reviewer` teammate — one with **no exposure to the
 implementation conversation** — to review the integrated diff. This is distinct
@@ -850,6 +931,41 @@ implementing teammate's self-report. Discipline on its output:
   per finding: fix, file, or reject-with-reason. Reviewer disagreement that you
   can't resolve resolves per the circuit-breaker — **escalate, never loop**.
 - A unit is not done while an accepted reviewer finding is unresolved.
+
+**The reviewer brief (hand this to the `reviewer` teammate verbatim).** The
+≥80%-confidence filter is the floor; these sharpen it so the reviewer's signal
+stays high.
+
+- **Common false positives — DO NOT raise these classes:**
+  - Style / formatting / naming preferences where a linter or formatter is the
+    authority, not a reviewer.
+  - Missing tests / docs / error-handling that are **out of the diff's scope** —
+    pre-existing gaps the change didn't touch (surface pre-existing dead code per
+    `CLAUDE.md` §*Working with existing code*, don't bill it as a finding here).
+  - Hardening for **impossible states** the contract or type system already
+    precludes (`CLAUDE.md` §*Error handling* — "don't handle impossible states").
+  - "Could be more general / more configurable / more reusable" speculation —
+    that's the premature-architecture trap (`CLAUDE.md` §*Greenfield*), not a defect.
+  - Boundary mocks that mirror the real contract shape (`CLAUDE.md` §*Testing
+    strategy*) — a permanent, legitimate strategy, not a gap to flag.
+  - Theoretical issues with no reachable trigger in this codebase.
+- **Four-question pre-report gate — pass ALL FOUR before reporting a finding:**
+  1. **Is it real?** Can you point to the specific line(s) and name the concrete
+     failure — not a vague "this could be a problem"?
+  2. **Is it in scope?** Did *this diff* introduce it, or is it a pre-existing
+     condition the change didn't touch?
+  3. **Is it ≥80%?** Would you stake the claim, or are you hedging? Below the bar
+     → drop it.
+  4. **Does it matter?** Is there a real consequence (correctness, security,
+     data integrity, contract breach), or is it cosmetic?
+  A finding that fails any one of the four does not get reported.
+- **Simplicity lens (raise the inverse defect too).** Beyond hunting bugs, ask
+  of the changed code: **is there a materially simpler equivalent?** Needless
+  indirection, a hand-rolled thing the stdlib or an approved dep already does
+  (`CLAUDE.md` §*Search first*), a five-branch path expressible in one, an
+  abstraction earning nothing yet. Report only a **materially** simpler
+  equivalent — this lens is bounded by the same four-question gate (a simpler
+  rewrite that's merely your taste fails Q4), never a license for churn.
 
 **2. Security pass.** Over the same diff, two layers:
 

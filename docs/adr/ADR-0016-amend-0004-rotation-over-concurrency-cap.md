@@ -1,6 +1,6 @@
-# ADR-0014 — Amend ADR-0004: rotation over concurrency cap
+# ADR-0016 — Amend ADR-0004: rotation over concurrency cap
 
-**Status:** accepted
+**Status:** proposed
 **Date:** 2026-06-14
 **Reversibility:** two-way — a posture/knob change, not baked into the code.
 **Escalated:** no — decided autonomously (operator-set rotation model).
@@ -39,7 +39,7 @@ Concretely:
 
 - The single active-account fact from ADR-0004 stands; this ADR **amends** that
   ADR's *concurrency posture*, it does not retire it. (See ADR-0004's header
-  `**Amended-by:** ADR-0014`.)
+  `**Amended-by:** ADR-0016`.)
 - Run as many teams/teammates as the active account's window will bear; do not
   hold concurrency artificially low to preserve weekly headroom.
 - When a window is exhausted, **rotate** to a fresh active account. The usage limit

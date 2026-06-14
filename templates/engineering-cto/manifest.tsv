@@ -96,3 +96,9 @@ seed-text    | npm test --silent                                                
 # On-demand skills — model-invoked by their description; inert (zero context) in
 # repos whose stack doesn't match. Stamped to .claude/skills/<name>/SKILL.md.
 refresh      | engineering-cto/skills/ts-node-stack/SKILL.md                                                             | .claude/skills/ts-node-stack/SKILL.md | on-demand TS/Node + BullMQ/Drizzle/Postgres stack playbook
+refresh      | engineering-cto/skills/dead-code-scan/SKILL.md                                                            | .claude/skills/dead-code-scan/SKILL.md | operator-invoked detection-only dead-code/unused-dep scan (knip/ts-prune/depcheck); surfaces candidates, never deletes (mention-don't-delete)
+refresh      | engineering-cto/skills/review-checklist-ts-node/SKILL.md                                                  | .claude/skills/review-checklist-ts-node/SKILL.md | on-demand R5 review checklist for TS/Node diffs (tsc/eslint/vitest + judgment pass)
+refresh      | engineering-cto/skills/review-checklist-python-uv/SKILL.md                                                | .claude/skills/review-checklist-python-uv/SKILL.md | on-demand R5 review checklist for Python/uv diffs (ruff/mypy/pytest + judgment pass)
+refresh      | engineering-cto/skills/review-checklist-swift-ios/SKILL.md                                                | .claude/skills/review-checklist-swift-ios/SKILL.md | on-demand R5 review checklist for Swift/iOS diffs (swiftlint/xcodebuild + judgment pass)
+# R4 local semgrep ruleset (consumed by security-scan.sh via SEMGREP_CONFIG; not a skill).
+refresh      | engineering-cto/semgrep/qofi-doctrine.yml                                                                 | .claude/semgrep/qofi-doctrine.yml | R4 semgrep rules: error-handling/DB/suppression/bounded-loop; pin via SEMGREP_CONFIG in security-scan.sh

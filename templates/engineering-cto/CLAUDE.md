@@ -75,7 +75,10 @@
 ## Verification (non-negotiable)
 - Tests are part of the feature, not a follow-up. Write them as you build.
 - CI must be green before merge. Never merge red. Never weaken or delete a test
-  to make a build pass — that's a regression, escalate instead.
+  to make a build pass — that's a regression, escalate instead. (Blanket
+  error-suppression added to go green is the same regression — now flagged by R4
+  semgrep rules `qofi-no-blanket-ts-suppression`, `qofi-no-blanket-eslint-disable`,
+  and `qofi-no-blanket-noqa-py`.)
 - Before declaring done or escalating, self-review against the spec's scope (§3)
   and acceptance criteria (§4).
 
@@ -256,7 +259,9 @@ gravest behavioral violation in this manual.
 - **Default: shared database, single-owner tables.** Each table/schema is owned
   by exactly one module; only the owner writes it. Others read via the owner's
   contract surface — never by touching its tables. A `SELECT` against a peer's
-  table is the data-layer equivalent of reaching into its internals.
+  table is the data-layer equivalent of reaching into its internals. (`SELECT *`
+  now flagged by R4 semgrep rule `qofi-no-select-star-sql`; the timestamptz floor
+  by `qofi-prefer-timestamptz-sql`.)
 - **DB-per-service is an exception, not a default.** Use it only for a *concrete*
   operational need: independent scaling, replicas, isolation, or independent
   deploy/availability. The CTO authors an ADR per-module naming the real need;
@@ -336,13 +341,18 @@ Distinguish two error classes; treat them differently.
 - **Fatal / systemic** — invalid config, dependency unreachable, auth failed,
   contract violated. **Fail fast, fail safe.** Default to deny/stop, never
   permissive. Surface immediately with full context (inputs, source location,
-  cause). Don't start or continue a doomed run.
+  cause). Don't start or continue a doomed run. (Unbounded loops with no stop
+  condition now flagged by R4 semgrep rules `qofi-while-true-no-stop-js` and
+  `qofi-while-true-no-stop-py`.)
 - **Per-item** — one file/record/row in a batch fails. **Isolate, log compactly
   (id + error class + one-line reason), continue the batch.** A single bad item
   never aborts the job. Aggregate failures into an end-of-run summary: counts,
   failures by category, list of failed ids for retry.
 - **Never silently swallow errors.** No empty `catch`, no ignored return codes,
-  no `try { ... } catch {}` that drops the cause.
+  no `try { ... } catch {}` that drops the cause. (Now enforced by R4 semgrep
+  rules `qofi-empty-catch-js`, `qofi-empty-except-py`,
+  `qofi-swallowed-promise-rejection-js`, and `qofi-fire-and-forget-async-js` in
+  `.claude/semgrep/qofi-doctrine.yml`.)
 - **Never silently leave corrupt or half-written state.** A failed item is
   marked failed and skipped — not partially written.
 - **Validate at contract surfaces.** Don't trust callers. Garbage in at the
