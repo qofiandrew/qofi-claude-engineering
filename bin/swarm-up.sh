@@ -48,8 +48,14 @@ _wait_for() {  # session pattern timeout
 }
 
 [ -f "$CONF" ] || { echo "swarm-up: missing $CONF" >&2; exit 1; }
-# shellcheck disable=SC1090
-[ -f "$TOKENS" ] && . "$TOKENS"
+# F1 token isolation (ADR-0018): the launcher must NOT source the shared vault into
+# its OWN process. tokens.env uses `export`, so `. '$TOKENS'` would export every
+# swarm's BOT_* and every account's OAUTH_TOKEN_* into swarm-up — and on a COLD
+# start `tmux new-session` begins the server as a CHILD of this process, so every
+# pane would INHERIT the whole vault (the leak F1 closes). Each token is instead
+# read in a SCOPED subshell at the one point it is needed (the per-swarm token
+# pre-check below, and the pane env line in launch_one), so the launcher's env —
+# and any tmux server it spawns — never holds a sibling's token.
 
 # _preflight_check NAME REPO CHANNEL
 #
@@ -282,7 +288,11 @@ launch_one() {  # name repo tokvar [channel] [account]
     echo "  running: $sess"; return 0
   fi
   [ -d "$repo" ] || { echo "  ERROR: repo not found: $repo" >&2; return 1; }
-  local token="${!tokvar:-}"
+  # SCOPED token pre-check (F1): read just this swarm's token in a subshell that
+  # sources the vault and exits, so the launcher's own env never holds the vault.
+  # tokvar is a validated identifier (swarm_conf_parse_line blanks a non-identifier),
+  # so the ${!tokvar} indirect deref is safe.
+  local token; token="$([ -f "$TOKENS" ] && . "$TOKENS" >/dev/null 2>&1; printf '%s' "${!tokvar:-}")"
   [ -z "$token" ] && { echo "  ERROR: no token in \$$tokvar (check tokens.env)" >&2; return 1; }
 
   # ---- preflight gates ---------------------------------------------------
@@ -349,17 +359,45 @@ launch_one() {  # name repo tokvar [channel] [account]
       echo "         Fix the ACCOUNT field, or clear it to use the default account. Skipping this swarm." >&2
       return 1
     fi
-    # Deref the OAUTH token var by NAME at RUNTIME inside the pane (same
-    # idiom as DISCORD_BOT_TOKEN's \"\$$tokvar\"): the literal token never
-    # enters the script or the command line / scrollback. unset
-    # ANTHROPIC_AUTH_TOKEN alongside ANTHROPIC_API_KEY so neither metered
-    # API path can shadow the OAuth token. CLAUDE_CONFIG_DIR points claude
-    # at the account's isolated config dir.
-    acct_env="; unset ANTHROPIC_AUTH_TOKEN; export CLAUDE_CONFIG_DIR='$SWARM_ACCT_CONFIG_DIR'; export CLAUDE_CODE_OAUTH_TOKEN=\"\$$SWARM_ACCT_TOKEN_VAR\""
+    # Deref the OAUTH token by NAME at RUNTIME inside the pane via a SCOPED
+    # subshell source (F1, ADR-0018): `$(. '$TOKENS'; printf '%s' "$<VAR>")`
+    # sources the vault inside a subshell that emits ONLY this account's token
+    # value and then exits — discarding every OTHER vault var, so the pane never
+    # holds another account's OAUTH token or another swarm's bot token. The literal
+    # token never enters the script or the command line / scrollback (the value is
+    # captured by the `VAR="$(...)"` assignment, never echoed). unset
+    # ANTHROPIC_AUTH_TOKEN alongside ANTHROPIC_API_KEY so neither metered API path
+    # can shadow the OAuth token. CLAUDE_CONFIG_DIR points claude at the account's
+    # isolated config dir.
+    acct_env="; unset ANTHROPIC_AUTH_TOKEN; export CLAUDE_CONFIG_DIR='$SWARM_ACCT_CONFIG_DIR'; export CLAUDE_CODE_OAUTH_TOKEN=\"\$(. '$TOKENS' >/dev/null 2>&1; printf '%s' \"\$$SWARM_ACCT_TOKEN_VAR\")\""
     # Token-auth is incompatible with remote-control — drop the flag.
     acct_rc=""
   fi
-  tmux send-keys -t "$sess" "unset ANTHROPIC_API_KEY; export SWARM_HOME='$SWARM_HOME'; $bound_exports; set -a; . '$TOKENS'; export DISCORD_BOT_TOKEN=\"\$$tokvar\"; set +a$acct_env" C-m
+  # F1 token isolation (ADR-0018). Two layers, both in this one pane env line:
+  #
+  # (1) SCRUB inherited vault vars. A tmux pane inherits the env of the server, and
+  #     on a COLD start that server is a child of swarm-up — so if anything ever
+  #     left the vault in an ancestor's env (a contaminated server, an operator
+  #     shell that sourced tokens.env), the pane would inherit every BOT_* and
+  #     OAUTH_TOKEN_*. We unset them FIRST (shell-agnostic: env|sed lists the var
+  #     NAMES, the pane shell may be bash or zsh). `unset IFS` first so the var-name
+  #     list word-splits on the DEFAULT separator even if a shell rc set a hostile
+  #     IFS (an unset IFS == space/tab/newline; POSIX, robust in bash/zsh/sh). This
+  #     neutralizes inheritance so the property holds at the PANE regardless of how
+  #     the server's env was built. It cannot touch the tokens we set next:
+  #     DISCORD_BOT_TOKEN / CLAUDE_CODE_OAUTH_TOKEN don't match the ^BOT_ /
+  #     ^OAUTH_TOKEN_ name patterns. (Extend the patterns if a future vault ever
+  #     holds a secret under a different prefix.)
+  # (2) DERIVE only this swarm's own tokens via a SCOPED subshell source:
+  #     `$(. '$TOKENS' >/dev/null 2>&1; printf '%s' "$<tokvar>")` sources the vault
+  #     inside a subshell that emits the ONE value and exits, discarding every other
+  #     vault var; the `>/dev/null` drops any stray source-time stdout. A labeled
+  #     account adds only its own CLAUDE_CODE_OAUTH_TOKEN via $acct_env, scoped the
+  #     same way. The literal token is computed in-pane and captured by the
+  #     assignment — it never appears in this send-keys string or the scrollback.
+  #     tokvar is a validated identifier (swarm_conf_parse_line), so the deref is
+  #     injection-safe. Default (empty account): the pane gets DISCORD_BOT_TOKEN only.
+  tmux send-keys -t "$sess" "unset ANTHROPIC_API_KEY; export SWARM_HOME='$SWARM_HOME'; $bound_exports; unset IFS; for v in \$(env | sed -n 's/^\(BOT_[A-Za-z0-9_]*\)=.*/\1/p;s/^\(OAUTH_TOKEN_[A-Za-z0-9_]*\)=.*/\1/p'); do unset \"\$v\"; done; export DISCORD_BOT_TOKEN=\"\$(. '$TOKENS' >/dev/null 2>&1; printf '%s' \"\$$tokvar\")\"$acct_env" C-m
   # CRITICAL: --dangerously-load-development-channels (not --channels) because the
   # qofi-swarm marketplace is self-published, not on Anthropic's approved allowlist.
   # --remote-control "$name" enables Remote Control and NAMES the remote session
