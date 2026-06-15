@@ -2,9 +2,12 @@
 
 This is the checklist a CTO follows to stand up the **independent CI referee** and
 the **release-PR promotion** flow in a *product* repo (e.g. `reserve-backend-2`).
-It is **not** a `swarm-update` artifact — it is per-product-repo adoption, run once
-per repo, mostly by the **operator** (branch protection + secrets) with the CTO
-authoring the workflow file.
+The **`ci.yml`** here is **not** a `swarm-update` artifact — it is per-product-repo
+adoption, run once per repo, mostly by the **operator** (branch protection + secrets)
+with the CTO authoring the workflow file. Its companion **`.gitleaks.toml`**, however,
+*is* now manifest-stamped (`refresh`), so future swarms inherit it via
+`swarm-init`/`swarm-sync` and it is no longer hand-authored — only the `ci.yml` half
+remains per-repo (see the checklist item and §*Recommendation*).
 
 It mechanizes the doctrine already in the stamped docs:
 - `CLAUDE.md` §*Promotion to `main`* — GitHub Actions is ground truth; `main` is
@@ -27,8 +30,10 @@ Legend: **[CTO]** an agent may do it · **[OPERATOR]** human-only (agents cannot
 - [ ] **[CTO]** Add `.github/workflows/ci.yml` (reference below). Commit on `dev`.
       Adopt the **PORTABLE** scaffolding verbatim; tune only the **PER-REPO**
       run-commands and service containers (see the split below the reference).
-- [ ] **[CTO]** Add `.gitleaks.toml` (reference below) — the content-only allowlist
-      for verified test-fixture placeholders. Commit on `dev`.
+- [x] **[stamped]** `.gitleaks.toml` is **stamped automatically by the engineering-cto
+      manifest** (`refresh`) — future swarms inherit it via `swarm-init`/`swarm-sync`.
+      **Verify it's present after a sync; do not hand-author it.** (Reference below;
+      content-only allowlist for verified test-fixture placeholders.)
 - [ ] **[CTO]** Record the per-product **coverage floor** (default **80%**) in the
       repo's `quality-bar.md`, and wire the test step to enforce it.
 - [ ] **[OPERATOR]** Install/confirm the deterministic scanners are available to
@@ -426,6 +431,12 @@ A single owner per file is exactly what every existing manifest class assumes, a
 CI violates it.
 
 ### Recommendation
+
+> **Status (2026-06-14):** **Option 1 is IMPLEMENTED** — `.gitleaks.toml` is now stamped
+> as a `refresh` artifact (this checklist + the engineering-cto `manifest.tsv`). **Option 2
+> is scoped as PROPOSED `ADR-0017`** (the managed-block / fragment-merge class) — author-only,
+> awaiting the operator's ruling; nothing in `swarm-lib.sh` changed and no `ci.yml` is stamped.
+> The analysis below is unchanged and is what `ADR-0017` cites.
 
 **Keep `ci.yml` per-repo (status quo) for now — do NOT add it to the manifest as a
 single `refresh`/`seed` artifact.** The clean PORTABLE/PER-REPO split this doc now

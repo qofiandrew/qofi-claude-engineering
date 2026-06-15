@@ -92,6 +92,9 @@ settings     | engineering-cto/settings.example.json                            
 git-hook     | engineering-cto/git-hooks/pre-commit                                                                      | .git/hooks/pre-commit
 gitignore    | .claude/worktrees/                                                                                        | .gitignore
 gitignore    | .claude/session-summary.md                                                                                | .gitignore
+# Repo-root content-only gitleaks allowlist. refresh: portable across engineering-cto
+# repos (no legit per-repo divergence); idempotent when cmp-equal, corrects drift otherwise.
+refresh      | engineering-cto/.gitleaks.toml                                                                            | .gitleaks.toml | content-only test-fixture allowlist (gitleaks 8.24.3 primitive form; see docs/CI-PROMOTION.md)
 seed-text    | npm test --silent                                                                                         | .claude/test-cmd
 # On-demand skills — model-invoked by their description; inert (zero context) in
 # repos whose stack doesn't match. Stamped to .claude/skills/<name>/SKILL.md.
