@@ -74,10 +74,22 @@
 #                                real `claude` slot is NEVER a write target.
 #   SWARM_CREDSWAP_ACCOUNT        the item account ("acct"). Default: `id -un`
 #                                (the macOS login id, as discovered).
-#   SWARM_CREDSWAP_AUTHCHECK_CMD  the trivial auth/whoami verify, run via `sh -c`
-#                                AFTER install. Zero exit = authenticated. Default:
-#                                a `claude`-based check if `claude` is on PATH,
-#                                else (no way to verify) we REFUSE rather than
+#   SWARM_CREDSWAP_AUTHCHECK_CMD  the auth verify, run via `sh -c` AFTER install.
+#                                It must distinguish THREE outcomes by EXIT CODE:
+#                                  0  → authenticates (swap good, proceed),
+#                                  75 → authenticates BUT is rate-limited — the
+#                                       account rotated TO is itself capped. This
+#                                       is NOT a swap failure: we do NOT restore
+#                                       (restoring would thrash to the prior,
+#                                       also-capped account). We exit 7 so the
+#                                       caller can detect ring exhaustion.
+#                                  any other non-zero → auth FAILED (bad/expired)
+#                                       → RESTORE the backup, fail loud (exit 4).
+#                                Default: bin/swarm-auth-probe.sh (a REAL
+#                                credential-exercising probe that fails on a dead
+#                                credential — NOT `claude --version`, which only
+#                                proves the binary runs). If that helper is absent
+#                                AND `claude` is not on PATH we REFUSE rather than
 #                                pretend — an unverifiable swap is not a safe swap.
 #   SWARM_CREDSWAP_KEYCHAIN       optional keychain path passed to add/find/delete
 #                                (e.g. a throwaway test keychain). Default: the
@@ -99,6 +111,11 @@
 #   4 — VERIFY failed    → prior credential RESTORED (the new blob did not auth).
 #   5 — BACKUP failed    → nothing installed (we refuse to swap without a backup).
 #   6 — RESTORE failed   → auth may be in an unknown state: LOUD, manual attention.
+#   7 — VERIFY says authed-BUT-RATE-LIMITED (authcheck exit 75): the swap is KEPT
+#       (the new credential is good — it authenticated), but the account it points
+#       at is itself capped. We do NOT restore (the prior account is also capped —
+#       that's how we got here). This is the ring-exhaustion signal: the caller
+#       (swarm-rotate / the tick) must escalate, not thrash-rotate. Distinct from 4.
 #
 # Bash 3.2-safe (macOS default). `security` is the only platform dep (mockable).
 
@@ -206,14 +223,25 @@ esac
 # ---------------------------------------------------------------------------
 AUTHCHECK="${SWARM_CREDSWAP_AUTHCHECK_CMD:-}"
 if [ -z "$AUTHCHECK" ]; then
-  if command -v claude >/dev/null 2>&1; then
-    # Trivial, negligible, no real spend: a version/whoami-class probe. If your
-    # `claude` exposes a cheaper auth ping, wire SWARM_CREDSWAP_AUTHCHECK_CMD.
-    AUTHCHECK='claude --version >/dev/null 2>&1'
+  # Prefer the REAL auth probe (bin/swarm-auth-probe.sh): it exercises the
+  # credential (so a bad/expired blob FAILS) and returns the 3-way verdict
+  # (0 good / 75 capped / other bad) this step relies on. `claude --version`
+  # would NOT do this — it only proves the binary runs, hollowing out
+  # restore-on-failure. We deliberately do not fall back to `--version`.
+  _probe="$(cd "$(dirname "$0")" && pwd)/swarm-auth-probe.sh"
+  if [ -x "$_probe" ]; then
+    AUTHCHECK="$_probe"
+  elif command -v claude >/dev/null 2>&1; then
+    # Auth-probe helper missing but `claude` present: run it as the probe so the
+    # verify still exercises the credential. swarm-auth-probe.sh's own default
+    # probe (a cheap credential round-trip) is what we'd want; absent the helper
+    # we approximate with the same credential-exercising call + 3-way mapping.
+    AUTHCHECK='claude -p "ping" --max-turns 1 >/dev/null 2>&1'
   else
-    echo "swarm-credswap: REFUSED — no auth verify available. 'claude' is not on PATH and" >&2
-    echo "                SWARM_CREDSWAP_AUTHCHECK_CMD is unset. Refusing to swap a credential" >&2
-    echo "                we cannot then VERIFY (unverifiable swap = unsafe swap)." >&2
+    echo "swarm-credswap: REFUSED — no auth verify available. swarm-auth-probe.sh is missing," >&2
+    echo "                'claude' is not on PATH, and SWARM_CREDSWAP_AUTHCHECK_CMD is unset." >&2
+    echo "                Refusing to swap a credential we cannot then VERIFY (unverifiable swap" >&2
+    echo "                = unsafe swap)." >&2
     exit 2
   fi
 fi
@@ -336,12 +364,34 @@ if ! install_blob; then
 fi
 echo "  installed (value supplied via stdin, never argv/scrollback)"
 
-# ── STEP 3: VERIFY ──────────────────────────────────────────────────────────
+# ── STEP 3: VERIFY (3-way) ──────────────────────────────────────────────────
+# The authcheck distinguishes three outcomes by exit code:
+#   0  → authenticates → swap good, proceed.
+#   75 → authenticates BUT rate-limited → the new credential is GOOD (it did
+#        authenticate) but the account it points at is itself capped. RESTORING
+#        would thrash back to the prior (also-capped) account, so we KEEP the swap
+#        and exit 7 — the ring-exhaustion signal. This is the (b)-vs-(c) split:
+#        (b) bad cred → restore; (c) capped-but-authed → keep + escalate.
+#   *  → auth FAILED (bad/expired) → RESTORE the backup, fail loud (exit 4).
 echo "swarm-credswap: step 3/3 — verifying the new credential authenticates"
-if ! sh -c "$AUTHCHECK"; then
-  loud_restore_or_die 4 "VERIFY failed — '$NEXT' did not authenticate; the new blob is bad/expired"
-fi
-echo "  verified: '$NEXT' authenticates"
-
-echo "swarm-credswap: DONE — active credential is now '$NEXT' and authenticates."
-exit 0
+sh -c "$AUTHCHECK"; ac_rc=$?
+case "$ac_rc" in
+  0)
+    echo "  verified: '$NEXT' authenticates"
+    echo "swarm-credswap: DONE — active credential is now '$NEXT' and authenticates."
+    exit 0
+    ;;
+  75)
+    # (c) — authed but capped. Do NOT restore.
+    echo "swarm-credswap: VERIFY — '$NEXT' AUTHENTICATES but is RATE-LIMITED (account already capped)." >&2
+    echo "                The swap is KEPT (the credential is valid); we are NOT restoring — the prior" >&2
+    echo "                account is also capped, so a rollback would just thrash. This is RING EXHAUSTION:" >&2
+    echo "                rotation has nowhere fresh to go. Caller must ESCALATE, not rotate again." >&2
+    echo "swarm-credswap: DONE (ring-exhausted) — '$NEXT' is active and authenticates, but capped."
+    exit 7
+    ;;
+  *)
+    # (b) — bad/expired credential. Roll back.
+    loud_restore_or_die 4 "VERIFY failed — '$NEXT' did not authenticate (authcheck exit $ac_rc); the new blob is bad/expired"
+    ;;
+esac

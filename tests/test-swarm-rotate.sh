@@ -94,6 +94,20 @@ cat > "$TMP/hooks/credswap-fail.sh" <<'EOF'
 #!/usr/bin/env bash
 exit 9
 EOF
+# A credential-swap stub that reports RING EXHAUSTION (exit 7): the swap TOOK and
+# the new credential AUTHENTICATES, but the account it points at is itself
+# rate-limited (see swarm-credswap-keychain.sh exit 7). The actuator must NOT
+# relaunch on a capped account and must escalate.
+cat > "$TMP/hooks/credswap-capped.sh" <<EOF
+#!/usr/bin/env bash
+printf 'swap-capped:%s\n' "\$1" >> "$WITNESS"
+exit 7
+EOF
+# An attention stub: records the escalation reason it was raised with.
+cat > "$TMP/hooks/attention.sh" <<EOF
+#!/usr/bin/env bash
+printf 'attention:%s\n' "\$1" >> "$WITNESS"
+EOF
 chmod +x "$TMP"/hooks/*.sh
 # The hook env values are inline commands that forward the positional arg
 # swarm-rotate passes (`sh -c "$hook" _ <arg>`) into the stub — exactly the
@@ -106,6 +120,8 @@ CHECKPOINT="$TMP/hooks/checkpoint.sh $Q"
 RELAUNCH="$TMP/hooks/relaunch.sh"
 CHECKPOINT_FAIL="$TMP/hooks/checkpoint-fail.sh $Q"
 CREDSWAP_FAIL="$TMP/hooks/credswap-fail.sh"
+CREDSWAP_CAPPED="$TMP/hooks/credswap-capped.sh $Q"
+ATTENTION="$TMP/hooks/attention.sh $Q"
 
 # tmux stub: has-session always exits 1 (NO live session) so the clean-boundary
 # probe sees an idle fleet by default. Tests that need a "working" swarm point
@@ -137,7 +153,7 @@ EMPTY_PROJ="$TMP/proj-empty"; mkdir -p "$EMPTY_PROJ"
 #   RR_TMUX       SWARM_TMUX_BIN        (default idle stub)
 #   RR_PROJ       CLAUDE_PROJECTS_DIR   (default empty projects dir)
 # Remaining args pass through to swarm-rotate. Captures $OUT + $rc.
-reset_rr() { RR_ACCOUNTS='max-a max-b'; RR_ACTIVE='max-a'; RR_CKPT=''; RR_CRED=''; RR_TMUX=''; RR_PROJ=''; }
+reset_rr() { RR_ACCOUNTS='max-a max-b'; RR_ACTIVE='max-a'; RR_CKPT=''; RR_CRED=''; RR_TMUX=''; RR_PROJ=''; RR_ATTN=''; }
 reset_rr
 # _rr_hook DEFAULT OVERRIDE — resolve a hook value: empty override => DEFAULT,
 # "-" override => empty (unwired), else the override. Done OUTSIDE the $(...)
@@ -163,6 +179,7 @@ run_rotate() {
     # An empty hook value means "leave it UNWIRED" — only export when non-empty.
     [ -n "$_ckpt" ] && export SWARM_CHECKPOINT_CMD="$_ckpt"
     [ -n "$_cred" ] && export SWARM_CREDSWAP_CMD="$_cred"
+    [ -n "$RR_ATTN" ] && export SWARM_ATTENTION_CMD="$RR_ATTN"
     bash "$ROTATE" "$@" 2>&1
   )"; rc=$?
   reset_rr
@@ -267,6 +284,31 @@ assert_lacks "$(cat "$WITNESS")" "relaunch" "no relaunch when the swap is refuse
 RR_CRED="$CREDSWAP_FAIL"; run_rotate
 assert_eq 5 "$rc" "failing credential swap -> exit 5"
 assert_lacks "$(cat "$WITNESS")" "relaunch" "no relaunch when the swap FAILED (don't boot on unknown creds)"
+
+# ---------------------------------------------------------------------------
+echo "=== 6b) RING EXHAUSTION: credswap exit 7 (authed-but-capped) -> exit 6, NO relaunch, escalate ==="
+# The swap TOOK and the new credential AUTHENTICATES, but the target account is
+# itself rate-limited (credswap exit 7). Every reachable account is capped, so
+# rotation has nowhere fresh to go. The actuator must:
+#   - NOT relaunch the fleet on a capped account,
+#   - exit 6 (distinct from a swap FAILURE's exit 5),
+#   - escalate via SWARM_ATTENTION_CMD if wired.
+: > "$WITNESS"
+RR_CRED="$CREDSWAP_CAPPED"; RR_ATTN="$ATTENTION"; run_rotate
+assert_eq 6 "$rc" "authed-but-capped swap (credswap 7) -> rotate exit 6 (ring exhausted)"
+assert_has "$(cat "$WITNESS")" "swap-capped:max-b" "the swap hook ran (the credential WAS installed/authenticated)"
+assert_lacks "$(cat "$WITNESS")" "relaunch" "ring exhaustion: fleet NOT relaunched on a capped account"
+assert_has "$OUT" "RING EXHAUSTED" "ring exhaustion is announced loudly"
+assert_has "$OUT" "TERMINAL" "it is a terminal stop, not a retry"
+assert_has "$(cat "$WITNESS")" "attention:" "ring exhaustion RAISED the attention escalation hook"
+assert_has "$(cat "$WITNESS")" "RING EXHAUSTED" "the attention reason names ring exhaustion"
+
+# Ring exhaustion with NO attention hook wired: still exit 6, surfaced on stderr.
+: > "$WITNESS"
+RR_CRED="$CREDSWAP_CAPPED"; RR_ATTN=''; run_rotate
+assert_eq 6 "$rc" "ring exhaustion without attention hook -> still exit 6 (terminal)"
+assert_lacks "$(cat "$WITNESS")" "relaunch" "still no relaunch on a capped account"
+assert_has "$OUT" "no SWARM_ATTENTION_CMD wired" "honestly reports the escalation hook is unwired"
 
 # ---------------------------------------------------------------------------
 echo "=== 7) --dry-run: prints the plan, executes NO hook ==="

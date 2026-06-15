@@ -208,15 +208,93 @@ OUT="$(SWARM_KEYCHAIN_CMD="$MOCK" MOCK_STORE="$MOCK_STORE" SWARM_CREDSWAP_SERVIC
        SWARM_CREDSWAP_BLOB_FETCH='printf %s "" # {}' bash "$CREDSWAP" max-b 2>&1)"; rc=$?
 assert_eq 2 "$rc" "empty blob -> REFUSED (exit 2)"
 assert_has "$OUT" "empty credential blob" "explains the empty-blob refusal"
-# 5d no auth verify available: SWARM_CREDSWAP_AUTHCHECK_CMD unset AND `claude` not
-# on PATH. `claude` lives in ~/.local/bin here; a PATH of /usr/bin:/bin keeps the
-# core tools the adapter needs (id, mktemp, cat, ...) but excludes `claude`, so
-# `command -v claude` fails deterministically.
+# 5d no auth verify available: SWARM_CREDSWAP_AUTHCHECK_CMD unset, AND the real
+# auth-probe helper (bin/swarm-auth-probe.sh — now the preferred default verifier)
+# is NOT reachable, AND `claude` is not on PATH. To make the probe genuinely
+# absent we run a COPY of the adapter from a scratch dir that has no sibling
+# swarm-auth-probe.sh; the adapter discovers the probe via $(dirname "$0"), so a
+# lone copy can't find it. `claude` lives in ~/.local/bin; PATH=/usr/bin:/bin
+# keeps the core tools (id, mktemp, cat, ...) but excludes `claude`, so
+# `command -v claude` fails deterministically. With NO verifier of any kind, the
+# adapter must REFUSE rather than swap a credential it cannot then VERIFY.
+LONE_DIR="$TMP/lone-bin"; mkdir -p "$LONE_DIR"
+cp "$CREDSWAP" "$LONE_DIR/swarm-credswap-keychain.sh"   # copy WITHOUT the probe sibling
 OUT="$(SWARM_KEYCHAIN_CMD="$MOCK" MOCK_STORE="$MOCK_STORE" SWARM_CREDSWAP_SERVICE="$TEST_SERVICE" \
        SWARM_CREDSWAP_ACCOUNT="$TEST_ACCOUNT" PATH="/usr/bin:/bin" \
-       SWARM_CREDSWAP_BLOB_FETCH="printf %s $NEXT_BLOB # {}" /bin/bash "$CREDSWAP" max-b 2>&1)"; rc=$?
-assert_eq 2 "$rc" "no auth-verify available -> REFUSED (exit 2)"
+       SWARM_CREDSWAP_BLOB_FETCH="printf %s $NEXT_BLOB # {}" /bin/bash "$LONE_DIR/swarm-credswap-keychain.sh" max-b 2>&1)"; rc=$?
+assert_eq 2 "$rc" "no auth-verify available (no probe, no claude) -> REFUSED (exit 2)"
 assert_has "$OUT" "unverifiable swap" "refuses an unverifiable swap"
+
+echo "=== (A2) REAL AUTH PROBE wired as the default verifier — the 3-way (b)-vs-(c) split ==="
+# These tests drive the FULL chain that closes the auth-check hole: the adapter's
+# VERIFY step runs bin/swarm-auth-probe.sh (the real default verifier), and the
+# probe's outcome is itself driven by a SYNTHETIC probe call (SWARM_AUTH_PROBE_CMD)
+# so no live `claude` and no real credential are ever involved. The point is the
+# distinction the old `claude --version` default could not make:
+#   (b) bad/expired credential        -> probe exit 1  -> adapter RESTORES (exit 4)
+#   (c) authenticates but rate-limited -> probe exit 75 -> adapter KEEPS swap (exit 7)
+AUTHPROBE="$ROOT/bin/swarm-auth-probe.sh"
+
+# run_probe — like run_logic but the authcheck is the REAL probe, with its
+# underlying probe CALL stubbed to a chosen outcome. \$1 = the synthetic probe
+# command (stdout/stderr + exit that the probe classifies); \$2.. = adapter args.
+run_probe() {
+  local _probe_cmd="$1"; shift
+  OUT="$(
+    export MOCK_STORE MOCK_FAIL_ADD
+    export SWARM_KEYCHAIN_CMD="$MOCK"
+    export SWARM_CREDSWAP_SERVICE="$TEST_SERVICE"
+    export SWARM_CREDSWAP_ACCOUNT="$TEST_ACCOUNT"
+    export SWARM_CREDSWAP_BLOB_FETCH="printf %s $NEXT_BLOB # {}"
+    # The adapter's verify = the real probe; the probe's call = our synthetic stub.
+    export SWARM_CREDSWAP_AUTHCHECK_CMD="$AUTHPROBE"
+    export SWARM_AUTH_PROBE_CMD="$_probe_cmd"
+    bash "$CREDSWAP" "$@" 2>&1
+  )"; rc=$?
+}
+
+echo "--- A2.1) probe says AUTHENTICATES (good) -> swap proceeds, slot holds NEXT, exit 0 ---"
+seed_prior; rm -f "$MOCK_FAIL_ADD"
+run_probe 'printf "pong\n"; exit 0' max-b
+assert_eq 0 "$rc" "good credential (probe exit 0) -> swap succeeds (exit 0)"
+assert_eq "$NEXT_BLOB" "$(slot_value)" "active slot holds the NEXT credential (swap kept)"
+assert_has "$OUT" "authenticates" "verify reports the credential authenticates"
+
+echo "--- A2.2) (b) BAD/EXPIRED synthetic credential -> RESTORE path, exit 4 (the proof owed) ---"
+# A deliberately-bad credential: the probe call fails to authenticate (non-zero,
+# auth-error surface). The adapter MUST roll back to the prior value. This is the
+# restore-on-bad-cred proof the build review owed — driven through the real probe.
+seed_prior; rm -f "$MOCK_FAIL_ADD"
+run_probe 'printf "authentication_error: OAuth token has expired\n" >&2; exit 1' max-b
+assert_eq 4 "$rc" "BAD credential (probe -> auth-fail) -> RESTORE path, exit 4"
+assert_eq "$PRIOR_BLOB" "$(slot_value)" "RESTORED: prior credential is back in the slot (bad swap rolled back)"
+assert_has "$OUT" "RESTORED" "announces the rollback on a bad credential"
+assert_lacks "$OUT" "$NEXT_BLOB" "no-leak: the bad next value is not printed"
+
+echo "--- A2.3) (b) bare non-zero probe (no message) is still treated as bad -> RESTORE, exit 4 ---"
+seed_prior; rm -f "$MOCK_FAIL_ADD"
+run_probe 'exit 9' max-b
+assert_eq 4 "$rc" "non-zero probe with no signal -> fail-closed RESTORE, exit 4"
+assert_eq "$PRIOR_BLOB" "$(slot_value)" "RESTORED: fail-closed rolls the slot back to prior"
+
+echo "--- A2.4) (c) AUTHENTICATES-BUT-RATE-LIMITED -> does NOT restore, swap KEPT, exit 7 ---"
+# The crux of (b)-vs-(c): the rotate target's credential is GOOD (it authenticates)
+# but the account is itself capped. Restoring would thrash to the (also-capped)
+# prior account, so the adapter KEEPS the swap and signals ring exhaustion (exit 7).
+seed_prior; rm -f "$MOCK_FAIL_ADD"
+run_probe 'printf "Claude usage limit reached - resets at 11pm\n"; exit 0' max-b
+assert_eq 7 "$rc" "authed-but-rate-limited -> ring-exhaustion signal (exit 7), NOT verify-fail (4)"
+assert_eq "$NEXT_BLOB" "$(slot_value)" "NOT restored: the swap is KEPT (new credential is valid, just capped)"
+assert_lacks "$OUT" "rolling back" "does NOT thrash-restore a valid-but-capped credential"
+assert_has "$OUT" "RING EXHAUSTION" "surfaces ring exhaustion (rotation has nowhere fresh to go)"
+
+echo "--- A2.5) (c) rate-limit on a NON-zero probe exit is also classified capped, not bad ---"
+# A 429 can ride on a non-zero exit too; the limit signal is authoritative either
+# way (the credential authenticated far enough to be told it's capped).
+seed_prior; rm -f "$MOCK_FAIL_ADD"
+run_probe 'printf "rate limit\n" >&2; exit 1' max-b
+assert_eq 7 "$rc" "rate-limit signal on non-zero exit -> still (c) capped, exit 7"
+assert_eq "$NEXT_BLOB" "$(slot_value)" "still NOT restored on a capped (non-zero) probe"
 
 echo "--- 6) NEVER name the real claude service as a write target ---"
 seed_prior; rm -f "$MOCK_FAIL_ADD"

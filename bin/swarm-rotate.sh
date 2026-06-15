@@ -87,6 +87,22 @@
 #       boundary).
 #   5 — credential swap hook failed (the swap did not take — fleet NOT relaunched
 #       so we don't bring everything up on an unknown credential).
+#   6 — RING EXHAUSTED: the swap hook reported the rotate TARGET authenticates but
+#       is itself RATE-LIMITED (credswap exit 7). Rotation has nowhere fresh to
+#       go — every reachable account is capped. The fleet is NOT relaunched (we
+#       refuse to boot the fleet on a capped account), and an attention flag is
+#       raised if SWARM_ATTENTION_CMD is wired. This is a LOUD, terminal stop, not
+#       a thrash-rotate. The caller (the tick) surfaces it and does NOT retry.
+#
+# ── RING-EXHAUSTION ESCALATION HOOK ──────────────────────────────────────────
+#   SWARM_ATTENTION_CMD  Optional. Run via `sh -c` with a one-line reason in $1
+#                        when ring exhaustion is detected, to raise the operator
+#                        attention flag. Default: a loud WARNING only (this script
+#                        cannot self-locate a tmux channel; the real attention
+#                        flag is raised from inside a swarm session — see
+#                        bin/swarm-attention.sh — or wired here by the operator/
+#                        orchestrator). Example:
+#                          export SWARM_ATTENTION_CMD='notify-ops "$1"'
 #
 # Bash 3.2-safe (macOS default).
 
@@ -308,11 +324,43 @@ else
     exit 2
   fi
   # The next account is passed as $1 AND exported, so the hook can read either.
-  if ! SWARM_ROTATE_TO_ACCOUNT="$NEXT" sh -c "$CREDSWAP" _ "$NEXT"; then
-    echo "swarm-rotate: credential swap FAILED for '$NEXT' — fleet NOT relaunched (would boot on an unknown credential)." >&2
-    exit 5
-  fi
-  echo "  swapped active credential -> '$NEXT'"
+  # The hook's exit code is 3-way meaningful (see swarm-credswap-keychain.sh):
+  #   0 → swap took and the new credential authenticates → relaunch the fleet.
+  #   7 → swap took, new credential AUTHENTICATES but the target is RATE-LIMITED →
+  #       RING EXHAUSTION. Do NOT relaunch on a capped account; escalate; stop.
+  #   * → swap failed → fleet NOT relaunched (don't boot on an unknown credential).
+  SWARM_ROTATE_TO_ACCOUNT="$NEXT" sh -c "$CREDSWAP" _ "$NEXT"; cs_rc=$?
+  case "$cs_rc" in
+    0)
+      echo "  swapped active credential -> '$NEXT'"
+      ;;
+    7)
+      # Concise attention reason (the flag file is length-capped). Verbose detail
+      # goes to stderr below.
+      _reason="RING EXHAUSTED — rotate target '$NEXT' authenticates but is rate-limited; every account in the ring is capped. Add capacity or wait for a reset."
+      echo "swarm-rotate: $_reason" >&2
+      echo "swarm-rotate: the fleet was NOT brought up on the capped account '$NEXT' — this is a TERMINAL stop, not a thrash-rotate." >&2
+      # Escalate: raise the operator attention flag if a hook is wired. The default
+      # is a loud warning only — this script cannot self-locate a tmux channel, so
+      # the canonical attention flag is raised from inside a swarm session (see
+      # bin/swarm-attention.sh) or wired here by the operator/orchestrator.
+      if [ -n "${SWARM_ATTENTION_CMD:-}" ]; then
+        if sh -c "${SWARM_ATTENTION_CMD}" _ "$_reason" >/dev/null 2>&1; then
+          echo "swarm-rotate: raised operator attention flag (SWARM_ATTENTION_CMD)." >&2
+        else
+          echo "swarm-rotate: WARNING — SWARM_ATTENTION_CMD failed; ring exhaustion is UN-escalated. Operator must intervene." >&2
+        fi
+      else
+        echo "swarm-rotate: NOTE — no SWARM_ATTENTION_CMD wired; ring exhaustion is surfaced on stderr only." >&2
+        echo "             Wire SWARM_ATTENTION_CMD (or have the tick escalate) so a capped ring raises the attention flag." >&2
+      fi
+      exit 6
+      ;;
+    *)
+      echo "swarm-rotate: credential swap FAILED for '$NEXT' (exit $cs_rc) — fleet NOT relaunched (would boot on an unknown credential)." >&2
+      exit 5
+      ;;
+  esac
 fi
 
 # ---------------------------------------------------------------------------
