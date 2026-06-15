@@ -486,12 +486,27 @@ is a residual *benefit* of this partitioning, not its purpose.) So:
   endpoint). Aim for ~5–6 tasks per teammate. If you're not creating enough
   tasks, split finer.
 
-**This is the persistent-team substrate.** A per-teammate worktree on
-`worktree-<name>` for the life of the teammate is the default and is **not**
-retired. Ephemeral fan-out (short-lived teammates that spin up, produce one
-diff, and tear down) runs on a recycled worktree pool instead — the
-substrate-conditional policy is recorded in **ADR-0008**. Worktree isolation
-as the anti-swap defense holds in both substrates.
+**The substrate determines the worktree scheme — two schemes, never collapsed.**
+Worktree isolation as the anti-swap defense holds in both substrates; what
+differs is the *lifecycle* of the worktree, conditioned on which substrate the
+work runs on:
+
+- **Persistent Agent Teams → one durable worktree per teammate.** A per-teammate
+  worktree on `worktree-<name>` for the life of the teammate. The CTO provisions
+  `.claude/worktrees/<name>/` before spawn, the teammate commits only there, the
+  CTO owns merges into `dev`. This is the default and is **not** retired — it is
+  what preserves clean commit attribution on long-lived named teammates whose
+  trail matters for the build log and review.
+- **Ephemeral ultracode fan-out → a recycled worktree pool.** Short-lived workers
+  that spin up, produce one diff, and tear down do **not** each get a durable
+  worktree. Read-only phases share one read-only tree; the write phase draws
+  worktrees from a pool sized to the fan-out concurrency cap (≤16 concurrent
+  workers), recycled across waves rather than created per worker. The
+  orchestrator's workflow script provisions and recycles the pool — the platform
+  does not do this natively.
+- **Do not collapse the two.** A durable worktree per ephemeral worker wastes the
+  provisioning cost the pool exists to amortize; a shared tree for persistent
+  teammates reintroduces the attribution race. (Rationale: ADR-0008.)
 
 **Shared contracts run under a one-writer lease.** Worktree isolation lets two
 teammates edit the **same** shared contract file (schema, type definition, API
@@ -982,7 +997,7 @@ stays high.
 **3. Coverage floor.** "Tests pass" at unmeasured coverage no longer satisfies
 the gate. The suite must meet the per-product threshold in that repo's
 `quality-bar.md` — **default 80%**, tuned per repo. Never weaken the floor to go
-green (that's the §*Verification* regression rule).
+green (that's the §*Test gate* regression rule).
 
 **4. Harness-audit preflight.** A fail-loud, first-party check (qofi-authored, in
 the existing preflight-gate style) audits the harness configs themselves — the
