@@ -71,10 +71,33 @@ STATE_FILE="$TMP/active-account"   # the account-state stub's backing store
 
 # poll stub: exits with whatever code $TMP/poll.rc holds (the verdict under test).
 # Prints a recognizable line so we can assert the orchestrator logs the poll out.
+# On --json it emits a structured burn-vs-budget payload (for observe-mode tests).
 cat > "$TMP/stubs/poll.sh" <<EOF
 #!/usr/bin/env bash
+for a in "\$@"; do
+  if [ "\$a" = "--json" ]; then
+    echo '{"verdict":"NEAR","five_hour_pct":88,"weekly_pct":41,"worst_pct":88,"worst_window":"5h","threshold_pct":85,"account":"max-a"}'
+    exit "\$(cat "$TMP/poll.rc" 2>/dev/null || echo 0)"
+  fi
+done
 echo "stub-poll verdict line"
 exit "\$(cat "$TMP/poll.rc" 2>/dev/null || echo 0)"
+EOF
+
+# limit-detect stub: exits with $TMP/detect.rc (default 0 = real OK), records that
+# it was consulted. Used by observe-mode to log the real signal.
+cat > "$TMP/stubs/detect.sh" <<EOF
+#!/usr/bin/env bash
+printf 'detect-called\n' >> "$WITNESS"
+echo "stub-detect real signal"
+exit "\$(cat "$TMP/detect.rc" 2>/dev/null || echo 0)"
+EOF
+
+# attention stub: records the ring-exhaustion escalation reason it was called with.
+cat > "$TMP/stubs/attention.sh" <<EOF
+#!/usr/bin/env bash
+printf 'attention-raised:%s\n' "\${1:-}" >> "$WITNESS"
+exit "\$(cat "$TMP/attention.rc" 2>/dev/null || echo 0)"
 EOF
 
 # rotate stub: answers --next with a fixed account ($TMP/next.acct, default
@@ -106,6 +129,8 @@ chmod +x "$TMP"/stubs/*.sh
 # Defaults for the per-run knobs.
 echo 0          > "$TMP/poll.rc"     # poll verdict (overridden per test)
 echo 0          > "$TMP/rotate.rc"   # actuator outcome (overridden per test)
+echo 0          > "$TMP/detect.rc"   # real-limit detector verdict (observe mode)
+echo 0          > "$TMP/attention.rc" # attention-hook exit (ring exhaustion)
 echo "max-NEXT" > "$TMP/next.acct"   # what --next returns
 printf 'max-CUR' > "$STATE_FILE"     # the stored active-before account
 
@@ -116,12 +141,17 @@ printf 'max-CUR' > "$STATE_FILE"     # the stored active-before account
 #   T_NEXT       -> account the rotate --next returns (default 'max-NEXT')
 #   T_ACTIVE     -> stored active-before account (default 'max-CUR'; '' = empty)
 #   T_AT_FORCE   -> SWARM_TICK_AT_FORCE value    (default unset)
+#   T_DETECT_RC  -> real-limit detector exit (observe mode)  (default 0)
+#   T_ATTN_RC    -> attention-hook exit (ring exhaustion)    (default 0)
+#   T_NO_ATTN    -> if 1, do NOT wire SWARM_ATTENTION_CMD (no escalation hook)
 # Captures stdout+stderr in $OUT, exit in $rc, and resets the witness each run.
-reset_tt() { T_POLL_RC=0; T_ROTATE_RC=0; T_NEXT='max-NEXT'; T_ACTIVE='max-CUR'; T_AT_FORCE=''; }
+reset_tt() { T_POLL_RC=0; T_ROTATE_RC=0; T_NEXT='max-NEXT'; T_ACTIVE='max-CUR'; T_AT_FORCE=''; T_DETECT_RC=0; T_ATTN_RC=0; T_NO_ATTN=0; }
 reset_tt
 run_tick() {
   printf '%s' "$T_POLL_RC"   > "$TMP/poll.rc"
   printf '%s' "$T_ROTATE_RC" > "$TMP/rotate.rc"
+  printf '%s' "$T_DETECT_RC" > "$TMP/detect.rc"
+  printf '%s' "$T_ATTN_RC"   > "$TMP/attention.rc"
   printf '%s' "$T_NEXT"      > "$TMP/next.acct"
   printf '%s' "$T_ACTIVE"    > "$STATE_FILE"
   : > "$WITNESS"
@@ -129,6 +159,10 @@ run_tick() {
     export SWARM_POLL_CMD="$TMP/stubs/poll.sh"
     export SWARM_ROTATE_CMD="$TMP/stubs/rotate.sh"
     export SWARM_ACCOUNT_STATE_CMD="$TMP/stubs/state.sh"
+    export SWARM_LIMIT_DETECT_CMD="$TMP/stubs/detect.sh"
+    # Wire the attention hook the way an operator would: a command TEMPLATE that
+    # references "$1" so the reason propagates through `sh -c "$CMD" _ "<reason>"`.
+    [ "$T_NO_ATTN" != "1" ] && export SWARM_ATTENTION_CMD="$TMP/stubs/attention.sh \"\$1\""
     [ -n "$T_AT_FORCE" ] && export SWARM_TICK_AT_FORCE="$T_AT_FORCE"
     bash "$TICK" "$@" 2>&1
   )"; rc=$?
@@ -232,6 +266,21 @@ assert_has "$W" "active=[]" "empty stored active is passed through (actuator col
 assert_has "$W" "state-set:max-FIRST" "post-rotate active persisted from --next"
 
 # ---------------------------------------------------------------------------
+echo "=== 8b) FIX 6: a hostile ring handle is REJECTED, not interpolated into the state cmd ==="
+# The post-rotate state write does `sh -c "$STATE_CMD set '$NEXT_ACCOUNT'"`. A
+# handle containing a single quote would break out of the single-quotes and inject
+# a command. The tick must VALIDATE the handle ([A-Za-z0-9._-]+) and refuse to
+# record an invalid one — no injection, no malformed state, loud warning. The
+# rotation itself still succeeded (actuator exit 0), so the tick still exits 0.
+# Use a canary file the injection WOULD touch to prove it never executes.
+CANARY="$TMP/injection-canary"; rm -f "$CANARY"
+T_POLL_RC=10; T_ROTATE_RC=0; T_NEXT="x'; touch $CANARY; echo '"; run_tick
+assert_eq 0 "$rc" "hostile --next handle + successful rotate -> tick still exits 0"
+assert_lacks "$W" "state-set:" "hostile handle is NOT written to the account-state store"
+assert_has "$OUT" "not a valid account name" "the invalid handle is rejected loudly"
+if [ -f "$CANARY" ]; then bad "INJECTION: the hostile handle executed (canary file was created)"; else ok "no injection: the hostile handle never reached a shell (canary absent)"; fi
+rm -f "$CANARY"
+
 echo "=== 9) LAUNCHD: rotate-tick plist renders well-formed (NO launchctl load) ==="
 # Render-only via the installer with a FAKE HOME/tmux + an explicit interval, and
 # assert the rendered plist for our label is well-formed with the right cadence.
@@ -277,6 +326,64 @@ fi
 HOME="$FAKE_HOME" SWARM_TMUX_BIN="$FAKE_TMUX" SWARM_HOME="$ROOT" SWARM_TICK_INTERVAL=abc \
   bash "$ROOT/bin/swarm-launchd-install.sh" --render-only "$TMP/ld3" >/dev/null 2>&1
 assert_eq 1 "$?" "non-numeric SWARM_TICK_INTERVAL -> installer refuses (exit 1), no plist rendered"
+
+# ---------------------------------------------------------------------------
+echo "=== 10) --observe (CALIBRATE): logs burn-vs-budget + real signal, rotates NOTHING ==="
+# NEAR verdict in observe mode: must NOT call the actuator and must NOT write state,
+# but MUST consult the real-limit detector and emit a structured OBSERVE line.
+T_POLL_RC=10; T_DETECT_RC=0; run_tick --observe
+assert_eq 0 "$rc" "--observe exits 0"
+assert_has "$OUT" "OBSERVE" "observe emits a calibration line"
+assert_has "$OUT" "proxy_verdict=NEAR" "observe logs the proxy verdict word"
+assert_has "$OUT" "proxy_exit=10" "observe logs the proxy exit code"
+assert_has "$OUT" "five_hour_pct=88" "observe logs the estimated 5h burn-vs-budget pct"
+assert_has "$OUT" "weekly_pct=41" "observe logs the estimated weekly pct"
+assert_has "$OUT" "threshold_pct=85" "observe logs the rotation threshold"
+assert_has "$OUT" "account=max-a" "observe logs which account"
+assert_has "$OUT" "real_signal=OK" "observe logs the REAL limit signal (detector consulted)"
+assert_has "$OUT" "would_rotate=yes" "observe states the live tick WOULD rotate on this verdict"
+assert_has "$W" "detect-called" "observe consulted the real-limit detector"
+assert_lacks "$W" "rotate:" "--observe does NOT invoke the actuator"
+assert_lacks "$W" "state-set:" "--observe writes NO state"
+
+# Observe with the REAL detector reporting AT (a real cap was observed) while the
+# proxy says NEAR — exactly the calibration mismatch the operator is hunting for.
+T_POLL_RC=10; T_DETECT_RC=20; run_tick --observe
+assert_eq 0 "$rc" "--observe (real AT vs proxy NEAR) still exits 0, no rotation"
+assert_has "$OUT" "real_signal=AT" "observe surfaces a REAL cap even when the proxy only said NEAR"
+assert_lacks "$W" "rotate:" "--observe never rotates regardless of signal"
+
+# Observe with an UNKNOWN proxy verdict: blanks for metrics are themselves data.
+T_POLL_RC=3; T_DETECT_RC=0; run_tick --observe
+assert_eq 0 "$rc" "--observe (UNKNOWN proxy) exits 0"
+assert_has "$OUT" "proxy_verdict=UNKNOWN" "observe logs an UNKNOWN proxy verdict"
+assert_has "$OUT" "would_rotate=no" "observe: UNKNOWN would NOT rotate live"
+
+# ---------------------------------------------------------------------------
+echo "=== 11) RING EXHAUSTION: actuator exit 6 -> escalate (attention) + terminal stop ==="
+# The actuator reports the rotate target authenticates but is rate-limited (exit 6).
+# Every reachable account is capped. The tick must ESCALATE and STOP (exit 6),
+# NOT retry, NOT write state.
+T_POLL_RC=20; T_ROTATE_RC=6; run_tick
+assert_eq 6 "$rc" "actuator ring-exhaustion (6) -> tick exit 6 (terminal, distinct from refusal/failure)"
+assert_has "$W" "rotate:" "ring exhaustion: actuator WAS invoked"
+assert_lacks "$W" "state-set:" "ring exhaustion: NO state write"
+assert_has "$OUT" "RING EXHAUSTED" "ring exhaustion is announced loudly"
+assert_has "$W" "attention-raised:" "ring exhaustion RAISES the operator attention flag (escalation)"
+assert_has "$W" "RING EXHAUSTED" "the attention reason names ring exhaustion"
+assert_has "$OUT" "TERMINAL" "ring exhaustion is a terminal stop, not a retry"
+
+# Ring exhaustion with NO attention hook wired: still terminal (exit 6), surfaced
+# on stderr, but the escalation is the loud warning (honest about being un-wired).
+T_POLL_RC=20; T_ROTATE_RC=6; T_NO_ATTN=1; run_tick
+assert_eq 6 "$rc" "ring exhaustion without attention hook -> still exit 6 (terminal)"
+assert_lacks "$W" "attention-raised:" "no hook wired -> no attention call (witness clean)"
+assert_has "$OUT" "no SWARM_ATTENTION_CMD wired" "honestly reports the escalation hook is unwired"
+
+# Attention hook itself FAILS: ring exhaustion is still terminal + loudly un-escalated.
+T_POLL_RC=20; T_ROTATE_RC=6; T_ATTN_RC=1; run_tick
+assert_eq 6 "$rc" "ring exhaustion + failing attention hook -> still exit 6"
+assert_has "$OUT" "UN-escalated" "a failed attention hook is surfaced loudly (operator must intervene)"
 
 # ---------------------------------------------------------------------------
 echo ""

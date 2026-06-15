@@ -220,3 +220,62 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   `test-doctrine-compose.sh`; new fixture
   `CLAUDE.engineering-cto.frontend.expected.md`. Docs: README §6,
   `_base/README.md`, manifest header.
+- `2026-06-14` — **Rotation hardening** (branch `rotation-harden`). Four safety
+  gaps in the live account-rotation chain closed; synthetic-fixture tests only,
+  nothing rotated. (1) **Auth-check hole closed.** The credswap VERIFY default was
+  `claude --version` — proves the binary runs, not that the credential
+  authenticates, hollowing out restore-on-failure. New `bin/swarm-auth-probe.sh`
+  is now the default `SWARM_CREDSWAP_AUTHCHECK_CMD`: a REAL credential-exercising
+  probe with a **3-way verdict** — (a) authenticates → exit 0; (b) auth FAILS
+  (bad/expired) → exit 1 → credswap RESTORES the backup (exit 4); (c)
+  authenticates BUT is rate-limited → exit 75 → credswap KEEPS the swap and exits
+  **7** (ring-exhaustion signal — restoring would thrash to the also-capped prior
+  account). The (b)-vs-(c) split is the crux and is proven by test. (2) **Real
+  rate-limit detector.** The authoritative on-limit signal IS observable here:
+  the watcher already reads it via `pane_state` rc=2 (paused-limit). New
+  `bin/swarm-limit-detect.sh` turns "any live swarm pane shows a known limit
+  message" into the poller's AT verdict; `--or-poll` makes the real signal the
+  hard stop and delegates to the burn-proxy poller (kept as the NEAR early
+  warning) otherwise. (3) **Observe/calibrate mode** (`swarm-rotate-tick.sh
+  --observe`): logs estimated-burn-vs-budget + the real signal each tick and
+  rotates NOTHING, so budgets can be tuned before going live. (4)
+  **Ring-exhaustion terminal state**: credswap 7 → rotate **6** (fleet NOT
+  relaunched on a capped account) → tick **6** — a LOUD, terminal stop that
+  escalates via `SWARM_ATTENTION_CMD` instead of thrash-rotating. New tests
+  `test-swarm-auth-probe.sh`, `test-swarm-limit-detect.sh`; augmented
+  `test-swarm-credswap.sh`, `test-swarm-rotate.sh`, `test-swarm-rotate-tick.sh`.
+  `swarm-usage-poll.sh` and the credswap secret-handling left untouched.
+
+  **Operator runbook delta (rotation).**
+  - **New env vars:**
+    - `SWARM_CREDSWAP_AUTHCHECK_CMD` — now defaults to `bin/swarm-auth-probe.sh`
+      (was an internal `claude --version`). Override only if you have a cheaper
+      credential-exercising auth ping; it MUST exit 0/1/75 per the 3-way contract.
+    - `SWARM_AUTH_PROBE_CMD` — the actual probe CALL `swarm-auth-probe.sh` runs
+      (default: a cheap `claude -p` round-trip). Wire to your cheapest
+      credential-touching call. `SWARM_LIMIT_PATTERNS` / `SWARM_AUTH_FAIL_PATTERNS`
+      tune the capped-vs-bad classification (limit patterns shared with
+      `pane_state`).
+    - `SWARM_POLL_CMD='…/swarm-limit-detect.sh --or-poll'` — set the tick's poll
+      seam to this to make the REAL limit signal authoritative (burn proxy stays
+      the NEAR warning). Leave unset to keep the proxy-only behavior.
+    - `SWARM_LIMIT_DETECT_CMD` — the real-limit detector the tick consults in
+      `--observe` (default `bin/swarm-limit-detect.sh`).
+    - `SWARM_ATTENTION_CMD` — escalation hook for **ring exhaustion** (every
+      account capped). Run with the reason in `$1`; wire to a notifier or to
+      `bin/swarm-attention.sh` from inside a swarm session. Unset → ring
+      exhaustion is still terminal (exit 6) and loud on stderr, just not flagged.
+  - **observe → calibrate → enable sequence (do this BEFORE live rotation):**
+    1. **Observe** — run `swarm-rotate-tick.sh --observe` on the live cadence
+       (e.g. the launchd interval), logging to a file, for a few days. Each tick
+       emits one greppable line, e.g.:
+       `swarm-rotate-tick: OBSERVE ts=2026-06-14T19:40:02Z proxy_verdict=NEAR proxy_exit=10 five_hour_pct=88 weekly_pct=41 worst_pct=88 worst_window=5h threshold_pct=85 account=max-a real_signal=OK real_exit=0 would_rotate=yes (NOT rotating: observe-mode)`.
+    2. **Calibrate** — compare `would_rotate`/`proxy_verdict` against
+       `real_signal`. Tune `SWARM_5H_TOKEN_BUDGET` / `SWARM_WEEKLY_TOKEN_BUDGET`
+       (and `SWARM_ROTATE_THRESHOLD_PCT`) so NEAR fires shortly BEFORE the real
+       limit (`real_signal=AT`), not long after or far too early.
+    3. **Enable** — only then drop `--observe` and wire `SWARM_CREDSWAP_CMD` (live
+       rotation still refuses without it). Keep `SWARM_ATTENTION_CMD` wired so a
+       fully-capped ring escalates to your phone instead of looping. On a ring
+       exhaustion alert: add a fresh account to `SWARM_ACCOUNTS` or wait for a
+       window reset, then clear the attention flag.
