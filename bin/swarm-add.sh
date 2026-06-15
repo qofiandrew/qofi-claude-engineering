@@ -87,7 +87,14 @@ SCRIPT_DIR_EARLY="$(cd "$(dirname "$0")" && pwd)"
 # today's $HOME/.claude/channels/discord/access.json (honoring SWARM_ACCESS_FILE
 # if set). A labeled account would land in $HOME/.claude-accounts/<label>/...
 # instead. This is the SOLE constructor of the path — never hand-built here.
-swarm_account_resolve ""
+# The rc-check is a no-op today (the literal "" always resolves) but is here so a
+# future --account flag that threads a VARIABLE label is fail-safe by default
+# (refuse rather than read a stale SWARM_ACCT_ACCESS_FILE) — same discipline as
+# the WORKING-rail consumers (ADR-0018, Phase-2 Finding 1).
+if ! swarm_account_resolve ""; then
+  echo "swarm-add: could not resolve the account's access.json path" >&2
+  exit 1
+fi
 ACCESS="$SWARM_ACCT_ACCESS_FILE"
 
 usage() {

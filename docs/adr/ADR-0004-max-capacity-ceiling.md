@@ -4,7 +4,7 @@
 **Date:** 2026-05-21
 **Reversibility:** two-way — a billing/scale knob, not baked into the code.
 **Escalated:** no — operator constraint ("must use Max").
-**Amended-by:** ADR-0016
+**Amended-by:** ADR-0016, ADR-0018
 
 ## Context
 

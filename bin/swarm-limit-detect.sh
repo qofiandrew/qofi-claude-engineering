@@ -74,10 +74,12 @@ usage() { sed -n '1,80p' "$0"; exit "${1:-0}"; }
 
 OR_POLL=0
 JSON=0
+BY_ACCOUNT=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --or-poll) OR_POLL=1; shift ;;
-    --json)    JSON=1; shift ;;
+    --or-poll)    OR_POLL=1; shift ;;
+    --json)       JSON=1; shift ;;
+    --by-account) BY_ACCOUNT=1; shift ;;
     -h|--help) usage 0 ;;
     --*) echo "$PROG: unknown flag: $1" >&2; usage 2 ;;
     *)   echo "$PROG: unexpected arg: $1" >&2; usage 2 ;;
@@ -124,6 +126,87 @@ if [ -n "${SWARM_PANE_STATE_CMD:-}" ]; then
   have_tmux=1         # injected probe stands in for tmux
 elif command -v "$TMUX_BIN" >/dev/null 2>&1; then
   have_tmux=1
+fi
+
+# ── --by-account: per-ACCOUNT cap grouping (the failover router's detector) ───
+# The single-account scan below collapses the whole fleet to one verdict and
+# BREAKS on the first capped pane. The failover model (ADR-0018) needs the
+# OPPOSITE: scan EVERY live swarm, GROUP by its swarm.conf field-6 account, and
+# report each account's verdict — an account is AT if ANY of its swarms shows a
+# limit pane, OK if any of its swarms is readable-and-not-capped, else UNKNOWN.
+# We emit one stable line per account; the router parses these to decide which
+# accounts must evacuate. The aggregate exit mirrors the single-account contract
+# (20 if any account is capped / 0 if any readable-not-capped / 3 if none
+# observable) so a caller that only checks the exit code still gets a sane signal.
+if [ "$BY_ACCOUNT" -eq 1 ]; then
+  # Always iterate the conf to build the account UNIVERSE (so an account whose
+  # swarms are all down still reports UNKNOWN rather than vanishing). Probe each
+  # live swarm; record observations as TAB-delimited "<acctkey> <rc> <swarm> <detail>".
+  OBS=""
+  while IFS= read -r _line; do
+    swarm_conf_parse_line "$_line" || continue
+    _name="$SWARM_CONF_F_NAME"
+    [ -z "$_name" ] && continue
+    _key="$SWARM_CONF_F_ACCOUNT"; [ -z "$_key" ] && _key="_default_"
+    _sess="${PREFIX}-${_name}"
+    _rc=4; _det=""
+    if [ "$have_tmux" -eq 1 ]; then
+      if [ -n "${SWARM_PANE_STATE_CMD:-}" ]; then
+        probe_pane "$_sess"; _rc="$PANE_RC"; _det="$PANE_DETAIL"
+      elif "$TMUX_BIN" has-session -t "$_sess" 2>/dev/null; then
+        probe_pane "$_sess"; _rc="$PANE_RC"; _det="$PANE_DETAIL"
+      fi
+    fi
+    OBS="$OBS$_key	$_rc	$_name	$_det
+"
+  done < <(grep -vE '^[[:space:]]*(#|$)' "$CONF")
+
+  if [ "$JSON" -eq 1 ]; then
+    printf '%s' "$OBS" | python3 -c '
+import json,sys
+acc={}   # key -> dict; preserves first-seen order (py3.7+ dict is ordered)
+for raw in sys.stdin.read().splitlines():
+    if not raw.strip(): continue
+    parts=raw.split("\t")
+    while len(parts)<4: parts.append("")
+    key,rc,sw,det=parts[0],parts[1],parts[2],parts[3]
+    a=acc.setdefault(key,{"account":(None if key=="_default_" else key),"verdict":"UNKNOWN","swarm":None,"limit_line":None,"_readable":False})
+    if rc=="2" and a["verdict"]!="AT":
+        a["verdict"]="AT"; a["swarm"]=sw; a["limit_line"]=(det or None)
+    if rc!="4" and a["verdict"]!="AT":
+        a["verdict"]="OK"; a["_readable"]=True
+out=[]
+anyAT=anyOK=False
+for k,a in acc.items():
+    if a["verdict"]=="AT": anyAT=True
+    elif a["verdict"]=="OK": anyOK=True
+    a.pop("_readable",None)
+    out.append(a)
+print(json.dumps({"accounts":out}))
+sys.exit(20 if anyAT else (0 if anyOK else 3))
+' ; exit $?
+  fi
+
+  printf '%s' "$OBS" | awk -F'\t' '
+    $1=="" { next }
+    {
+      key=$1; rc=$2; sw=$3; det=$4
+      if (!(key in firstseen)) { firstseen[key]=1; order[++n]=key }
+      if (rc=="2") { if (!(key in atsw)) { atsw[key]=sw; atdet[key]=det }; at[key]=1 }
+      if (rc!="4") readable[key]=1
+    }
+    END {
+      anyAT=0; anyOK=0
+      for (i=1;i<=n;i++) {
+        k=order[i]
+        if (k in at)            { anyAT=1; printf "account=%s verdict=AT swarm=%s detail=%s\n", k, atsw[k], atdet[k] }
+        else if (k in readable) { anyOK=1; printf "account=%s verdict=OK\n", k }
+        else                    {          printf "account=%s verdict=UNKNOWN\n", k }
+      }
+      if (anyAT) exit 20; else if (anyOK) exit 0; else exit 3
+    }
+  '
+  exit $?
 fi
 
 if [ "$have_tmux" -eq 1 ]; then

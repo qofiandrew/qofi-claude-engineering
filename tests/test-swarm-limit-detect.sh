@@ -110,6 +110,56 @@ run 'case "$1" in *beta*) printf "usage limit reached\n"; exit 2;; *) exit 1;; e
 assert_has "$OUT" '"verdict": "AT"' "json reports verdict AT"
 assert_has "$OUT" '"swarm": "beta"' "json names the capped swarm"
 
+echo "=== --by-account: per-ACCOUNT cap grouping (the failover detector) ==="
+# Fixture with FOUR swarms across THREE accounts: maxa (two swarms), maxb (one),
+# and the default account (empty field 6). The grouping must scan ALL of them
+# (never break early) and report each account independently.
+BA_HOME="$TMP/ba"; mkdir -p "$BA_HOME/templates"
+cat > "$BA_HOME/swarm.conf" <<'CONF'
+# name | repo | tok | channel | guild | account
+a1 | ~/r/a1 | T1 | 111 | 999 | maxa
+a2 | ~/r/a2 | T2 | 222 | 999 | maxa
+b1 | ~/r/b1 | T3 | 333 | 999 | maxb
+c1 | ~/r/c1 | T4 | 444 | 999 |
+CONF
+run_ba() {  # PANE_STUB EXTRA_FLAGS... -> OUT, rc
+  local stub="$1"; shift
+  OUT="$(SWARM_HOME="$BA_HOME" SWARM_PANE_STATE_CMD="$stub" bash "$DETECT" --by-account "$@" 2>&1)"; rc=$?
+}
+
+echo "--- maxb capped; maxa + default readable -> per-account verdicts, exit 20 ---"
+run_ba 'case "$1" in *b1*) printf "Claude usage limit reached\n"; exit 2;; *) exit 1;; esac'
+assert_eq 20 "$rc" "any account capped -> aggregate exit 20"
+assert_has "$OUT" "account=maxb verdict=AT" "maxb reported AT"
+assert_has "$OUT" "swarm=b1" "names b1 as maxb's capped swarm"
+assert_has "$OUT" "account=maxa verdict=OK" "maxa reported OK (its swarms not capped)"
+assert_has "$OUT" "account=_default_ verdict=OK" "the default account is reported too"
+
+echo "--- ONE of maxa's two swarms capped -> the WHOLE account is AT ---"
+run_ba 'case "$1" in *a2*) printf "5-hour limit\n"; exit 2;; *) exit 1;; esac'
+assert_has "$OUT" "account=maxa verdict=AT" "maxa AT when ANY of its swarms is capped"
+assert_has "$OUT" "swarm=a2" "names a2 as the capped swarm"
+assert_has "$OUT" "account=maxb verdict=OK" "maxb stays OK (independent of maxa)"
+
+echo "--- nothing capped -> every account OK, exit 0 ---"
+run_ba 'exit 1'
+assert_eq 0 "$rc" "no account capped -> exit 0"
+assert_has "$OUT" "account=maxa verdict=OK" "maxa OK"
+assert_has "$OUT" "account=maxb verdict=OK" "maxb OK"
+
+echo "--- unobservable (all rc=4) -> every account UNKNOWN, exit 3 ---"
+run_ba 'exit 4'
+assert_eq 3 "$rc" "nothing observable -> exit 3 (no false 'not capped')"
+assert_has "$OUT" "account=maxa verdict=UNKNOWN" "maxa UNKNOWN when unobservable"
+assert_has "$OUT" "account=maxb verdict=UNKNOWN" "maxb UNKNOWN when unobservable"
+
+echo "--- --by-account --json: machine-readable per-account array ---"
+run_ba 'case "$1" in *b1*) printf "usage limit reached\n"; exit 2;; *) exit 1;; esac' --json
+assert_eq 20 "$rc" "--by-account --json aggregate exit 20"
+assert_has "$OUT" '"account": "maxb"' "json names maxb"
+assert_has "$OUT" '"verdict": "AT"' "json carries the AT verdict"
+assert_has "$OUT" '"account": null' "json reports the default account as null"
+
 echo ""
 echo "=== Summary ==="
 echo "  PASS: $PASS   FAIL: $FAIL"

@@ -572,6 +572,10 @@ swarm_effort_for() {
 # A non-empty <label> maps to an ISOLATED config dir + a vault token var:
 #   CONFIG_DIR  $HOME/.claude-accounts/<label>
 #   TOKEN_VAR   OAUTH_TOKEN_<LABEL_UPPER>   (lowercase→UPPER, '-'→'_')
+# CAVEAT (provisioning footgun, ADR-0018): the '-'→'_' fold means two labels that
+# differ ONLY by '-' vs '_' (e.g. 'max-a' and 'max_a') collapse to the SAME token
+# var (OAUTH_TOKEN_MAX_A) while keeping DISTINCT config dirs — a wrong-credential
+# risk. Operators must not create two accounts whose labels differ only by '-'/'_'.
 #
 # Sets (does not echo): SWARM_ACCT_CONFIG_DIR, SWARM_ACCT_PROJECTS_DIR,
 # SWARM_ACCT_ACCESS_FILE, SWARM_ACCT_TOKEN_VAR. Returns 0; 2 on a malformed
@@ -609,6 +613,60 @@ swarm_account_resolve() {
   SWARM_ACCT_PROJECTS_DIR="$SWARM_ACCT_CONFIG_DIR/projects"
   SWARM_ACCT_ACCESS_FILE="$SWARM_ACCT_CONFIG_DIR/channels/discord/access.json"
   SWARM_ACCT_TOKEN_VAR="OAUTH_TOKEN_$(printf '%s' "$label" | tr 'a-z-' 'A-Z_')"
+  return 0
+}
+
+# swarm_conf_set_account CONF NAME ACCOUNT — atomically rewrite field 6 (ACCOUNT)
+# of the swarm.conf row whose field-1 (name) trims to NAME, leaving every other
+# row, comment, and blank line BYTE-for-byte untouched. This is the per-swarm
+# persistence of a failover swap (ADR-0018): the conf rewrite IS the durable
+# "which account is this swarm on" — it sticks across restarts until the next cap.
+#
+# Reuses swarm-remove.sh's awk temp→mv idiom (comments/blanks/non-matching rows
+# pass through verbatim via the raw $0/$i fields), adapted to REWRITE field 6
+# instead of deleting the row. Arity-safe across legacy widths (tightening #2):
+#   - 4-/5-column rows are PADDED so the account always lands in field 6 (a 4-col
+#     row gains an empty guild field-5 so positions don't shift);
+#   - 6-column rows have field 6 replaced;
+#   - any field 7+ (the parser's _rest catch-all) is preserved verbatim.
+# Fields 1..5 are emitted from the RAW split ($i still carries each field's own
+# surrounding whitespace), so the operator's column spacing on this row's other
+# fields is preserved; only field 6 is (re)written.
+#
+# An EMPTY ACCOUNT restores the row to the DEFAULT account: a row that already had
+# no account (≤5 cols) is left verbatim; a row that had one (≥6 cols) has field 6
+# DROPPED (not left as a dangling empty field) so the result is a clean ≤5-col row.
+#
+# Returns 0 on a successful rewrite (atomic mv), 1 if NAME matched no data row
+# (conf left untouched), 2 on a write/mv failure. The CALLER validates the ACCOUNT
+# label (via swarm_account_resolve) — this helper is purely mechanical.
+swarm_conf_set_account() {
+  local _conf="$1" _name="$2" _acct="${3:-}"
+  local _tmp="$_conf.tmp.$$"
+  awk -F'|' -v n="$_name" -v acct="$_acct" '
+    /^[[:space:]]*(#|$)/ { print; next }
+    {
+      v=$1; gsub(/^[ \t]+|[ \t]+$/, "", v)
+      if (v != n) { print; next }
+      found=1
+      if (acct == "") {
+        if (NF <= 5) { print; next }          # already default → verbatim
+        out=$1
+        for (i=2; i<=5; i++) out = out "|" $i # drop field 6, keep 1..5 + 7+
+        for (i=7; i<=NF; i++) out = out "|" $i
+        print out; next
+      }
+      out=$1
+      for (i=2; i<=5; i++) out = out "|" (i<=NF ? $i : "")   # pad short rows to col 5
+      out = out "| " acct
+      for (i=7; i<=NF; i++) out = out "|" $i                 # preserve any 7+ verbatim
+      print out
+    }
+    END { exit (found ? 0 : 1) }
+  ' "$_conf" > "$_tmp"
+  local _rc=$?
+  if [ "$_rc" -ne 0 ]; then rm -f "$_tmp"; return 1; fi      # NAME not found → no change
+  if ! mv "$_tmp" "$_conf"; then rm -f "$_tmp"; return 2; fi
   return 0
 }
 
