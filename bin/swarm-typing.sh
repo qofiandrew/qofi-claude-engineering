@@ -53,7 +53,13 @@ if [ -z "${SWARM_HOME:-}" ] || [ ! -d "${SWARM_HOME:-}/templates" ] || [ ! -f "$
 fi
 CONF="$SWARM_HOME/swarm.conf"
 TOKENS="$SWARM_HOME/tokens.env"
-CLAUDE_PROJECTS="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
+# Projects dir is resolved PER-SWARM inside the sweep loop (multi-account
+# partition): each row's account label (field 6) maps to THAT swarm's projects
+# dir via swarm_account_resolve. A single global dir would read the WRONG
+# account's transcripts for a labeled swarm — here that would silently SUPPRESS
+# the typing bubble (transcript reads as stale). The default (empty) account
+# resolves to ${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}, byte-identical to
+# the value this script used before partitioning.
 STALE_SECONDS="${SWARM_STALE_SECONDS:-300}"
 PREFIX="${SWARM_TMUX_PREFIX:-swarm}"
 TMUX_BIN="${SWARM_TMUX_BIN:-tmux}"
@@ -119,6 +125,15 @@ while :; do
 
     case "$repo" in "~"*) repo="$HOME${repo#\~}";; esac
 
+    # Resolve THIS swarm's projects dir from ITS account (field 6). Empty
+    # account → ${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects} (default,
+    # byte-identical to the pre-partition global). Labeled →
+    # $HOME/.claude-accounts/<label>/projects. swarm_account_resolve is the SOLE
+    # constructor; resolving per-swarm keeps the freshness gate reading the right
+    # account so the typing bubble matches the watcher's 🟢-working decision.
+    swarm_account_resolve "$SWARM_CONF_F_ACCOUNT"
+    projects="$SWARM_ACCT_PROJECTS_DIR"
+
     # Predicate: session alive AND pane shows "esc to interrupt" AND
     # transcript fresh. All three required; any uncertainty → silent.
     #
@@ -133,7 +148,7 @@ while :; do
     #    test; non-numeric output is screened first so set -u stays happy.
     session_alive "$name" || continue
     pane_working "${PREFIX}-$name" "$TMUX_BIN" || continue
-    activity="$(repo_activity "$repo" "$CLAUDE_PROJECTS" "$STALE_SECONDS")"
+    activity="$(repo_activity "$repo" "$projects" "$STALE_SECONDS")"
     age="${activity%%|*}"
     case "$age" in
       ''|*[!0-9]*) continue ;;

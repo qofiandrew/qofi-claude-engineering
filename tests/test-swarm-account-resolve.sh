@@ -34,7 +34,8 @@ assert_eq() {  # expected got label
 #    ($HOME/.claude, .../projects, .../channels/discord/access.json) — so this
 #    asserts the inert-default guarantee at the resolver.
 # ---------------------------------------------------------------------------
-echo "=== empty label → default account (byte-identical to today) ==="
+echo "=== empty label → default account (byte-identical to today; overrides UNSET) ==="
+unset CLAUDE_PROJECTS_DIR SWARM_ACCESS_FILE 2>/dev/null || true
 swarm_account_resolve ""; rc=$?
 assert_eq 0 "$rc" "empty label resolves (rc 0)"
 assert_eq "$HOME/.claude"                                "$SWARM_ACCT_CONFIG_DIR"   "default CONFIG_DIR = \$HOME/.claude"
@@ -46,6 +47,25 @@ assert_eq ""                                             "$SWARM_ACCT_TOKEN_VAR"
 swarm_account_resolve; rc=$?
 assert_eq 0 "$rc" "no-arg call resolves (rc 0)"
 assert_eq "$HOME/.claude" "$SWARM_ACCT_CONFIG_DIR" "no-arg → default CONFIG_DIR"
+
+# ---------------------------------------------------------------------------
+# 1b) The DEFAULT account PRESERVES the env overrides consumers honor today —
+#     CLAUDE_PROJECTS_DIR (WORKING-rail) and SWARM_ACCESS_FILE. Dropping these
+#     would point the WORKING-rail check at the real ~/.claude even when a test
+#     fixture redirected it → a live swarm silently looks stale.
+# ---------------------------------------------------------------------------
+echo "=== default honors CLAUDE_PROJECTS_DIR + SWARM_ACCESS_FILE overrides ==="
+CLAUDE_PROJECTS_DIR="/tmp/fixture-projects"; swarm_account_resolve ""; unset CLAUDE_PROJECTS_DIR
+assert_eq "/tmp/fixture-projects"   "$SWARM_ACCT_PROJECTS_DIR" "empty label honors CLAUDE_PROJECTS_DIR override"
+SWARM_ACCESS_FILE="/tmp/fixture-access.json"; swarm_account_resolve ""; unset SWARM_ACCESS_FILE
+assert_eq "/tmp/fixture-access.json" "$SWARM_ACCT_ACCESS_FILE"  "empty label honors SWARM_ACCESS_FILE override"
+
+echo "=== labeled account ignores the default-only overrides ==="
+CLAUDE_PROJECTS_DIR="/tmp/fixture-projects"; SWARM_ACCESS_FILE="/tmp/fixture-access.json"
+swarm_account_resolve "maxa"
+unset CLAUDE_PROJECTS_DIR SWARM_ACCESS_FILE
+assert_eq "$HOME/.claude-accounts/maxa/projects"                     "$SWARM_ACCT_PROJECTS_DIR" "labeled PROJECTS ignores CLAUDE_PROJECTS_DIR"
+assert_eq "$HOME/.claude-accounts/maxa/channels/discord/access.json" "$SWARM_ACCT_ACCESS_FILE"  "labeled ACCESS ignores SWARM_ACCESS_FILE"
 
 # ---------------------------------------------------------------------------
 # 2) A <label> → isolated config dir + OAUTH_TOKEN_<UPPER>.

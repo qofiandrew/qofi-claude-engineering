@@ -583,9 +583,16 @@ SWARM_ACCT_TOKEN_VAR=""
 swarm_account_resolve() {
   local label="${1:-}"
   if [ -z "$label" ]; then
+    # The DEFAULT account PRESERVES the env overrides the consumers honor today,
+    # so threading them through the resolver stays byte-identical:
+    #   CLAUDE_PROJECTS_DIR — the WORKING-rail projects dir (watch/restart/rotate/typing)
+    #   SWARM_ACCESS_FILE   — the access.json path (bus-wire/doctor; up/add/remove were
+    #                         bare → now uniformly honor it, identical when unset).
+    # LABELED accounts are isolated and ignore both (each lives under its own dir),
+    # so an override can never leak a labeled lane onto the default's transcripts.
     SWARM_ACCT_CONFIG_DIR="$HOME/.claude"
-    SWARM_ACCT_PROJECTS_DIR="$HOME/.claude/projects"
-    SWARM_ACCT_ACCESS_FILE="$HOME/.claude/channels/discord/access.json"
+    SWARM_ACCT_PROJECTS_DIR="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
+    SWARM_ACCT_ACCESS_FILE="${SWARM_ACCESS_FILE:-$HOME/.claude/channels/discord/access.json}"
     SWARM_ACCT_TOKEN_VAR=""
     return 0
   fi

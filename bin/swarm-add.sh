@@ -58,7 +58,11 @@ fi
 TOKENS="$SWARM_HOME/tokens.env"
 CONF="$SWARM_HOME/swarm.conf"
 OWNER_ID="${SWARM_OWNER_DISCORD_ID:-1507069153335443608}"
-ACCESS="$HOME/.claude/channels/discord/access.json"
+# ACCESS (the new swarm's access.json) is the account-resolver's job, never a
+# hand-built $HOME/.claude path. It's resolved from the new swarm's account
+# AFTER swarm-lib.sh is sourced below — swarm-add adds the default (empty)
+# account for now, which the resolver maps byte-for-byte to today's path
+# (honoring SWARM_ACCESS_FILE). ACCESS is first USED in phase 4d, long after.
 PLUGIN_KEY="discord-b2b@qofi-swarm"
 
 # cto-watcher bus wiring. An engineering-cto swarm only rides the
@@ -76,6 +80,15 @@ SCRIPT_DIR_EARLY="$(cd "$(dirname "$0")" && pwd)"
 # any Discord-side side-effects).
 # shellcheck source=swarm-lib.sh
 . "$SCRIPT_DIR_EARLY/swarm-lib.sh"
+
+# Resolve the access.json for the account this swarm is being added with. There
+# is no --account flag yet (Phase 2+), so the new swarm gets the DEFAULT account
+# — resolve "" → SWARM_ACCT_ACCESS_FILE, which the resolver maps to exactly
+# today's $HOME/.claude/channels/discord/access.json (honoring SWARM_ACCESS_FILE
+# if set). A labeled account would land in $HOME/.claude-accounts/<label>/...
+# instead. This is the SOLE constructor of the path — never hand-built here.
+swarm_account_resolve ""
+ACCESS="$SWARM_ACCT_ACCESS_FILE"
 
 usage() {
   sed -n '1,50p' "$0"

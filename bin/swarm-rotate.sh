@@ -117,7 +117,14 @@ CONF="$SWARM_HOME/swarm.conf"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Overridable so tests substitute a stub fleet bring-up.
 SWARM_UP="${SWARM_UP_BIN:-$SCRIPT_DIR/swarm-up.sh}"
-CLAUDE_PROJECTS="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
+# The clean-boundary guard's projects dir is resolved PER-SWARM inside its loop
+# (multi-account partition): each swarm's account (field 6) maps to ITS projects
+# dir via swarm_account_resolve. A single global dir would read the WRONG
+# account's transcripts for a labeled swarm — here that means the guard could
+# see no activity and rotate (fleet restart = RAM-state loss) over a swarm that
+# is mid-turn. The empty (default) account resolves to
+# ${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}, byte-identical to the value the
+# guard used before partitioning.
 STALE_SECONDS="${SWARM_STALE_SECONDS:-300}"
 PREFIX="${SWARM_TMUX_PREFIX:-swarm}"
 TMUX_BIN="${SWARM_TMUX_BIN:-tmux}"
@@ -236,30 +243,40 @@ echo "swarm-rotate: plan — active='${ACTIVE:-<unset>}'  ->  next='$NEXT'  (rin
 # boundary. We reuse repo_activity (swarm-lib.sh) per swarm — the SAME signal
 # swarm-restart.sh's safety rail uses. If any swarm wrote a transcript within
 # STALE_SECONDS it is mid-turn; refuse unless --force.
+# Per-swarm: resolve THIS swarm's projects dir from ITS account (field 6), then
+# probe activity against that dir. The projects-dir existence check is per-swarm
+# too — a missing dir for one account means we can't probe THAT swarm, so we
+# treat it as idle (same fail-direction the old global "dir not found → fleet
+# idle" check had, now applied per account rather than fleet-wide).
 working_swarms=""
-if [ ! -d "$CLAUDE_PROJECTS" ]; then
-  echo "swarm-rotate: NOTE — Claude projects dir not found ($CLAUDE_PROJECTS); cannot probe activity. Treating fleet as idle."
-else
-  while IFS= read -r _line; do
-    swarm_conf_parse_line "$_line" || continue
-    _name="$SWARM_CONF_F_NAME"; _repo="$SWARM_CONF_F_REPO"
-    [ -z "$_name" ] && continue
-    [ -z "$_repo" ] && continue
-    _sess="${PREFIX}-${_name}"
-    # Only swarms that are actually live can be "working".
-    if command -v "$TMUX_BIN" >/dev/null 2>&1 && "$TMUX_BIN" has-session -t "$_sess" 2>/dev/null; then
-      :
-    else
-      continue
-    fi
-    _act="$(repo_activity "$_repo" "$CLAUDE_PROJECTS" "$STALE_SECONDS")"
-    _age="${_act%%|*}"
-    case "$_age" in ''|*[!0-9]*) _age="$SWARM_NO_TRANSCRIPT_AGE" ;; esac
-    if [ "$_age" -ne "$SWARM_NO_TRANSCRIPT_AGE" ] && [ "$_age" -le "$STALE_SECONDS" ]; then
-      working_swarms="$working_swarms $_name(${_age}s)"
-    fi
-  done < <(grep -vE '^[[:space:]]*(#|$)' "$CONF")
-fi
+while IFS= read -r _line; do
+  swarm_conf_parse_line "$_line" || continue
+  _name="$SWARM_CONF_F_NAME"; _repo="$SWARM_CONF_F_REPO"
+  [ -z "$_name" ] && continue
+  [ -z "$_repo" ] && continue
+  _sess="${PREFIX}-${_name}"
+  # Only swarms that are actually live can be "working".
+  if command -v "$TMUX_BIN" >/dev/null 2>&1 && "$TMUX_BIN" has-session -t "$_sess" 2>/dev/null; then
+    :
+  else
+    continue
+  fi
+  # Resolve from THIS swarm's account (sole constructor). Empty account →
+  # ${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects} (byte-identical to the old
+  # global); labeled → $HOME/.claude-accounts/<label>/projects.
+  swarm_account_resolve "$SWARM_CONF_F_ACCOUNT"
+  _projects="$SWARM_ACCT_PROJECTS_DIR"
+  if [ ! -d "$_projects" ]; then
+    echo "swarm-rotate: NOTE — projects dir not found for '$_name' ($_projects); cannot probe activity. Treating as idle."
+    continue
+  fi
+  _act="$(repo_activity "$_repo" "$_projects" "$STALE_SECONDS")"
+  _age="${_act%%|*}"
+  case "$_age" in ''|*[!0-9]*) _age="$SWARM_NO_TRANSCRIPT_AGE" ;; esac
+  if [ "$_age" -ne "$SWARM_NO_TRANSCRIPT_AGE" ] && [ "$_age" -le "$STALE_SECONDS" ]; then
+    working_swarms="$working_swarms $_name(${_age}s)"
+  fi
+done < <(grep -vE '^[[:space:]]*(#|$)' "$CONF")
 
 if [ -n "$working_swarms" ]; then
   if [ "$FORCE" -eq 1 ]; then

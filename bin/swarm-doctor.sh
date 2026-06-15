@@ -76,7 +76,10 @@ NAME="$1"
 CONF="$SWARM_HOME/swarm.conf"
 CTO_WATCHER_CONFIG="${CTO_WATCHER_CONFIG:-$SWARM_HOME/cto-watcher/config.json}"
 CTO_BUS_WATCHER_BOT_ID="${CTO_BUS_WATCHER_BOT_ID:-1510298728148369448}"
-ACCESS="${SWARM_ACCESS_FILE:-$HOME/.claude/channels/discord/access.json}"
+# ACCESS is resolved from THIS swarm's account (swarm.conf field 6), below,
+# once its row is parsed — never a hand-built $HOME/.claude path. An empty
+# account (every row today) resolves byte-for-byte to today's path, honoring
+# SWARM_ACCESS_FILE exactly as this line did before.
 TOKENS="${SWARM_TOKENS_FILE:-$SWARM_HOME/tokens.env}"
 PLUGIN_KEY="discord-b2b@qofi-swarm"
 
@@ -87,6 +90,7 @@ PLUGIN_KEY="discord-b2b@qofi-swarm"
 REPO=""
 TOKVAR=""
 CHANNEL=""
+ACCOUNT=""
 FOUND=0
 while IFS= read -r _line; do
   swarm_conf_parse_line "$_line" || continue
@@ -94,6 +98,7 @@ while IFS= read -r _line; do
     REPO="$SWARM_CONF_F_REPO"
     TOKVAR="$SWARM_CONF_F_TOKVAR"
     CHANNEL="$SWARM_CONF_F_CHANNEL"
+    ACCOUNT="$SWARM_CONF_F_ACCOUNT"
     FOUND=1
     break
   fi
@@ -103,6 +108,15 @@ if [ "$FOUND" -eq 0 ]; then
   echo "swarm-doctor: no swarm.conf row for '$NAME' in $CONF — nothing to check." >&2
   exit 2
 fi
+
+# Resolve the access.json for THIS swarm's account (field 6, empty today). The
+# resolver is the SOLE constructor of the path: an empty account maps to today's
+# $HOME/.claude/... (honoring SWARM_ACCESS_FILE), a label to its isolated dir.
+swarm_account_resolve "$ACCOUNT" || {
+  echo "swarm-doctor: invalid account '$ACCOUNT' in swarm.conf row for '$NAME'" >&2
+  exit 2
+}
+ACCESS="$SWARM_ACCT_ACCESS_FILE"
 
 # Resolve archetype. swarm-doctor's full operational set is engineering-cto's
 # (the bus halves only apply to CTOs). A non-CTO swarm is not an error, but the
