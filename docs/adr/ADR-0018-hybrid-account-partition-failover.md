@@ -134,13 +134,34 @@ have been answered.
   `--reset` is the only way back to the configured split, and it is manual. If
   co-location matters (e.g. a shared-rate-window assumption), the operator must
   re-assert it deliberately.
-- **Per-pane token isolation is a go-live gap (Phase-2 Finding F1).** The pane env
-  sources the whole `tokens.env` vault, so every pane can see every
-  `OAUTH_TOKEN_*`, not just its own account's. This is harmless while inert (no real
-  tokens) but is a **go-live runbook item**: before real tokens land, scope each pane
-  to only its own `OAUTH_TOKEN_<LABEL>` (e.g. export just the resolved token var,
-  not `set -a; . tokens.env`). Recorded here so activation does not silently ship a
-  shared-vault pane.
+- **Per-pane token isolation (Phase-2 Finding F1) — CLOSED.** The fleet used to
+  `set -a; . tokens.env`, auto-exporting the WHOLE shared vault (every swarm's
+  `BOT_*` and, once provisioned, every account's `OAUTH_TOKEN_*`). Isolation now
+  holds at the pane through **three** layers, all in `launch_one` (`swarm-up.sh`):
+  (1) the launcher no longer sources the vault into its OWN process — it reads each
+  token in a scoped subshell at the one point it's needed — so a COLD-start
+  `tmux new-session` (the server is a child of the launcher) no longer leaks the
+  vault into panes by inheritance; (2) the pane env line **scrubs** any inherited
+  `BOT_*`/`OAUTH_TOKEN_*` first (`unset IFS; for v in $(env|sed …); do unset "$v";
+  done`) so the property holds even if the server's base env was contaminated by
+  some other path; (3) each token is then derived by a **scoped subshell source**
+  `export DISCORD_BOT_TOKEN="$(. tokens.env; printf '%s' "$<tokvar>")"` (same form
+  for a labeled account's `CLAUDE_CODE_OAUTH_TOKEN`) — the subshell emits the one
+  value and exits, and the literal is captured by the assignment, never entering the
+  send-keys string or scrollback. A pane now holds only this swarm's own bot token
+  (+ its account's OAUTH token if labeled). A companion gap was closed in the parser:
+  `swarm_conf_parse_line` charset-validates the `TOKEN_VAR_NAME` field, blanking a
+  non-identifier so a hostile `swarm.conf` field-3 (`NAME[$(...)]` / quote-break)
+  can't execute in the launcher and re-exfiltrate the vault. Pinned empirically by
+  `tests/test-swarm-pane-token-isolation.sh` (runs the real launch expression under a
+  CONTAMINATED env — vault inherited, no `env -i` — incl. a hostile-`IFS` case, and
+  asserts siblings/other-accounts are scrubbed) and the INJ-1 block in
+  `tests/test-conf-parse-arity.sh`; verified additionally with a real-`tmux`
+  cold-start repro. This is **not inert** — it changes the LIVE pane env for every
+  swarm (labeled or not, effective on restart) and also closes a pre-existing
+  **bot-token** sharing (every pane previously held every swarm's bot token). It is
+  the one go-live prerequisite that had to land BEFORE any real `OAUTH_TOKEN_*`
+  enters the vault, and it has.
 - **Account-label provisioning footgun.** The vault token var is derived
   `OAUTH_TOKEN_<LABEL_UPPER>` with `'-'→'_'`, so two labels differing only by `-`
   vs `_` (`max-a` / `max_a`) collapse to the *same* token var while keeping distinct

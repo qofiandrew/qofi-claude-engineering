@@ -317,11 +317,11 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
     (b) create that account's isolated config dir `~/.claude-accounts/<label>`;
     (c) add `OAUTH_TOKEN_<LABEL_UPPER>` to `tokens.env`. Until all three exist for a
     label, that swarm stays on the default account.
-  - **GO-LIVE GAP (F1, do this before real tokens land):** the pane env currently
-    sources the WHOLE `tokens.env`, so every pane can read every `OAUTH_TOKEN_*`, not
-    just its own. Harmless while inert; **before provisioning real tokens, scope each
-    pane to only its own `OAUTH_TOKEN_<LABEL>`** (export just the resolved token var,
-    not `set -a; . tokens.env`).
+  - **F1 per-pane token isolation — CLOSED (see the 2026-06-15 F1 build-log entry).**
+    `launch_one` no longer blanket-sources the vault; each pane gets only its own
+    `DISCORD_BOT_TOKEN` (+ labeled: its `CLAUDE_CODE_OAUTH_TOKEN`) via a scoped
+    subshell source. **This is a LIVE change** — merge then RESTART the fleet to take
+    it effect before provisioning any real `OAUTH_TOKEN_*`.
   - **New env seams:** `SWARM_FAILOVER_TARGET_CMD` (selector, default
     `bin/swarm-failover-target.sh`), `SWARM_ACCOUNT_CMD` (swap actuator, default
     `bin/swarm-account.sh`), `SWARM_ACCOUNT_CAPS_DIR` (per-account last-capped LRC
@@ -336,3 +336,32 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   - **Co-location caveat (ADR-0018):** after an account's first cap, its swarms
     spread to whatever targets were least-recently-capped and STAY there. Intentional
     co-location dissolves on the first cap; `--reset` is the only way back.
+- `2026-06-15` — **F1 per-pane token isolation CLOSED** (ADR-0018 §Consequences;
+  the hard go-live prerequisite). The fleet used to `set -a; . '$TOKENS'` — auto-
+  exporting the WHOLE shared vault (every swarm's `BOT_*` and every account's
+  `OAUTH_TOKEN_*`) — so every pane could read every token. `bin/swarm-up.sh`
+  `launch_one` now isolates each pane through THREE layers: (1) the launcher no
+  longer sources the vault into its own process (a cold-start `tmux new-session`
+  starts the server as a CHILD of the launcher, so that would have leaked the vault
+  into panes by INHERITANCE — the first adversarial pass found exactly this, my
+  initial send-keys-only scoping did NOT close it); (2) the pane env line SCRUBS any
+  inherited `BOT_*`/`OAUTH_TOKEN_*` first (`unset IFS; for v in $(env|sed …); do
+  unset "$v"; done` — POSIX, IFS-robust, bash/zsh/sh); (3) each token is derived via
+  a SCOPED subshell source `export DISCORD_BOT_TOKEN="$(. '$TOKENS'; printf '%s'
+  "$<tokvar>")"` (same for a labeled account's `CLAUDE_CODE_OAUTH_TOKEN`), captured
+  by the assignment so the literal never enters the send-keys string or scrollback.
+  A companion sink was closed: `swarm_conf_parse_line` now charset-validates field-3
+  (`TOKEN_VAR_NAME`), blanking a non-identifier so a hostile `swarm.conf` (e.g.
+  `BOT_X[$(...)]`) can't execute in the launcher and re-exfiltrate the vault.
+  Blast-radius re-audited: the only in-pane vault consumers are `DISCORD_BOT_TOKEN`
+  (bridge MCP) and `CLAUDE_CODE_OAUTH_TOKEN` (claude); `cto-watcher` reads
+  `BOT_CPO_CTO_BUS` but is OUT-of-pane (own env), unaffected. Tests:
+  `tests/test-swarm-pane-token-isolation.sh` runs the REAL extracted launch line under
+  a CONTAMINATED env (vault inherited, no `env -i`, incl. a hostile-`IFS` case) and
+  asserts siblings/other-accounts scrubbed; INJ-1 block in
+  `tests/test-conf-parse-arity.sh` proves the field-3 validation blanks-without-
+  executing. Two adversarial-review passes (the second a real-`tmux` cold-start
+  repro) confirm closure; the first pass is why this entry has three layers, not one.
+  **NOT INERT — a LIVE change:** the operator must merge AND **restart the fleet** to
+  take effect, BEFORE any real `OAUTH_TOKEN_*` enters `tokens.env`. Gate green:
+  bun 142/0, shell 39/39 under bash 3.2.

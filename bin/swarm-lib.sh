@@ -98,6 +98,22 @@ EOF
   SWARM_CONF_F_NAME="$(_swarm_trim "$_name")"
   SWARM_CONF_F_REPO="$(_swarm_trim "$_repo")"
   SWARM_CONF_F_TOKVAR="$(_swarm_trim "$_tokvar")"
+  # Field 3 (TOKEN_VAR_NAME) is later deref'd by NAME via ${!tokvar} (swarm-up /
+  # swarm-typing / swarm-watch) and spliced into the pane env line. A value that
+  # is not a legal shell IDENTIFIER is an injection sink: the array-subscript form
+  # NAME[$(...)] fires command substitution inside the launcher (which could
+  # re-source and exfiltrate the whole vault), and a quote-break escapes the pane
+  # env string — either defeats F1 token isolation (ADR-0018). A `case` match does
+  # NOT evaluate the value, so checking it is itself safe. Reject a malformed
+  # non-empty token-var by BLANKING it; the consumers' empty-token guards then skip
+  # the swarm (fail-safe) rather than deref a hostile name. (The OAUTH token-var is
+  # built by swarm_account_resolve from a charset-validated label, already safe.)
+  case "$SWARM_CONF_F_TOKVAR" in
+    '') : ;;                                   # empty is fine — guards skip the swarm
+    [0-9]* | *[!A-Za-z0-9_]*)                  # not ^[A-Za-z_][A-Za-z0-9_]*$ → reject
+      echo "swarm_conf_parse_line: refusing non-identifier TOKEN_VAR_NAME '$SWARM_CONF_F_TOKVAR' for swarm '$SWARM_CONF_F_NAME' (must match [A-Za-z_][A-Za-z0-9_]*); blanking it." >&2
+      SWARM_CONF_F_TOKVAR="" ;;
+  esac
   SWARM_CONF_F_CHANNEL="$(_swarm_trim "$_channel")"
   SWARM_CONF_F_GUILD="$(_swarm_trim "$_guild")"
   SWARM_CONF_F_ACCOUNT="$(_swarm_trim "$_account")"
