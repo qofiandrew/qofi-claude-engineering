@@ -120,7 +120,16 @@ PY
   # honors the prior SWARM_ACCESS_FILE override and the $HOME/.claude default);
   # a labeled account → that account's isolated access.json. This is the SOLE
   # constructor of the path — never hand-build a $HOME/.claude path here.
-  swarm_account_resolve "$account"
+  # A rejected resolve (malformed label) leaves the globals stale, so check rc
+  # explicitly and fail the gate with a clear message rather than letting set -e
+  # abort the run or checking a stale access path. (For the default/empty
+  # account the resolver always succeeds → byte-identical to today.)
+  if ! swarm_account_resolve "$account"; then
+    echo "  ERROR: $sess: invalid account label '$account' in swarm.conf (field 6)." >&2
+    echo "         Account labels must start with a letter and contain only [A-Za-z0-9_-]." >&2
+    echo "         Fix the ACCOUNT field, or clear it to use the default account." >&2
+    return 1
+  fi
   local access="$SWARM_ACCT_ACCESS_FILE"
   if [ -z "$channel" ]; then
     echo "  NOTE:  $sess: no channel in swarm.conf — skipping access.json gate" >&2
@@ -311,7 +320,7 @@ launch_one() {  # name repo tokvar [channel] [account]
   # operator+bus and also gets DISCORD_OPERATOR_CHANNEL / DISCORD_BUS_CHANNEL for
   # register-by-channel. Deriving it there keeps every CTO swarm untouched (no bus).
   bound_exports="$(swarm_bound_exports "$name" "$channel")"
-  # ---- multi-account partition (ADR-0014) -------------------------------
+  # ---- multi-account partition (ADR-0018) -------------------------------
   # Resolve this swarm's account label to its isolated config dir + vault
   # token-var via the resolver (swarm-lib.sh) — the SOLE constructor of any
   # $HOME/.claude path, never hand-built here. Two fragments fall out and are
@@ -329,7 +338,17 @@ launch_one() {  # name repo tokvar [channel] [account]
   # gated on [ -n "$account" ]; the inert all-empty fleet is unchanged.
   local acct_env="" acct_rc=" --remote-control $name"
   if [ -n "$account" ]; then
-    swarm_account_resolve "$account"
+    # A non-empty label that the resolver REJECTS is malformed (bad chars / not
+    # starting with a letter). Fail loud and refuse to launch this swarm rather
+    # than fall through to the default-account env (which would silently boot it
+    # on the WRONG, keychain-auth account). Explicit check + friendly message;
+    # without it set -e would still abort, but abruptly and without context.
+    if ! swarm_account_resolve "$account"; then
+      echo "  ERROR: $sess: invalid account label '$account' in swarm.conf (field 6)." >&2
+      echo "         Account labels must start with a letter and contain only [A-Za-z0-9_-]." >&2
+      echo "         Fix the ACCOUNT field, or clear it to use the default account. Skipping this swarm." >&2
+      return 1
+    fi
     # Deref the OAUTH token var by NAME at RUNTIME inside the pane (same
     # idiom as DISCORD_BOT_TOKEN's \"\$$tokvar\"): the literal token never
     # enters the script or the command line / scrollback. unset

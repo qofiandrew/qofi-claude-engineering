@@ -263,6 +263,42 @@ assert_eq 0 "$rc" "working swarm + --force -> rotates (exit 0)"
 assert_has "$(cat "$WITNESS")" "swap:max-b" "--force lets the swap through"
 
 # ---------------------------------------------------------------------------
+echo "=== 4b) FAIL-SAFE: a malformed-account row FOLLOWING a good-account row blocks rotation ==="
+# The WORKING-rail landmine, account edition (adversarial-review Finding 1). Row 1
+# ('good') has a VALID labeled account 'maxa' → swarm_account_resolve SUCCEEDS and
+# sets SWARM_ACCT_PROJECTS_DIR to maxa's dir. Row 2 ('risky') has a MALFORMED
+# account ('bad/slash') → the resolver REJECTS it and returns WITHOUT building a
+# path, leaving the global STALE at row 1's value. Without the per-row rc-check,
+# row 2 would be evaluated against row 1's (foreign) projects dir — which reads as
+# IDLE either way (if the foreign dir is absent → "dir not found → idle"; if it
+# exists → repo_activity finds no transcript for row 2's repo → NO_TRANSCRIPT
+# sentinel → idle). Either path lets rotation tear down the WHOLE fleet, including
+# a maybe-working swarm on the bad account. WITH the rc-check, row 2 fails SAFE →
+# treated as WORKING → rotation REFUSES (exit 3) and fires no hooks. tmux-live so
+# both rows are probed (only live swarms reach the resolve). In this fixture row
+# 1's account ('maxa') has no on-disk dir, so the pre-fix path is the "dir not
+# found → idle" one — and the test asserts exit 3, which only row 2's bad-account
+# branch can produce, so it genuinely fails if the rc-check is removed.
+ORIG_CONF="$(cat "$FAKE_SH/swarm.conf")"
+cat > "$FAKE_SH/swarm.conf" <<EOF
+good  | $TMP/repo-alpha | BOT_G | 111 | 999 | maxa
+risky | $TMP/repo-beta  | BOT_R | 222 | 999 | bad/slash
+EOF
+: > "$WITNESS"
+RR_TMUX="$TMP/stubbin/tmux-live"; run_rotate
+assert_eq 3 "$rc" "malformed-account row (after a good row) -> rotation REFUSED (exit 3)"
+assert_has "$OUT" "risky(bad-account)"          "the refusal names the bad-account swarm as blocking"
+assert_has "$OUT" "invalid account 'bad/slash'" "warns about the specific invalid account label"
+assert_eq "" "$(cat "$WITNESS")"                "no hook fired (no swap/checkpoint/relaunch) while refusing"
+# --force still lets the operator override (consistent with the WORKING refusal).
+: > "$WITNESS"
+RR_TMUX="$TMP/stubbin/tmux-live"; run_rotate --force
+assert_eq 0 "$rc" "malformed-account row + --force -> proceeds (exit 0)"
+assert_has "$(cat "$WITNESS")" "swap:max-b" "--force lets the swap through despite the bad-account row"
+# Restore the canonical 2-row conf for the remaining sections.
+printf '%s\n' "$ORIG_CONF" > "$FAKE_SH/swarm.conf"
+
+# ---------------------------------------------------------------------------
 echo "=== 5) CHECKPOINT discipline: failing checkpoint aborts (exit 4) unless --force ==="
 : > "$WITNESS"
 RR_CKPT="$CHECKPOINT_FAIL"; run_rotate

@@ -116,8 +116,20 @@ while IFS= read -r _line; do
     break
   fi
 done < <(grep -vE '^[[:space:]]*(#|$)' "$CONF")
-swarm_account_resolve "$ACCOUNT"
-CLAUDE_PROJECTS="$SWARM_ACCT_PROJECTS_DIR"
+if swarm_account_resolve "$ACCOUNT"; then
+  CLAUDE_PROJECTS="$SWARM_ACCT_PROJECTS_DIR"
+else
+  # Invalid account label in this swarm's conf row → we cannot determine its
+  # projects dir, so the WORKING-rail check below would read a stale/foreign dir
+  # and could tear down a working swarm. Fail SAFE: refuse unless --force.
+  if [ "$FORCE" -eq 1 ]; then
+    echo "swarm-restart: WARNING — '$NAME' has an invalid account '$ACCOUNT'; cannot probe activity. Proceeding because --force (any in-process work may be lost)." >&2
+    CLAUDE_PROJECTS=""   # no safe probe; the rail will note 'dir not found' and proceed
+  else
+    echo "swarm-restart: REFUSED — '$NAME' has an invalid account '$ACCOUNT' in swarm.conf; cannot safely probe its activity before restarting. Fix the ACCOUNT field, or pass --force to restart anyway (risking in-process work)." >&2
+    exit 2
+  fi
+fi
 
 SESS="${PREFIX}-${NAME}"
 

@@ -264,7 +264,15 @@ while IFS= read -r _line; do
   # Resolve from THIS swarm's account (sole constructor). Empty account →
   # ${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects} (byte-identical to the old
   # global); labeled → $HOME/.claude-accounts/<label>/projects.
-  swarm_account_resolve "$SWARM_CONF_F_ACCOUNT"
+  if ! swarm_account_resolve "$SWARM_CONF_F_ACCOUNT"; then
+    # Malformed account label → the resolver rejected it and did NOT build a path
+    # ($SWARM_ACCT_PROJECTS_DIR is STALE from a prior row). Probing that stale/
+    # foreign dir would read as "idle" and let the guard tear down a maybe-working
+    # swarm. Fail SAFE: treat it as WORKING so rotation BLOCKS, never kills.
+    echo "swarm-rotate: WARN — '$_name' has an invalid account '$SWARM_CONF_F_ACCOUNT'; cannot probe its activity. Treating as WORKING (blocks rotation). Fix the swarm.conf ACCOUNT field." >&2
+    working_swarms="$working_swarms $_name(bad-account)"
+    continue
+  fi
   _projects="$SWARM_ACCT_PROJECTS_DIR"
   if [ ! -d "$_projects" ]; then
     echo "swarm-rotate: NOTE — projects dir not found for '$_name' ($_projects); cannot probe activity. Treating as idle."

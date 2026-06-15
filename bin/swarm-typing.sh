@@ -131,7 +131,11 @@ while :; do
     # $HOME/.claude-accounts/<label>/projects. swarm_account_resolve is the SOLE
     # constructor; resolving per-swarm keeps the freshness gate reading the right
     # account so the typing bubble matches the watcher's 🟢-working decision.
-    swarm_account_resolve "$SWARM_CONF_F_ACCOUNT"
+    if ! swarm_account_resolve "$SWARM_CONF_F_ACCOUNT"; then
+      # Invalid account → resolver rejected (path NOT built; stale globals). Don't
+      # probe a stale/foreign dir; skip (typing's fail-safe is already silence).
+      continue
+    fi
     projects="$SWARM_ACCT_PROJECTS_DIR"
 
     # Predicate: session alive AND pane shows "esc to interrupt" AND

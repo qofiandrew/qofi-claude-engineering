@@ -334,7 +334,14 @@ grep -vE '^[[:space:]]*(#|$)' "$CONF" | while IFS= read -r _line; do
   # swarm_account_resolve is the SOLE constructor of these paths; resolving here
   # — per swarm, after the parse — is what keeps the WORKING rail (repo_activity)
   # pointed at the right account so a live swarm is never read as stale.
-  swarm_account_resolve "$SWARM_CONF_F_ACCOUNT"
+  if ! swarm_account_resolve "$SWARM_CONF_F_ACCOUNT"; then
+    # Invalid account label → resolver rejected (path NOT built; $SWARM_ACCT_* is
+    # STALE from a prior row). Don't probe a stale/foreign projects dir. Skip this
+    # swarm's activity read this tick (fail-safe — a missed heartbeat is harmless,
+    # a wrong-dir read that paints a live swarm STALLED is not).
+    echo "swarm-watch: WARN — '$name' has an invalid account '$SWARM_CONF_F_ACCOUNT'; skipping its activity probe. Fix the swarm.conf ACCOUNT field." >&2
+    continue
+  fi
   projects="$SWARM_ACCT_PROJECTS_DIR"
 
   session_alive "$name"; rc=$?
