@@ -12,6 +12,11 @@ separate state channel.
 > `CLAUDE.md` §"The CTO loop"). #qofi-product is the separate **operator register**
 > (conversational). This file is the wire protocol; the behavioral law lives in
 > `CLAUDE.md`.
+>
+> **The bus is the surface — never the shell.** A directive or STATE line reaches a
+> CTO only as a Discord post on this channel; printed to the pane, echoed to stdout,
+> or written to a file it is **LOST**, not sent (`CLAUDE.md` §"Discord is the only
+> surface").
 
 ## The two rigid grammars (the watcher is a dumb, deterministic parser)
 
