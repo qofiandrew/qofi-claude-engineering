@@ -33,10 +33,16 @@
 #
 # (b) vs (c) is the crux. A bad credential and a capped-but-good credential look
 # superficially similar (the probe call doesn't "succeed normally" in either),
-# but they demand OPPOSITE handling: (b) → roll back; (c) → keep the swap, escalate
-# ring exhaustion. We separate them by inspecting the probe's OUTPUT for a known
-# rate-limit signal (the same limit substrings pane_state/swarm-watch trust),
-# falling back to the probe's own exit code.
+# but they demand OPPOSITE handling — and the two directions are NOT equally safe:
+#   (b) RESTORE  → reinstall the known-good PRIOR blob: reversible, the safe way.
+#   (c) KEEP     → discard the prior, keep the NEW blob: the dangerous, less-
+#                  reversible direction (a good prior credential is thrown away).
+# Because (c) is the irreversible one, it must require a CLEAR usage-cap signal AND
+# the ABSENCE of any auth-fail signal. Anything ambiguous falls to (b) RESTORE.
+# We separate them by inspecting the probe's OUTPUT: an AUTH-FAIL signal is checked
+# FIRST and is authoritative (a dead/expired credential is bad regardless of any
+# coincidental "rate limit"-type substring in its error text). Only with NO auth-
+# fail signal do we then consider a CAP-SPECIFIC limit signal for (c).
 #
 # ── THE PROBE CALL (overridable seam; default exercises the credential) ──────
 # We do not hardcode a single `claude` invocation — the exact cheapest
@@ -49,26 +55,41 @@
 #                          (see DEFAULT_PROBE). Tests point this at a synthetic
 #                          stub that emits a chosen outcome deterministically.
 #
-# Classification rules (applied to the probe's exit code + captured output):
-#   1. If the output matches a known RATE-LIMIT substring  → (c) capped, exit 75.
-#      (Checked FIRST: a 429 can ride on a zero OR non-zero probe exit depending
-#      on how `claude` surfaces it; the limit signal is authoritative either way —
-#      it means the credential DID authenticate far enough to be told "you're
-#      capped", which is precisely (c).)
-#   2. Else if the probe exited 0                          → (a) good,   exit 0.
-#   3. Else (non-zero, no limit signal)                    → (b) bad,    exit 1.
+# Classification rules (applied to the probe's exit code + captured output), IN
+# THIS PRECEDENCE — auth-fail WINS over a limit substring:
+#   1. If the output matches an AUTH-FAIL substring         → (b) bad, exit 1.
+#      (Checked FIRST. A dead/expired/invalid credential is bad REGARDLESS of any
+#      coincidental limit-looking substring in its error text — "exceeded the rate
+#      limit for login attempts", "connection limit reached", a 401 that also
+#      mentions a usage-limit policy. The safe, reversible direction (RESTORE) must
+#      win whenever auth itself is in question.)
+#   2. Else if the output matches a CAP-SPECIFIC limit substring → (c) capped,
+#      exit 75. (Only reached when NO auth-fail signal is present. A 429/usage-cap
+#      can ride a zero OR non-zero probe exit; with auth confirmed-not-failed, the
+#      cap signal means the credential authenticated far enough to be told "you're
+#      capped" — precisely (c). This KEEPS the new blob and discards the prior, so
+#      it must be a CAP-SPECIFIC phrasing, not a generic "rate limit" substring.)
+#   3. Else if the probe exited 0                           → (a) good, exit 0.
+#   4. Else (non-zero, no limit signal)                     → (b) bad, exit 1
+#      (fail CLOSED — an unconfirmed credential is RESTORED, not booted on).
 #
-# Rate-limit substrings are the SAME set pane_state uses, sourced from swarm-lib.sh
-# so there is one definition of "this looks like a usage cap" in the repo. They
-# are overridable via SWARM_LIMIT_PATTERNS (newline- or pipe-separated, case-
-# insensitive fixed strings) — identical to pane_state's knob.
+# ── CAP-SPECIFIC limit substrings (the (c) verdict set) ──────────────────────
+# The (c) set is DELIBERATELY NARROW — cap-specific phrasings ONLY — because (c)
+# is the irreversible direction (keeps new, discards known-good prior). It is NOT
+# pane_state's broad set: bare "rate limit" / "limit reached" / "approaching usage"
+# also appear in auth-lockout, connection, and login-attempt errors, so they are
+# DROPPED here. Defaults: "usage limit", "usage limit reached", "5-hour limit",
+# "5h limit", "weekly limit", "claude usage limit". Overridable via
+# SWARM_LIMIT_PATTERNS (newline- or pipe-separated, case-insensitive fixed
+# strings) — note this override is the CAP-SPECIFIC set for THIS probe's (c)
+# verdict, not pane_state's broad watcher set.
 #
-# ── AUTH-FAIL substrings (belt-and-suspenders for outcome (b)) ───────────────
+# ── AUTH-FAIL substrings (outcome (b), checked FIRST) ────────────────────────
 # A `claude` that exits 0 even on an auth error (some CLIs print the error and
-# still exit 0) would be misread as (a). So we ALSO scan for explicit auth-failure
-# signals; a match forces (b) even on a zero exit — UNLESS a rate-limit signal is
-# also present (rate-limit wins; a capped-but-authed account is not an auth fail).
-# Overridable via SWARM_AUTH_FAIL_PATTERNS.
+# still exit 0) would be misread as (a). We scan for explicit auth-failure signals
+# and a match forces (b) even on a zero exit — and, per the precedence above, it
+# WINS over any limit substring (a dead credential whose error text happens to
+# contain a limit word is still bad). Overridable via SWARM_AUTH_FAIL_PATTERNS.
 #
 # Usage:
 #   swarm-auth-probe.sh            # run the probe, classify, exit 0|1|75
@@ -90,7 +111,7 @@
 set -uo pipefail
 
 PROG="swarm-auth-probe"
-usage() { sed -n '1,96p' "$0"; exit "${1:-0}"; }
+usage() { sed -n '1,109p' "$0"; exit "${1:-0}"; }
 
 EXPLAIN=0
 while [ $# -gt 0 ]; do
@@ -107,32 +128,28 @@ done
 # generic auth-fail (1) or success (0).
 EX_RATELIMITED=75
 
-# ── Source the repo's limit-pattern definition (one source of truth) ─────────
-# swarm-lib.sh owns _swarm_default_limit_patterns (used by pane_state). We reuse
-# it so "looks like a usage cap" means the same thing here as in the watcher.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=swarm-lib.sh
-if [ -f "$SCRIPT_DIR/swarm-lib.sh" ]; then
-  # Only need the pattern helper; sourcing is cheap and side-effect-light.
-  . "$SCRIPT_DIR/swarm-lib.sh"
-fi
 
-# Rate-limit substrings: operator override wins, else the repo default, else a
-# small built-in fallback (in case swarm-lib.sh wasn't sourceable for any reason).
-limit_patterns() {
+# CAP-SPECIFIC limit substrings for the (c) verdict. This is INTENTIONALLY NOT
+# swarm-lib.sh's broad pane_state set: (c) keeps the new blob and discards the
+# known-good prior (the irreversible direction), so it must fire ONLY on a clear
+# usage-cap phrasing. Generic substrings like "rate limit", "limit reached", and
+# "approaching usage" are DROPPED because they also appear in auth-lockout,
+# connection, and login-attempt errors — using them here would misclassify a dead
+# credential as merely capped and brick the slot. Operator override
+# (SWARM_LIMIT_PATTERNS) is honored and is documented as the cap-specific set for
+# this probe's (c) verdict.
+cap_patterns() {
   if [ -n "${SWARM_LIMIT_PATTERNS:-}" ]; then
     printf '%s' "$SWARM_LIMIT_PATTERNS" | tr '|' '\n'
     return 0
   fi
-  if command -v _swarm_default_limit_patterns >/dev/null 2>&1; then
-    _swarm_default_limit_patterns
-    return 0
-  fi
   printf '%s\n' "usage limit"
+  printf '%s\n' "usage limit reached"
   printf '%s\n' "5-hour limit"
-  printf '%s\n' "limit reached"
-  printf '%s\n' "rate limit"
-  printf '%s\n' "approaching usage"
+  printf '%s\n' "5h limit"
+  printf '%s\n' "weekly limit"
+  printf '%s\n' "claude usage limit"
 }
 
 # Auth-failure substrings: signals that the credential itself is bad/expired even
@@ -161,7 +178,14 @@ auth_fail_patterns() {
 # `claude` exposes an even cheaper auth ping (e.g. a `whoami`), wire
 # SWARM_AUTH_PROBE_CMD to it. The point is only that the call FAILS on a dead
 # credential and surfaces a limit message on a capped one.
-DEFAULT_PROBE='claude -p "ping" --max-turns 1 >/dev/null'
+#
+# NOTE: we do NOT redirect the probe's stdout to /dev/null. The classifier reads
+# the probe's COMBINED stdout+stderr (OUT=$(... 2>&1)), and `claude` can surface a
+# usage-limit/auth message on stdout — discarding it would starve the classifier
+# and thrash-restore a capped-but-valid account. OUT is captured and never
+# printed, so there is no scrollback/secret concern (the default `ping` reply is a
+# short "pong"-ish ack, never the credential value).
+DEFAULT_PROBE='claude -p "ping" --max-turns 1'
 
 PROBE="${SWARM_AUTH_PROBE_CMD:-}"
 if [ -z "$PROBE" ]; then
@@ -186,29 +210,41 @@ OUT="$(sh -c "$PROBE" 2>&1)"; prc=$?
 
 matches() {  # haystack  pattern-producer-fn
   local hay="$1" fn="$2"
-  printf '%s' "$hay" | grep -i -F -q -f <("$fn") 2>/dev/null
+  # STRIP blank/whitespace-only lines from the producer before grep -f: a blank
+  # pattern line makes `grep -F -f` match EVERYTHING (so a good credential would
+  # read as capped/failed). A blank-yielding override like SWARM_LIMIT_PATTERNS='|'
+  # produces exactly such an empty line; this guard makes it inert.
+  printf '%s' "$hay" | grep -i -F -q -f <("$fn" | grep -v '^[[:space:]]*$') 2>/dev/null
 }
 
+# Classification — PRECEDENCE matters (see header). Auth-fail is checked FIRST and
+# WINS over any limit substring: a dead/expired credential is bad regardless of a
+# coincidental limit word in its error text, and RESTORE (reversible) is the safe
+# direction. Only with NO auth-fail signal does a CAP-SPECIFIC limit signal yield
+# the (c) keep-the-new-blob verdict.
 verdict=""
 why=""
-if matches "$OUT" limit_patterns; then
-  # (c) The account authenticated far enough to be told it's capped. NOT a swap
-  # failure — restoring would thrash to the (also-capped) prior account.
-  verdict="$EX_RATELIMITED"
-  why="authenticated BUT rate-limited (known usage-limit signal in probe output) — NOT a swap failure; do not restore; signal ring-exhaustion"
-elif matches "$OUT" auth_fail_patterns; then
-  # (b) Explicit auth-failure signal, even if the CLI exited 0.
+if matches "$OUT" auth_fail_patterns; then
+  # (b) Explicit auth-failure signal, even if the CLI exited 0. Authoritative —
+  # this beats any limit substring (a bricked/expired cred whose error mentions a
+  # "rate limit"/"limit reached" is still a bad credential).
   verdict=1
-  why="auth FAILED (auth-error signal in probe output) — bad/expired credential; caller must RESTORE"
+  why="auth FAILED (auth-error signal in probe output) — bad/expired credential; caller must RESTORE (auth-fail wins over any limit substring)"
+elif matches "$OUT" cap_patterns; then
+  # (c) No auth-fail signal, AND a CAP-SPECIFIC usage-limit signal: the account
+  # authenticated far enough to be told it's capped. NOT a swap failure — restoring
+  # would thrash to the (also-capped) prior account.
+  verdict="$EX_RATELIMITED"
+  why="authenticated BUT rate-limited (cap-specific usage-limit signal, no auth-fail signal) — NOT a swap failure; do not restore; signal ring-exhaustion"
 elif [ "$prc" -eq 0 ]; then
-  # (a) Clean success, no limit, no auth error.
+  # (a) Clean success, no auth error, no cap signal.
   verdict=0
-  why="authenticates (probe exited 0, no limit/auth-error signal) — swap is good"
+  why="authenticates (probe exited 0, no auth-error/cap signal) — swap is good"
 else
   # (b) Non-zero probe exit, nothing more specific → treat as auth failure. Fail
   # CLOSED so a credential we couldn't confirm gets ROLLED BACK, not booted on.
   verdict=1
-  why="auth FAILED (probe exit $prc, no limit signal) — credential did not authenticate; caller must RESTORE"
+  why="auth FAILED (probe exit $prc, no cap signal) — credential did not authenticate; caller must RESTORE"
 fi
 
 if [ "$EXPLAIN" -eq 1 ]; then

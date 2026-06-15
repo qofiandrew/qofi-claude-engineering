@@ -149,9 +149,26 @@ done
 # ---------------------------------------------------------------------------
 # The account ring + next-account computation.
 # ---------------------------------------------------------------------------
-# Normalize SWARM_ACCOUNTS: commas → spaces, collapse whitespace.
+# Normalize SWARM_ACCOUNTS: commas → spaces, collapse whitespace, then DE-DUPLICATE
+# (keep first occurrence, preserve order). De-dup matters for correctness: a ring
+# with a duplicated active handle (e.g. "a a b", active a) would otherwise let
+# compute_next pick the SECOND "a" — rotating the account to ITSELF (a no-op swap
+# that still tears down + relaunches the fleet for nothing). The ring is a SET of
+# distinct accounts; duplicates are operator typos, not extra capacity.
 ACCOUNTS_RAW="${SWARM_ACCOUNTS:-}"
 ACCOUNTS="$(printf '%s' "$ACCOUNTS_RAW" | tr ',' ' ' | xargs 2>/dev/null || true)"
+ACCOUNTS="$(
+  _seen=" "
+  _out=""
+  for _a in $ACCOUNTS; do
+    # Membership test via prefix-removal (NOT `case`+`continue`, which trips
+    # `set -u` on bash 3.2). If " $_a " is already in $_seen, drop this duplicate.
+    if [ "${_seen#*" $_a "}" != "$_seen" ]; then continue; fi
+    _seen="$_seen$_a "
+    _out="${_out:+$_out }$_a"
+  done
+  printf '%s' "$_out"
+)"
 ACTIVE="${SWARM_ACTIVE_ACCOUNT:-}"
 
 # compute_next — print the account that follows ACTIVE in the ring (wrapping).

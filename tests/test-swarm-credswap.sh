@@ -225,6 +225,20 @@ OUT="$(SWARM_KEYCHAIN_CMD="$MOCK" MOCK_STORE="$MOCK_STORE" SWARM_CREDSWAP_SERVIC
 assert_eq 2 "$rc" "no auth-verify available (no probe, no claude) -> REFUSED (exit 2)"
 assert_has "$OUT" "unverifiable swap" "refuses an unverifiable swap"
 
+echo "--- FIX 4) MULTI-LINE PRIOR value -> REFUSE before install, slot UNTOUCHED (exit 2) ---"
+# The restore path is line-oriented; a multi-line PRIOR credential could not be
+# faithfully restored, so a failed swap would strand the slot on the new blob. The
+# adapter must catch this AFTER backup but BEFORE install and refuse (exit 2),
+# leaving the prior (multi-line) value exactly in place.
+printf 'line-one\nline-two\n' > "$MOCK_STORE"   # seed a MULTI-LINE prior value
+PRIOR_MULTILINE="$(cat "$MOCK_STORE")"
+rm -f "$MOCK_FAIL_ADD"
+run_logic 'true' max-b
+assert_eq 2 "$rc" "multi-line prior value -> REFUSED before install (exit 2)"
+assert_eq "$PRIOR_MULTILINE" "$(cat "$MOCK_STORE")" "slot UNTOUCHED: the prior multi-line value is exactly as seeded (NOT the NEXT blob)"
+assert_lacks "$(cat "$MOCK_STORE")" "$NEXT_BLOB" "the NEW blob was never installed (no brick)"
+assert_has "$OUT" "newline" "explains the multi-line-prior refusal"
+
 echo "=== (A2) REAL AUTH PROBE wired as the default verifier — the 3-way (b)-vs-(c) split ==="
 # These tests drive the FULL chain that closes the auth-check hole: the adapter's
 # VERIFY step runs bin/swarm-auth-probe.sh (the real default verifier), and the
@@ -288,13 +302,28 @@ assert_eq "$NEXT_BLOB" "$(slot_value)" "NOT restored: the swap is KEPT (new cred
 assert_lacks "$OUT" "rolling back" "does NOT thrash-restore a valid-but-capped credential"
 assert_has "$OUT" "RING EXHAUSTION" "surfaces ring exhaustion (rotation has nowhere fresh to go)"
 
-echo "--- A2.5) (c) rate-limit on a NON-zero probe exit is also classified capped, not bad ---"
-# A 429 can ride on a non-zero exit too; the limit signal is authoritative either
-# way (the credential authenticated far enough to be told it's capped).
+echo "--- A2.5) (c) cap-specific signal on a NON-zero probe exit is also classified capped ---"
+# A 429/usage-cap can ride on a non-zero exit too; a CAP-SPECIFIC signal is
+# authoritative either way (the credential authenticated far enough to be told
+# it's capped).
 seed_prior; rm -f "$MOCK_FAIL_ADD"
-run_probe 'printf "rate limit\n" >&2; exit 1' max-b
-assert_eq 7 "$rc" "rate-limit signal on non-zero exit -> still (c) capped, exit 7"
+run_probe 'printf "usage limit reached\n" >&2; exit 1' max-b
+assert_eq 7 "$rc" "cap-specific signal on non-zero exit -> still (c) capped, exit 7"
 assert_eq "$NEXT_BLOB" "$(slot_value)" "still NOT restored on a capped (non-zero) probe"
+
+echo "--- A2.6) FIX 1 PROOF: dead cred whose error contains a GENERIC limit substring -> RESTORE (exit 4), NOT keep (7) ---"
+# THE SAFETY-CORE PROOF. A dead/expired credential whose probe output happens to
+# contain a generic limit-ish substring ("exceeded the rate limit for login
+# attempts") MUST be classified (b) bad -> the adapter RESTORES the known-good
+# prior blob and exits 4. The buggy precedence (limit-first, broad set) would have
+# read this as (c) capped -> kept the dead blob, discarded the good prior, bricked
+# the slot (exit 7). This proves the RESTORE path runs and the prior blob comes back.
+seed_prior; rm -f "$MOCK_FAIL_ADD"
+run_probe 'printf "Error: exceeded the rate limit for login attempts\n" >&2; exit 1' max-b
+assert_eq 4 "$rc" "dead-cred-with-limit-substring -> RESTORE path (exit 4), NOT keep-swap (7)"
+assert_eq "$PRIOR_BLOB" "$(slot_value)" "RESTORED: the known-good prior blob is back (dead blob discarded, slot NOT bricked)"
+assert_has "$OUT" "RESTORED" "announces the rollback on the dead-cred-with-limit-substring case"
+assert_lacks "$OUT" "$NEXT_BLOB" "no-leak: the dead next blob is not printed"
 
 echo "--- 6) NEVER name the real claude service as a write target ---"
 seed_prior; rm -f "$MOCK_FAIL_ADD"

@@ -221,7 +221,7 @@ print("five_hour_pct=%s weekly_pct=%s worst_pct=%s worst_window=%s threshold_pct
 
   # Real limit signal (read-only). If the detector is missing/unrunnable we log
   # real_signal=n/a rather than fail the observe tick.
-  if [ -n "$LIMIT_DETECT_CMD" ] && sh -c ": >/dev/null"; then
+  if [ -n "$LIMIT_DETECT_CMD" ]; then
     REAL_OUT="$(sh -c "$LIMIT_DETECT_CMD" 2>/dev/null)"; real_rc=$?
     case "$real_rc" in
       20) real_word=AT ;;  0) real_word=OK ;;  3) real_word=UNKNOWN ;;
@@ -294,6 +294,18 @@ fi
 # recomputes it, so the two cannot disagree.
 NEXT_ACCOUNT="$(SWARM_ACTIVE_ACCOUNT="$ACTIVE_BEFORE" sh -c "$ROTATE_CMD --next" 2>/dev/null | tail -n1)"
 NEXT_ACCOUNT="$(printf '%s' "$NEXT_ACCOUNT" | tr -d '[:space:]')"
+# VALIDATE the ring handle before it is interpolated into the single-quoted
+# `sh -c "$STATE_CMD set '$NEXT_ACCOUNT'"` below: a handle containing a quote (or
+# other shell metacharacter) would break out of the quotes and inject a command.
+# A legitimate account handle is [A-Za-z0-9._-]+ (the same charset swarm-credswap
+# enforces). A non-empty handle that fails this is corrupt/hostile config — REJECT
+# it loudly and blank it so the state `set` is skipped (no interpolation happens);
+# the rotation itself was driven by the actuator independently. (Empty is fine: it
+# means "actuator computes it" and is handled by the -n guard at the state write.)
+if [ -n "$NEXT_ACCOUNT" ] && printf '%s' "$NEXT_ACCOUNT" | grep -qE '[^A-Za-z0-9._-]'; then
+  warn "REFUSED to record post-rotate active — the computed handle is not a valid account name (allowed: A-Za-z0-9._-). Not writing it to the account-state store (would risk shell injection into the state command). Next tick recomputes from the stored active."
+  NEXT_ACCOUNT=""
+fi
 
 # ---------------------------------------------------------------------------
 # 4) DRY-RUN — log the plan, mutate NOTHING. No actuator, no state write.

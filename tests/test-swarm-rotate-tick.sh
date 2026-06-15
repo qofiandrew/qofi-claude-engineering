@@ -266,6 +266,21 @@ assert_has "$W" "active=[]" "empty stored active is passed through (actuator col
 assert_has "$W" "state-set:max-FIRST" "post-rotate active persisted from --next"
 
 # ---------------------------------------------------------------------------
+echo "=== 8b) FIX 6: a hostile ring handle is REJECTED, not interpolated into the state cmd ==="
+# The post-rotate state write does `sh -c "$STATE_CMD set '$NEXT_ACCOUNT'"`. A
+# handle containing a single quote would break out of the single-quotes and inject
+# a command. The tick must VALIDATE the handle ([A-Za-z0-9._-]+) and refuse to
+# record an invalid one — no injection, no malformed state, loud warning. The
+# rotation itself still succeeded (actuator exit 0), so the tick still exits 0.
+# Use a canary file the injection WOULD touch to prove it never executes.
+CANARY="$TMP/injection-canary"; rm -f "$CANARY"
+T_POLL_RC=10; T_ROTATE_RC=0; T_NEXT="x'; touch $CANARY; echo '"; run_tick
+assert_eq 0 "$rc" "hostile --next handle + successful rotate -> tick still exits 0"
+assert_lacks "$W" "state-set:" "hostile handle is NOT written to the account-state store"
+assert_has "$OUT" "not a valid account name" "the invalid handle is rejected loudly"
+if [ -f "$CANARY" ]; then bad "INJECTION: the hostile handle executed (canary file was created)"; else ok "no injection: the hostile handle never reached a shell (canary absent)"; fi
+rm -f "$CANARY"
+
 echo "=== 9) LAUNCHD: rotate-tick plist renders well-formed (NO launchctl load) ==="
 # Render-only via the installer with a FAKE HOME/tmux + an explicit interval, and
 # assert the rendered plist for our label is well-formed with the right cadence.

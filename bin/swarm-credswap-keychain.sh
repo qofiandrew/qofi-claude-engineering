@@ -288,6 +288,25 @@ backup_current() {
   return 1
 }
 
+# backup_is_multiline — does the backed-up PRIOR value contain a newline? The
+# restore path (kc_set_value) is line-oriented: it feeds value+retype on stdin,
+# so a multi-line prior value would truncate on restore — the restore would
+# install a half-credential (mismatch -> fail), stranding the slot on the bad NEW
+# blob (bricked). We must catch this BEFORE installing the new blob so a doomed
+# restore can never strand the slot. Returns 0 (true) if the backup is multi-line.
+backup_is_multiline() {
+  [ "$HAD_PRIOR" -eq 1 ] || return 1
+  [ -f "$BACKUP" ] || return 1
+  # `security find -w` appends a single trailing newline to a single-line value;
+  # strip exactly that trailing newline, then look for any REMAINING newline.
+  local v
+  v="$(cat "$BACKUP")"   # $(...) already strips trailing newlines
+  case "$v" in
+    *$'\n'*) return 0 ;;  # an interior newline survived -> genuinely multi-line
+    *)       return 1 ;;
+  esac
+}
+
 # kc_set_value — set the slot's value WITHOUT putting the secret on argv. macOS
 # `security add-generic-password -w <value>` would expose the value on the
 # command line (process table / scrollback), which this build forbids. Instead we
@@ -355,6 +374,19 @@ if [ "$HAD_PRIOR" -eq 1 ]; then
   echo "  backed up prior credential (value held chmod-600, never printed)"
 else
   echo "  NOTE: no current item in slot — backup is empty; restore would clear the slot"
+fi
+
+# Newline guard on the BACKUP (prior value), symmetric with the next-blob guard
+# above. The restore prompt is line-oriented; a multi-line prior value cannot be
+# restored faithfully, so a failed swap would strand the slot on the bad NEW blob.
+# REFUSE BEFORE installing anything — the slot is still untouched here, so refusing
+# now leaves the prior (multi-line) value exactly in place rather than bricking it.
+if backup_is_multiline; then
+  echo "swarm-credswap: REFUSED — the PRIOR credential in slot svce='$SERVICE' acct='$ACCOUNT' contains a" >&2
+  echo "                newline (multi-line value). Restore is line-oriented and could NOT faithfully put it" >&2
+  echo "                back, so a failed swap would strand the slot on the new blob. Refusing BEFORE install;" >&2
+  echo "                the prior value is left untouched. (Operator: re-provision this slot as a single line.)" >&2
+  exit 2
 fi
 
 # ── STEP 2: INSTALL ─────────────────────────────────────────────────────────

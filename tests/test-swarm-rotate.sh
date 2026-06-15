@@ -202,6 +202,13 @@ assert_eq "max-a" "$(printf '%s' "$OUT" | tail -n1)" "cold start (no active) -> 
 RR_ACCOUNTS='max-a max-b max-c'; RR_ACTIVE='max-a'; run_rotate --to max-c --next
 assert_eq "max-c" "$(printf '%s' "$OUT" | tail -n1)" "--to overrides computed next"
 
+# FIX 5) ring self-rotation: a DUPLICATED active handle must NOT rotate to itself.
+# "a a b" with active a previously picked the SECOND "a" (a no-op swap that still
+# restarts the fleet). De-dup during normalization makes next != active.
+RR_ACCOUNTS='a a b'; RR_ACTIVE='a'; run_rotate --next
+NX="$(printf '%s' "$OUT" | tail -n1)"
+assert_eq "b" "$NX" "duplicated active in ring ('a a b', active a) -> next is 'b', NOT 'a' (no self-rotate)"
+
 # ---------------------------------------------------------------------------
 echo "=== 2) refusals: empty ring, --to outside ring, single-account ring ==="
 RR_ACCOUNTS=''; RR_ACTIVE=''; run_rotate --next
