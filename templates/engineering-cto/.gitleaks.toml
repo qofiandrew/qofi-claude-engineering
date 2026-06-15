@@ -1,0 +1,34 @@
+# .gitleaks.toml — reviewed allowlist for VERIFIED test-fixture placeholders.
+# A REVIEWED ALLOWLIST OF VERIFIED TEST PLACEHOLDERS, not a suppression.
+#
+#  1. `[extend] useDefault = true` keeps the entire built-in gitleaks ruleset
+#     active — every default rule (generic-api-key, aws-access-token, stripe,
+#     etc.) still fires on non-allowlisted content.
+#  2. The allowlist is CONTENT-BOUND: a finding is allowed ONLY when the detected
+#     secret value announces itself as a throwaway placeholder by matching the
+#     `test-secret-*` shape. A real credential never matches it, so a real-looking
+#     secret committed anywhere — including under tests/ — STILL trips.
+#
+# WHY CONTENT-ONLY (no path bound) — version dependency, READ BEFORE EDITING:
+# an earlier revision bounded this by path AND content via
+#     [[allowlists]]
+#     condition = "AND"
+#     paths   = ['''tests/.*''']
+#     regexes = ['''test-secret-[A-Za-z0-9_-]+''']
+# That `[[allowlists]] condition = "AND"` (path + content) construct is honored
+# by gitleaks 8.30.x but NOT by the version CI pins — gitleaks 8.24.3 via
+# gitleaks-action@v2. There the AND allowlist did NOT suppress the fixtures and
+# the `verify` check stayed red. The primitive `[allowlist] regexes` form below
+# is honored by 8.24.3 (and is stable across versions), so the canonical template
+# uses the content-only primitive. Trade-off: a `test-secret-*` literal outside
+# tests/ would also be allowed — acceptable, because real credentials never match
+# the placeholder shape. If/when CI's pinned gitleaks moves to >= 8.30.x, the
+# tighter path+content AND form becomes available; until then, do NOT switch to it.
+
+[extend]
+useDefault = true
+
+[allowlist]
+regexes = [
+  '''test-secret-[A-Za-z0-9_-]+''',
+]
