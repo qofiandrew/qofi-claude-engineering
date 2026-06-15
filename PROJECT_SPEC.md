@@ -365,3 +365,29 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   **NOT INERT — a LIVE change:** the operator must merge AND **restart the fleet** to
   take effect, BEFORE any real `OAUTH_TOKEN_*` enters `tokens.env`. Gate green:
   bun 142/0, shell 39/39 under bash 3.2.
+- `2026-06-15` — Activation tooling (ADR-0018, the operator's terms-gated go-live
+  path; the build still never crosses the gate). Three CC-tooled scripts + a runbook:
+  `bin/swarm-account-provision.sh <label>` idempotently builds an account's ISOLATED
+  config-dir skeleton (dir via `swarm_account_resolve` — the sole path constructor;
+  qofi-swarm marketplace + `discord-b2b` plugin record; a SYMMETRIC `access.json`, one
+  group per `swarm.conf` channel so a failover swap is a field edit + restart with no
+  access rewrite) — reads/writes NO token, never runs `setup-token`, prints the
+  operator's remaining manual steps. `bin/swarm-account-preflight.sh` is the readiness
+  gate: it REFUSES (exit 2) unless the on-disk `swarm-up.sh` IS the F1 launcher (greps
+  the scrub loop + scoped derive, rejects a live `set -a`), the substrate is present
+  (resolver / 6th field / atomic rewrite / swap actuator), and `tokens.env` holds no
+  `OAUTH_TOKEN_*` yet — checked by NAME only, the value is never read (pinned by test).
+  `bin/swarm-account-verify.sh` is the read-only independence canary: a structural
+  probe (each labeled account resolves a DISTINCT isolated dir + has a token) plus a
+  `--baseline`/`--check --moved <label>` pair that PASSes only when exercising one
+  account moves ONLY that account's usage; handles a missing token as SKIP, never a
+  crash; usage behind the `SWARM_ACCOUNT_USAGE_CMD` seam (ccusage default, degrades to
+  INCONCLUSIVE). `docs/ACTIVATION-RUNBOOK.md` is the ordered runbook (restart onto F1 →
+  preflight → provision → OPERATOR tokens → ratify+apply labels → restart → verify),
+  each step tagged CC-TOOLED or OPERATOR-ONLY, with a DRAFT label-assignment proposal
+  to ratify (not applied). FLOORS honored: built/tested against temp HOME + fixtures
+  only; no real token read/written, no live restart, no real `~/.claude-accounts`
+  touched (verified no leak). Tests: `tests/test-swarm-account-{provision,preflight,
+  verify}.sh`. Gate green: bun 142/0, shell 42/42 under bash 3.2.57. Branch merged to
+  `dev` (not main); F1 + this tooling land together. Restart is still the operator's —
+  merging does NOT make F1 live.
