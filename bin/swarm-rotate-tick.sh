@@ -109,7 +109,12 @@
 #     account=max-a real_signal=OK real_exit=0 would_rotate=yes (NOT rotating: observe-mode)
 #
 # Usage:
-#   swarm-rotate-tick.sh                # one tick: poll, route, maybe rotate
+#   swarm-rotate-tick.sh                # one tick: poll, route, maybe rotate (global-clock)
+#   swarm-rotate-tick.sh --failover     # PER-ACCOUNT failover (ADR-0018): detect
+#                                       # capped accounts, move ONLY their swarms to
+#                                       # a non-capped target. See the --failover
+#                                       # section below. Add --force to move a
+#                                       # working swarm; --dry-run to log the plan.
 #   swarm-rotate-tick.sh --observe      # CALIBRATION tick: log burn-vs-budget +
 #                                       # real signal; rotate NOTHING, write NO state
 #   swarm-rotate-tick.sh --dry-run      # one tick: poll + log the plan; mutate NOTHING
@@ -158,11 +163,15 @@ usage() { sed -n '1,90p' "$0"; exit "${1:-0}"; }
 DRY_RUN=0
 QUIET=0
 OBSERVE=0
+FAILOVER=0
+FORCE_ALL=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --dry-run) DRY_RUN=1; shift ;;
-    --observe) OBSERVE=1; shift ;;
-    --quiet)   QUIET=1; shift ;;
+    --dry-run)  DRY_RUN=1; shift ;;
+    --observe)  OBSERVE=1; shift ;;
+    --failover) FAILOVER=1; shift ;;
+    --force)    FORCE_ALL=1; shift ;;
+    --quiet)    QUIET=1; shift ;;
     -h|--help) usage 0 ;;
     --*)       echo "swarm-rotate-tick: unknown flag: $1" >&2; usage 2 ;;
     *)         echo "swarm-rotate-tick: unexpected arg: $1" >&2; usage 2 ;;
@@ -174,6 +183,162 @@ done
 # launchd log needs to see a config error even under --quiet).
 log()  { [ "$QUIET" -eq 1 ] || printf 'swarm-rotate-tick: %s\n' "$*"; }
 warn() { printf 'swarm-rotate-tick: %s\n' "$*" >&2; }
+
+# ===========================================================================
+# --failover — the PER-ACCOUNT failover router (ADR-0018).
+# ===========================================================================
+# The default path below is the legacy GLOBAL-CLOCK whole-fleet rotation (poll ->
+# rotate the whole fleet to the next ring account). --failover is the NEW model:
+# detect which ACCOUNTS are capped, and move ONLY the swarms on a capped account,
+# each to a non-capped target, leaving every other swarm untouched. It composes
+# three injectable seams and writes per-account last-capped markers so the
+# selector round-robins:
+#   SWARM_LIMIT_DETECT_CMD --by-account   which accounts are capped (per-account)
+#   SWARM_FAILOVER_TARGET_CMD             pick a non-capped target for one swarm
+#   SWARM_ACCOUNT_CMD <name> <target>     swap that one swarm (auth-probe+restart)
+# Resilient, not atomic: one swarm that can't move (working / failed swap) is
+# logged and the rest proceed — but RING EXHAUSTION (a capped swarm with nowhere
+# to go) is terminal: we escalate (SWARM_ATTENTION_CMD) and exit 6, the same
+# contract the global-clock path uses.
+#
+# Tick exit codes (--failover): 0 handled (moved / nothing capped / all skipped);
+#   2 detector config error; 6 RING EXHAUSTED (terminal, escalated).
+if [ "$FAILOVER" -eq 1 ]; then
+  CONF="${SWARM_HOME:-}/swarm.conf"
+  if [ -z "${SWARM_HOME:-}" ] || [ ! -f "$CONF" ]; then
+    warn "--failover needs SWARM_HOME pointing at a tree with swarm.conf."
+    exit 2
+  fi
+  # swarm_conf_parse_line is needed here (the default path uses none of swarm-lib).
+  # shellcheck source=swarm-lib.sh
+  . "$SCRIPT_DIR/swarm-lib.sh"
+
+  TARGET_CMD="${SWARM_FAILOVER_TARGET_CMD:-$SCRIPT_DIR/swarm-failover-target.sh}"
+  ACCOUNT_CMD="${SWARM_ACCOUNT_CMD:-$SCRIPT_DIR/swarm-account.sh}"
+  CAPS_DIR="${SWARM_ACCOUNT_CAPS_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/swarm/account-caps}"
+  FORCE_FLAG=""; [ "$FORCE_ALL" -eq 1 ] && FORCE_FLAG="--force"
+
+  fo_in_list() { case " $2 " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+  # 1) Per-account cap detection.
+  DET_OUT="$(sh -c "$LIMIT_DETECT_CMD --by-account" 2>/dev/null)"; det_rc=$?
+  if [ "$det_rc" -eq 2 ]; then
+    warn "failover: limit detector reported a config error (exit 2) — not failing over."
+    exit 2
+  fi
+  [ -n "$DET_OUT" ] && log "failover: detector:"$'\n'"$DET_OUT"
+
+  # Capped LABELED accounts = 'account=<label> verdict=AT' lines (label != _default_).
+  CAPPED=""
+  while IFS= read -r _l; do
+    case "$_l" in account=*) ;; *) continue ;; esac
+    case "$_l" in *"verdict=AT"*) ;; *) continue ;; esac
+    _acct="${_l#account=}"; _acct="${_acct%% *}"
+    [ -z "$_acct" ] && continue
+    [ "$_acct" = "_default_" ] && continue
+    fo_in_list "$_acct" "$CAPPED" || CAPPED="$CAPPED $_acct"
+  done <<EOF
+$DET_OUT
+EOF
+  CAPPED="${CAPPED# }"
+
+  if [ -z "$CAPPED" ]; then
+    log "failover: no capped labeled accounts — nothing to do."
+    exit 0
+  fi
+  log "failover: capped account(s):$CAPPED"
+
+  # 2) Record last-capped markers (LRC store) so the selector deprioritizes a
+  #    just-capped account next time. Best-effort; skipped in --dry-run.
+  if [ "$DRY_RUN" -eq 0 ]; then
+    mkdir -p "$CAPS_DIR" 2>/dev/null || true
+    for _a in $CAPPED; do touch "$CAPS_DIR/$_a" 2>/dev/null || true; done
+  fi
+
+  # evacuate_swarm SWARM CAPPED_ACCT — select a target (spreading via ROUND_EXCLUDE,
+  # wrapping when exhausted) and swap. Handles an exit-7 race (target capped between
+  # select and swap) by excluding the raced target and re-selecting. Sets FO_RESULT
+  # to one of moved|exhausted|skipped|failed and FO_TARGET to the chosen account.
+  FO_RESULT=""; FO_TARGET=""
+  evacuate_swarm() {
+    local sw="$1" cap="$2"
+    local known_capped="$CAPPED" attempts=0 chosen=""
+    FO_RESULT=""; FO_TARGET=""
+    while [ "$attempts" -lt 16 ]; do
+      attempts=$((attempts+1))
+      chosen="$(SWARM_ACCOUNT_CAPS_DIR="$CAPS_DIR" \
+        sh -c "$TARGET_CMD --capped \"\$1\" --exclude \"\$2\" --for-swarm \"\$3\"" _ "$known_capped" "$ROUND_EXCLUDE" "$sw" 2>/dev/null)"
+      local sel_rc=$?
+      if [ "$sel_rc" -eq 6 ]; then
+        if [ -n "$ROUND_EXCLUDE" ]; then ROUND_EXCLUDE=""; continue; fi   # wrap round-robin
+        FO_RESULT="exhausted"; return 0
+      fi
+      if [ "$sel_rc" -ne 0 ] || [ -z "$chosen" ]; then FO_RESULT="failed"; return 0; fi
+
+      if [ "$DRY_RUN" -eq 1 ]; then
+        FO_RESULT="moved"; FO_TARGET="$chosen"; return 0     # dry-run "moves" on paper only
+      fi
+
+      local sw_out sw_rc
+      sw_out="$(sh -c "$ACCOUNT_CMD \"\$1\" \"\$2\" $FORCE_FLAG" _ "$sw" "$chosen" 2>&1)"; sw_rc=$?
+      [ -n "$sw_out" ] && log "failover: swap('$sw'->'$chosen'): $sw_out"
+      case "$sw_rc" in
+        0) FO_RESULT="moved"; FO_TARGET="$chosen"; return 0 ;;
+        7) # target raced to capped — exclude it and re-select for this same swarm.
+           warn "failover: target '$chosen' is CAPPED (race) — excluding it and re-selecting for '$sw'."
+           known_capped="$known_capped $chosen"; continue ;;
+        6) FO_RESULT="skipped"; FO_TARGET="$chosen"; return 0 ;;   # working swarm; try next tick
+        *) FO_RESULT="failed";  FO_TARGET="$chosen"; return 0 ;;
+      esac
+    done
+    FO_RESULT="failed"; return 0   # ran out of attempts
+  }
+
+  # 3) For each capped account, evacuate its swarms (conf order), spreading greedily.
+  ROUND_EXCLUDE=""
+  MOVED=0; SKIPPED=0; FAILED=0; EXHAUSTED=0
+  for cap in $CAPPED; do
+    SWARMS=""
+    while IFS= read -r _line; do
+      swarm_conf_parse_line "$_line" || continue
+      [ -z "$SWARM_CONF_F_NAME" ] && continue
+      [ "$SWARM_CONF_F_ACCOUNT" = "$cap" ] && SWARMS="$SWARMS $SWARM_CONF_F_NAME"
+    done < <(grep -vE '^[[:space:]]*(#|$)' "$CONF")
+    for sw in $SWARMS; do
+      evacuate_swarm "$sw" "$cap"
+      case "$FO_RESULT" in
+        moved)
+          if [ "$DRY_RUN" -eq 1 ]; then log "failover: DRY-RUN — WOULD move '$sw' ($cap) -> '$FO_TARGET'."
+          else log "failover: moved '$sw' ($cap) -> '$FO_TARGET'."; fi
+          MOVED=$((MOVED+1))
+          ROUND_EXCLUDE="$ROUND_EXCLUDE $FO_TARGET" ;;
+        skipped) log "failover: '$sw' is WORKING — skipped this tick (will retry). Pass --force to move a working swarm."; SKIPPED=$((SKIPPED+1)) ;;
+        exhausted) EXHAUSTED=1; break ;;
+        *) warn "failover: could not move '$sw' ($cap) — see swap output above."; FAILED=$((FAILED+1)) ;;
+      esac
+    done
+    [ "$EXHAUSTED" -eq 1 ] && break
+  done
+
+  if [ "$EXHAUSTED" -eq 1 ]; then
+    warn "failover: RING EXHAUSTED — a capped swarm has NO un-capped account to move to. Every labeled account is capped."
+    _reason="swarm failover RING EXHAUSTED — a capped swarm has no un-capped account to fail over to. Add capacity or wait for a reset."
+    if [ -n "${SWARM_ATTENTION_CMD:-}" ]; then
+      if sh -c "${SWARM_ATTENTION_CMD}" _ "$_reason" >/dev/null 2>&1; then
+        warn "failover: raised operator attention flag (SWARM_ATTENTION_CMD)."
+      else
+        warn "failover: SWARM_ATTENTION_CMD FAILED — ring exhaustion is UN-escalated. Operator must intervene."
+      fi
+    else
+      warn "failover: no SWARM_ATTENTION_CMD wired — ring exhaustion is surfaced on stderr/exit-6 only."
+    fi
+    warn "failover: TERMINAL — moved=$MOVED skipped=$SKIPPED failed=$FAILED before exhaustion."
+    exit 6
+  fi
+
+  log "failover: done — moved=$MOVED skipped=$SKIPPED failed=$FAILED."
+  exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # 1) POLL — run the trigger; its exit code is the verdict we route on.

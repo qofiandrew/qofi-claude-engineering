@@ -69,15 +69,23 @@ assert_eq "/Users/me/code/acme" "$SWARM_CONF_F_REPO"    "repo"
 assert_eq "BOT_ACME"            "$SWARM_CONF_F_TOKVAR"  "tokvar"
 assert_eq "111222333444555666" "$SWARM_CONF_F_CHANNEL" "channel is JUST the channel (the bug)"
 assert_eq "999888777666555444" "$SWARM_CONF_F_GUILD"   "guild_id"
+assert_eq ""                    "$SWARM_CONF_F_ACCOUNT" "account empty in a 5-column (no ACCOUNT) row"
 
 # ---------------------------------------------------------------------------
-# 2) THE FUTURE-COLUMN GUARANTEE — a 6th column (e.g. a future 'type') must
-#    NOT corrupt guild_id. This is what protects the next column we add.
+# 2) ACCOUNT is field 6 — a 6-column row populates SWARM_CONF_F_ACCOUNT and
+#    leaves guild_id (field 5) clean. The FUTURE-COLUMN GUARANTEE now sits at
+#    field 7: a 7th column must not corrupt ACCOUNT (it lands in _rest).
 # ---------------------------------------------------------------------------
-echo "=== 6-column row (a hypothetical future column) ==="
-swarm_conf_parse_line "acme | /p | BOT_ACME | 111222333444555666 | 999888777666555444 | engineering-cto"
-assert_eq "111222333444555666" "$SWARM_CONF_F_CHANNEL" "channel uncorrupted by a 6th column"
-assert_eq "999888777666555444" "$SWARM_CONF_F_GUILD"   "guild_id uncorrupted by a 6th column (lands in _rest)"
+echo "=== 6-column row (ACCOUNT is field 6) ==="
+swarm_conf_parse_line "acme | /p | BOT_ACME | 111222333444555666 | 999888777666555444 | max-a"
+assert_eq "111222333444555666" "$SWARM_CONF_F_CHANNEL" "channel uncorrupted by the ACCOUNT column"
+assert_eq "999888777666555444" "$SWARM_CONF_F_GUILD"   "guild_id uncorrupted by the ACCOUNT column"
+assert_eq "max-a"              "$SWARM_CONF_F_ACCOUNT" "ACCOUNT captured from field 6"
+
+echo "=== 7-column row (a hypothetical future column lands in _rest) ==="
+swarm_conf_parse_line "acme | /p | BOT_ACME | 111222333444555666 | 999888777666555444 | max-a | future"
+assert_eq "max-a"              "$SWARM_CONF_F_ACCOUNT" "ACCOUNT uncorrupted by a 7th column (future → _rest)"
+assert_eq "999888777666555444" "$SWARM_CONF_F_GUILD"   "guild_id still clean with a 7th column"
 
 # ---------------------------------------------------------------------------
 # 3) Legacy 4-column row (no guild_id yet) — back-compat: channel still clean,
@@ -87,6 +95,7 @@ echo "=== 4-column row (pre-guild_id, back-compat) ==="
 swarm_conf_parse_line "acme | /p | BOT_ACME | 111222333444555666"
 assert_eq "111222333444555666" "$SWARM_CONF_F_CHANNEL" "channel clean with no 5th column"
 assert_eq ""                   "$SWARM_CONF_F_GUILD"   "guild empty when absent"
+assert_eq ""                   "$SWARM_CONF_F_ACCOUNT" "account empty in a 4-column row"
 
 # ---------------------------------------------------------------------------
 # 4) Whitespace handling — fields are trimmed regardless of padding.
@@ -129,6 +138,11 @@ if [ -f "$CONF" ]; then
       *) clean_guild=1 ;;
     esac
     assert_eq 1 "$clean_guild" "live row '$nm': guild has no embedded '|'"
+    case "$SWARM_CONF_F_ACCOUNT" in
+      *'|'*) clean_acct=0 ;;
+      *) clean_acct=1 ;;
+    esac
+    assert_eq 1 "$clean_acct" "live row '$nm': ACCOUNT has no embedded '|'"
   done < <(grep -vE '^[[:space:]]*(#|$)' "$CONF")
 else
   echo "  (skip: $CONF not present)"

@@ -87,7 +87,7 @@ _wait_for() {  # session pattern timeout
 # first time inside a test harness, or intentionally launching a non-
 # Discord-backed lead).
 _preflight_check() {
-  local name="$1" repo="$2" channel="$3"
+  local name="$1" repo="$2" channel="$3" account="${4:-}"
   local sess="${PREFIX}-${name}"
   local remediation="run: bin/swarm-add.sh $name $repo --skip-walkthrough"
 
@@ -114,8 +114,23 @@ PY
     return 1
   fi
 
-  # Gate (b) — access.json group for this swarm's channel.
-  local access="$HOME/.claude/channels/discord/access.json"
+  # Gate (b) — access.json group for this swarm's channel. The access.json
+  # path is resolved through the account resolver (swarm-lib.sh): an empty
+  # account → the DEFAULT account, byte-identical to today (the resolver
+  # honors the prior SWARM_ACCESS_FILE override and the $HOME/.claude default);
+  # a labeled account → that account's isolated access.json. This is the SOLE
+  # constructor of the path — never hand-build a $HOME/.claude path here.
+  # A rejected resolve (malformed label) leaves the globals stale, so check rc
+  # explicitly and fail the gate with a clear message rather than letting set -e
+  # abort the run or checking a stale access path. (For the default/empty
+  # account the resolver always succeeds → byte-identical to today.)
+  if ! swarm_account_resolve "$account"; then
+    echo "  ERROR: $sess: invalid account label '$account' in swarm.conf (field 6)." >&2
+    echo "         Account labels must start with a letter and contain only [A-Za-z0-9_-]." >&2
+    echo "         Fix the ACCOUNT field, or clear it to use the default account." >&2
+    return 1
+  fi
+  local access="$SWARM_ACCT_ACCESS_FILE"
   if [ -z "$channel" ]; then
     echo "  NOTE:  $sess: no channel in swarm.conf — skipping access.json gate" >&2
   elif [ ! -f "$access" ]; then
@@ -260,8 +275,8 @@ PY
   return 0
 }
 
-launch_one() {  # name repo tokvar [channel]
-  local name="$1" repo="$2" tokvar="$3" channel="${4:-}"
+launch_one() {  # name repo tokvar [channel] [account]
+  local name="$1" repo="$2" tokvar="$3" channel="${4:-}" account="${5:-}"
   local sess="${PREFIX}-${name}"
   if tmux has-session -t "$sess" 2>/dev/null; then
     echo "  running: $sess"; return 0
@@ -277,7 +292,7 @@ launch_one() {  # name repo tokvar [channel]
   # remediation: re-run swarm-add. Bypass for the "I know what I'm doing"
   # case via SWARM_UP_SKIP_SANITY=1.
   if [ "${SWARM_UP_SKIP_SANITY:-0}" != "1" ]; then
-    if ! _preflight_check "$name" "$repo" "$channel"; then
+    if ! _preflight_check "$name" "$repo" "$channel" "$account"; then
       return 1
     fi
   fi
@@ -305,7 +320,46 @@ launch_one() {  # name repo tokvar [channel]
   # operator+bus and also gets DISCORD_OPERATOR_CHANNEL / DISCORD_BUS_CHANNEL for
   # register-by-channel. Deriving it there keeps every CTO swarm untouched (no bus).
   bound_exports="$(swarm_bound_exports "$name" "$channel")"
-  tmux send-keys -t "$sess" "unset ANTHROPIC_API_KEY; export SWARM_HOME='$SWARM_HOME'; $bound_exports; set -a; . '$TOKENS'; export DISCORD_BOT_TOKEN=\"\$$tokvar\"; set +a" C-m
+  # ---- multi-account partition (ADR-0018) -------------------------------
+  # Resolve this swarm's account label to its isolated config dir + vault
+  # token-var via the resolver (swarm-lib.sh) — the SOLE constructor of any
+  # $HOME/.claude path, never hand-built here. Two fragments fall out and are
+  # spliced into the send-keys lines below:
+  #   acct_env — EXTRA pane-env exports for a LABELED account (prefixed "; "
+  #              so it appends cleanly onto the existing env line). Empty for
+  #              the default account.
+  #   acct_rc  — the --remote-control flag fragment. DEFAULT account keeps
+  #              " --remote-control $name" (byte-identical to today); a
+  #              LABELED account drops it ENTIRELY (token-auth is incompatible
+  #              with remote-control).
+  # The EMPTY-account (default) path is byte-identical to the pre-partition
+  # script: acct_env="" and acct_rc=" --remote-control $name", so both
+  # send-keys strings below reproduce exactly. The whole labeled delta is
+  # gated on [ -n "$account" ]; the inert all-empty fleet is unchanged.
+  local acct_env="" acct_rc=" --remote-control $name"
+  if [ -n "$account" ]; then
+    # A non-empty label that the resolver REJECTS is malformed (bad chars / not
+    # starting with a letter). Fail loud and refuse to launch this swarm rather
+    # than fall through to the default-account env (which would silently boot it
+    # on the WRONG, keychain-auth account). Explicit check + friendly message;
+    # without it set -e would still abort, but abruptly and without context.
+    if ! swarm_account_resolve "$account"; then
+      echo "  ERROR: $sess: invalid account label '$account' in swarm.conf (field 6)." >&2
+      echo "         Account labels must start with a letter and contain only [A-Za-z0-9_-]." >&2
+      echo "         Fix the ACCOUNT field, or clear it to use the default account. Skipping this swarm." >&2
+      return 1
+    fi
+    # Deref the OAUTH token var by NAME at RUNTIME inside the pane (same
+    # idiom as DISCORD_BOT_TOKEN's \"\$$tokvar\"): the literal token never
+    # enters the script or the command line / scrollback. unset
+    # ANTHROPIC_AUTH_TOKEN alongside ANTHROPIC_API_KEY so neither metered
+    # API path can shadow the OAuth token. CLAUDE_CONFIG_DIR points claude
+    # at the account's isolated config dir.
+    acct_env="; unset ANTHROPIC_AUTH_TOKEN; export CLAUDE_CONFIG_DIR='$SWARM_ACCT_CONFIG_DIR'; export CLAUDE_CODE_OAUTH_TOKEN=\"\$$SWARM_ACCT_TOKEN_VAR\""
+    # Token-auth is incompatible with remote-control — drop the flag.
+    acct_rc=""
+  fi
+  tmux send-keys -t "$sess" "unset ANTHROPIC_API_KEY; export SWARM_HOME='$SWARM_HOME'; $bound_exports; set -a; . '$TOKENS'; export DISCORD_BOT_TOKEN=\"\$$tokvar\"; set +a$acct_env" C-m
   # CRITICAL: --dangerously-load-development-channels (not --channels) because the
   # qofi-swarm marketplace is self-published, not on Anthropic's approved allowlist.
   # --remote-control "$name" enables Remote Control and NAMES the remote session
@@ -317,7 +371,9 @@ launch_one() {  # name repo tokvar [channel]
   # reaches the "auto mode" readiness marker below, so the gate is unaffected.
   # Lives in launch_one, the single launch path, so `up`, `restart`, and
   # `update` all inherit it. $name is the swarm.conf session name == repo name.
-  tmux send-keys -t "$sess" "claude --dangerously-load-development-channels $PLUGIN --remote-control $name" C-m
+  # acct_rc carries the --remote-control fragment: kept for the default
+  # account, dropped for a LABELED (token-auth) account — see above.
+  tmux send-keys -t "$sess" "claude --dangerously-load-development-channels $PLUGIN$acct_rc" C-m
 
   # --dangerously-load-development-channels opens an interactive warning prompt:
   #   ❯ 1. I am using this for local development
@@ -382,7 +438,8 @@ cmd_up() {  # [name]
     repo="$SWARM_CONF_F_REPO"
     tokvar="$SWARM_CONF_F_TOKVAR"
     channel="$SWARM_CONF_F_CHANNEL"
-    launch_one "$name" "$repo" "$tokvar" "$channel" || true
+    account="$SWARM_CONF_F_ACCOUNT"
+    launch_one "$name" "$repo" "$tokvar" "$channel" "$account" || true
   done < <(grep -vE '^[[:space:]]*(#|$)' "$CONF")
 }
 

@@ -42,6 +42,13 @@
 
 set -euo pipefail
 
+# Source swarm-lib.sh for swarm_account_resolve — the SOLE constructor of any
+# access.json path (never hand-built here). Sourcing only defines functions; it
+# imposes no new SWARM_HOME requirement, so this stays independently runnable.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=swarm-lib.sh
+. "$SCRIPT_DIR/swarm-lib.sh"
+
 usage() {
   sed -n '1,40p' "$0"
   exit "${1:-0}"
@@ -84,7 +91,19 @@ if [ -z "${CTO_WATCHER_CONFIG:-}" ] || [ -z "${SWARM_ACCESS_FILE:-}" ]; then
 fi
 CTO_WATCHER_CONFIG="${CTO_WATCHER_CONFIG:-$SWARM_HOME/cto-watcher/config.json}"
 CTO_BUS_WATCHER_BOT_ID="${CTO_BUS_WATCHER_BOT_ID:-1510298728148369448}"
-ACCESS="${SWARM_ACCESS_FILE:-$HOME/.claude/channels/discord/access.json}"
+# bus-wire is account-agnostic: it operates on whichever access.json its caller
+# points it at via SWARM_ACCESS_FILE (swarm-add passes the new swarm's resolved
+# file). Resolve the DEFAULT account ("") — the resolver's default honors
+# SWARM_ACCESS_FILE, so this is byte-for-byte identical to the prior expansion.
+# The rc-check is a no-op today (the literal "" always resolves) but is here so a
+# future --account flag that threads a VARIABLE label is fail-safe by default
+# (refuse rather than read a stale SWARM_ACCT_ACCESS_FILE) — same discipline as
+# the WORKING-rail consumers (ADR-0018, Phase-2 Finding 1).
+if ! swarm_account_resolve ""; then
+  echo "swarm-bus-wire: could not resolve the account's access.json path" >&2
+  exit 1
+fi
+ACCESS="$SWARM_ACCT_ACCESS_FILE"
 
 echo "  cto-watcher bus wiring for CTO '$NAME' (channel $CHANNEL, bot ${BOT_USER_ID:-<none on hand>})"
 

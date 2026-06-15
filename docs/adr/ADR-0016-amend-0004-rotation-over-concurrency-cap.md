@@ -1,10 +1,11 @@
 # ADR-0016 — Amend ADR-0004: rotation over concurrency cap
 
-**Status:** proposed
+**Status:** superseded by ADR-0018
 **Date:** 2026-06-14
 **Reversibility:** two-way — a posture/knob change, not baked into the code.
 **Escalated:** no — decided autonomously (operator-set rotation model).
 **Amends:** ADR-0004
+**Superseded-by:** ADR-0018
 
 ---
 

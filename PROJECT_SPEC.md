@@ -279,3 +279,60 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
        fully-capped ring escalates to your phone instead of looping. On a ring
        exhaustion alert: add a fresh account to `SWARM_ACCOUNTS` or wait for a
        window reset, then clear the attention flag.
+- `2026-06-15` — **Hybrid multi-account: partition + cap-triggered failover**
+  ([ADR-0018](./docs/adr/ADR-0018-hybrid-account-partition-failover.md),
+  supersedes ADR-0016, amends ADR-0004). Built the substrate to pin each swarm to
+  an account (throughput) and to move only a capped account's swarms to a
+  non-capped one (resilience). **Ships INERT:** every path is gated on a non-empty
+  6th `swarm.conf` field `ACCOUNT`; the real rows ship empty, so an all-empty fleet
+  is byte-for-byte today's single-account-plus-rotation. Phases 1–3 (v1); the
+  lowest-USE telemetry selector is the Phase-4 seam (not built). Pieces:
+  (1) **Substrate** — `swarm_account_resolve` (sole constructor of every
+  `~/.claude` path; empty label = default, byte-identical) + `swarm_conf_set_account`
+  (atomic, arity-safe field-6 rewrite). All ~10 consumers thread the resolver
+  per-swarm; a malformed label fails SAFE on the WORKING rail (skip / treat-as-working
+  / refuse — Phase-2 Finding 1). (2) **`bin/swarm-account.sh`** — the per-swarm swap
+  actuator: validate → provision-check → **auth-probe the target** (reusing
+  `swarm-auth-probe.sh`'s 0/1/75 verdicts; never move onto a dead or capped token) →
+  checkpoint → atomic rewrite → restart, with **revert on a clean-boundary refusal**
+  and a `--reset` escape hatch. (3) **`swarm-limit-detect.sh --by-account`** — groups
+  live swarms by account, reports each account's cap verdict (an account is capped if
+  ANY of its swarms shows a limit pane). (4) **`bin/swarm-failover-target.sh`** — the
+  v1 FALLBACK selector (least-recently-capped round-robin among non-capped accounts;
+  never targets a capped one; ring-exhaustion terminal), behind
+  `SWARM_FAILOVER_TARGET_CMD` so Phase 4 swaps in the lowest-use selector additively.
+  Hysteresis lives behind the unwired `SWARM_ACCOUNT_HEADROOM_CMD` headroom seam and
+  **never blocks an evacuation** (the carve-out, pinned by test). (5) **Router** —
+  `swarm-rotate-tick.sh --failover`: detect → select → swap, spreading a capped
+  account's swarms across targets; the legacy global-clock whole-fleet path is
+  byte-unchanged (default mode). New tests `test-swarm-account.sh`,
+  `test-swarm-failover-target.sh`, `test-swarm-failover-tick.sh`,
+  `test-conf-rewrite-account.sh`; extended `test-swarm-limit-detect.sh`. Adversarial
+  review gate (per the dangerous WORKING-rail path) before merge.
+
+  **Operator runbook delta (multi-account — terms-gated, do NOT skip).**
+  - **Activation is a terms-cleared, operator-only act** — running more than one real
+    Max subscription in concurrent automation is what ADR-0004 flagged. The build
+    never crosses it. To go live: (a) put a `<label>` in a swarm's `ACCOUNT` field;
+    (b) create that account's isolated config dir `~/.claude-accounts/<label>`;
+    (c) add `OAUTH_TOKEN_<LABEL_UPPER>` to `tokens.env`. Until all three exist for a
+    label, that swarm stays on the default account.
+  - **GO-LIVE GAP (F1, do this before real tokens land):** the pane env currently
+    sources the WHOLE `tokens.env`, so every pane can read every `OAUTH_TOKEN_*`, not
+    just its own. Harmless while inert; **before provisioning real tokens, scope each
+    pane to only its own `OAUTH_TOKEN_<LABEL>`** (export just the resolved token var,
+    not `set -a; . tokens.env`).
+  - **New env seams:** `SWARM_FAILOVER_TARGET_CMD` (selector, default
+    `bin/swarm-failover-target.sh`), `SWARM_ACCOUNT_CMD` (swap actuator, default
+    `bin/swarm-account.sh`), `SWARM_ACCOUNT_CAPS_DIR` (per-account last-capped LRC
+    markers, default `~/.config/swarm/account-caps`), `SWARM_ACCOUNT_HEADROOM_CMD`
+    (Phase-4 headroom signal, unwired), `SWARM_HYSTERESIS_PCT` (default 15).
+  - **Drive failover from the tick:** `swarm-rotate-tick.sh --failover` (add `--force`
+    to move a working swarm, `--dry-run` to log the plan). It is additive — the
+    global-clock `swarm-rotate-tick.sh` (no flag) is unchanged.
+  - **`swarm-account.sh <name> <account>`** swaps one swarm by hand;
+    `swarm-account.sh --reset` restores the pre-failover split from the gitignored
+    `.swarm-accounts-default` snapshot (churn-free; captured at the first failover).
+  - **Co-location caveat (ADR-0018):** after an account's first cap, its swarms
+    spread to whatever targets were least-recently-capped and STAY there. Intentional
+    co-location dissolves on the first cap; `--reset` is the only way back.
