@@ -66,6 +66,7 @@ SWARM_CONF_F_REPO=""
 SWARM_CONF_F_TOKVAR=""
 SWARM_CONF_F_CHANNEL=""
 SWARM_CONF_F_GUILD=""
+SWARM_CONF_F_ACCOUNT=""
 
 # _swarm_trim STRING — strip leading/trailing whitespace (pure bash, no
 # subprocess; safe in the per-row hot loops swarm-typing/swarm-watch run).
@@ -85,10 +86,13 @@ swarm_conf_parse_line() {
   case "$_trimmed" in
     ''|'#'*) return 1 ;;
   esac
-  local _name _repo _tokvar _channel _guild _rest
+  local _name _repo _tokvar _channel _guild _account _rest
   # Full known arity + `_rest` catch-all so a row with MORE columns than the
-  # current schema cannot corrupt the last named field (see header).
-  IFS='|' read -r _name _repo _tokvar _channel _guild _rest <<EOF
+  # current schema cannot corrupt the last named field (see header). ACCOUNT
+  # (field 6) is the multi-account partition label; absent in legacy 4/5-col
+  # rows → empty → the default account (today's behavior). Resolve it via
+  # swarm_account_resolve — never construct an account path by hand.
+  IFS='|' read -r _name _repo _tokvar _channel _guild _account _rest <<EOF
 $_line
 EOF
   SWARM_CONF_F_NAME="$(_swarm_trim "$_name")"
@@ -96,6 +100,7 @@ EOF
   SWARM_CONF_F_TOKVAR="$(_swarm_trim "$_tokvar")"
   SWARM_CONF_F_CHANNEL="$(_swarm_trim "$_channel")"
   SWARM_CONF_F_GUILD="$(_swarm_trim "$_guild")"
+  SWARM_CONF_F_ACCOUNT="$(_swarm_trim "$_account")"
   return 0
 }
 
@@ -549,6 +554,55 @@ swarm_effort_for() {
       printf '%s' "/effort ultracode"
       ;;
   esac
+}
+
+# swarm_account_resolve LABEL — resolve an account label to ITS config dir,
+# projects dir, access.json, and vault token-var name. SINGLE SOURCE OF TRUTH:
+# every consumer that needs an account's paths/token derives all four from here
+# and NEVER hand-constructs a $HOME/.claude path. A missed site silently reads
+# the WRONG account's transcripts → the WORKING rail (repo_activity) disarms →
+# a live swarm is killed. A repo-wide grep-assert (tests/test-account-paths-
+# sole-constructor.sh) pins this function as the sole builder of those paths.
+#
+# Empty label = the DEFAULT account = today's behavior, byte-for-byte:
+#   CONFIG_DIR  $HOME/.claude          (keychain auth; no token var)
+#   PROJECTS    $HOME/.claude/projects
+#   ACCESS      $HOME/.claude/channels/discord/access.json
+#   TOKEN_VAR   ""   (empty → launch_one keeps keychain auth, no token export)
+# A non-empty <label> maps to an ISOLATED config dir + a vault token var:
+#   CONFIG_DIR  $HOME/.claude-accounts/<label>
+#   TOKEN_VAR   OAUTH_TOKEN_<LABEL_UPPER>   (lowercase→UPPER, '-'→'_')
+#
+# Sets (does not echo): SWARM_ACCT_CONFIG_DIR, SWARM_ACCT_PROJECTS_DIR,
+# SWARM_ACCT_ACCESS_FILE, SWARM_ACCT_TOKEN_VAR. Returns 0; 2 on a malformed
+# label (rejected BEFORE any path is built — a bad label must never name a dir).
+SWARM_ACCT_CONFIG_DIR=""
+SWARM_ACCT_PROJECTS_DIR=""
+SWARM_ACCT_ACCESS_FILE=""
+SWARM_ACCT_TOKEN_VAR=""
+swarm_account_resolve() {
+  local label="${1:-}"
+  if [ -z "$label" ]; then
+    SWARM_ACCT_CONFIG_DIR="$HOME/.claude"
+    SWARM_ACCT_PROJECTS_DIR="$HOME/.claude/projects"
+    SWARM_ACCT_ACCESS_FILE="$HOME/.claude/channels/discord/access.json"
+    SWARM_ACCT_TOKEN_VAR=""
+    return 0
+  fi
+  # Validate the handle BEFORE building any path (same shape swarm-account-state
+  # trusts): leading alpha, then only [A-Za-z0-9_-].
+  case "$label" in
+    [A-Za-z]*) ;;
+    *) echo "swarm_account_resolve: invalid account label '$label' (need [A-Za-z][A-Za-z0-9_-]*)" >&2; return 2 ;;
+  esac
+  case "$label" in
+    *[!A-Za-z0-9_-]*) echo "swarm_account_resolve: invalid account label '$label' (need [A-Za-z][A-Za-z0-9_-]*)" >&2; return 2 ;;
+  esac
+  SWARM_ACCT_CONFIG_DIR="$HOME/.claude-accounts/$label"
+  SWARM_ACCT_PROJECTS_DIR="$SWARM_ACCT_CONFIG_DIR/projects"
+  SWARM_ACCT_ACCESS_FILE="$SWARM_ACCT_CONFIG_DIR/channels/discord/access.json"
+  SWARM_ACCT_TOKEN_VAR="OAUTH_TOKEN_$(printf '%s' "$label" | tr 'a-z-' 'A-Z_')"
+  return 0
 }
 
 # swarm_bound_exports NAME CHANNEL — emit the shell `export` statements that
