@@ -136,6 +136,16 @@ sync_repo() {
     echo "  on branch: $branch"
 
     # Dirty-tree refusal (skip for --check, since check never writes anyway).
+    #
+    # OPERATOR-OWNED-AWARE (ADR-0018 follow-up): a tree dirty ONLY under
+    # operator-owned paths (products/, stress-test-log/, …) is SAFE to sync.
+    # manifest_apply SKIPS operator-owned targets in sync mode and the commit
+    # set (swarm_manifest_targets_relative) EXCLUDES them, so those dirty files
+    # are provably never written, staged, or committed by this run. The CPO
+    # continuously writes product specs, so its tree is near-always dirty under
+    # products/ — refusing there silently strands it on stale doctrine. We
+    # refuse ONLY when a SYNC-MANAGED path (doctrine / hooks / settings /
+    # gitignore / anything the manifest writes) is dirty. --force still overrides.
     if [ "$CHECK" -eq 0 ]; then
       local porcelain
       porcelain="$(git -C "$repo" status --porcelain 2>/dev/null)"
@@ -143,13 +153,24 @@ sync_repo() {
         if [ "$FORCE_DIRTY" -eq 1 ]; then
           echo "  WARN: working tree is dirty — proceeding anyway (--force)"
         else
-          {
-            echo "  REFUSED: working tree is dirty (uncommitted changes)."
-            echo "           Commit or stash, then re-run. To override, pass --force."
-            echo "           First few dirty paths:"
-            printf '%s\n' "$porcelain" | head -5 | sed 's/^/             /'
-          } >&2
-          return 0
+          # Classify the dirt against the repo's stamped operator-owned set
+          # (.claude/operator-owned-paths), reusing the canonical-prefix matcher.
+          # foreign = the dirty paths that are NOT operator-owned (sync-managed).
+          _swarm_load_oo_from_list "$repo"
+          local foreign
+          foreign="$(swarm_dirty_classify_oo "$repo")"
+          if [ -z "$foreign" ]; then
+            echo "  NOTE: working tree is dirty but ONLY under operator-owned paths"
+            echo "        (products/ etc.) — sync skips these and will not commit them; proceeding."
+          else
+            {
+              echo "  REFUSED: working tree has uncommitted SYNC-MANAGED changes."
+              echo "           Commit or stash, then re-run. To override, pass --force."
+              echo "           Sync-managed dirty paths (operator-owned dirt is fine, these are not):"
+              printf '%s\n' "$foreign" | head -5 | sed 's/^/             /'
+            } >&2
+            return 0
+          fi
         fi
       fi
     fi

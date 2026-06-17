@@ -1430,6 +1430,68 @@ _swarm_target_in_oo_subtree() {
   return 1
 }
 
+# _swarm_load_oo_from_list REPO — populate SWARM_OO_PREFIXES + SWARM_OO_FILES
+# from REPO's stamped .claude/operator-owned-paths (the same canonical list
+# manifest_apply writes via _swarm_stamp_operator_owned_list and the Layer-3
+# pre-commit hook reads: subtree-prefix entries end in `/`, exact-file entries
+# do not). After this, _swarm_target_in_oo_subtree classifies a repo-relative
+# path against EXACTLY the set manifest_apply will skip-and-never-commit.
+#
+# RESETS both vars first (so a stale set from an earlier call never leaks). A
+# MISSING or empty list yields EMPTY sets — so nothing classifies as operator-
+# owned and any caller's dirty-tree test fails SAFE to refuse. This is read-only
+# and independent of manifest_apply's own pre-walk (which resets and repopulates
+# these vars itself), so calling it before manifest_apply is harmless.
+_swarm_load_oo_from_list() {
+  local repo="$1" list="$1/.claude/operator-owned-paths" line
+  SWARM_OO_PREFIXES=""
+  SWARM_OO_FILES=""
+  [ -f "$list" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      ''|\#*) continue ;;
+      */)     SWARM_OO_PREFIXES="$SWARM_OO_PREFIXES $line" ;;
+      *)      SWARM_OO_FILES="$SWARM_OO_FILES $line" ;;
+    esac
+  done < "$list"
+  return 0
+}
+
+# swarm_dirty_classify_oo REPO — classify a repo's dirty working tree against
+# its operator-owned set. Reads `git status --porcelain` and prints, to stdout,
+# one line per dirty path that is NOT operator-owned (a sync-managed path:
+# doctrine / hooks / settings / gitignore / anything outside products etc.).
+# Empty stdout + a dirty tree => every dirty path is operator-owned (sync skips
+# them all and will not commit them). Renames are split so BOTH the old and new
+# path must be operator-owned. Return: 0 if the tree is dirty AND every dirty
+# path is operator-owned; 1 otherwise (clean tree, OR at least one sync-managed
+# path is dirty — printed). Unparseable/quoted paths fall through as NON-owned
+# (fail-safe to refuse). Caller must have loaded the OO set first
+# (_swarm_load_oo_from_list).
+swarm_dirty_classify_oo() {
+  local repo="$1" porcelain line path any_dirty=0 any_foreign=0
+  porcelain="$(git -C "$repo" status --porcelain 2>/dev/null)"
+  [ -n "$porcelain" ] || return 1   # clean tree: not "dirty-but-all-oo"
+  # Split each porcelain entry into its path(s): strip the 2-col status + space,
+  # and turn a rename "old -> new" into two paths so both must be operator-owned.
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    any_dirty=1
+    line="${line#???}"                 # drop the "XY " status prefix
+    case "$line" in
+      *" -> "*)
+        for path in "${line%% -> *}" "${line##* -> }"; do
+          _swarm_target_in_oo_subtree "$path" || { printf '%s\n' "$path"; any_foreign=1; }
+        done ;;
+      *)
+        _swarm_target_in_oo_subtree "$line" || { printf '%s\n' "$line"; any_foreign=1; } ;;
+    esac
+  done <<EOF
+$porcelain
+EOF
+  [ "$any_dirty" -eq 1 ] && [ "$any_foreign" -eq 0 ]
+}
+
 # _swarm_collect_oo_prefixes — manifest_walk callback that populates
 # SWARM_OO_PREFIXES (space-separated subtree prefixes, each ending in `/`)
 # and SWARM_OO_FILES (space-separated exact-file paths). Called in the

@@ -391,3 +391,20 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   verify}.sh`. Gate green: bun 142/0, shell 42/42 under bash 3.2.57. Branch merged to
   `dev` (not main); F1 + this tooling land together. Restart is still the operator's —
   merging does NOT make F1 live.
+- `2026-06-17` — `swarm-sync.sh` dirty-tree refusal made **operator-owned-aware**.
+  Root cause: the CPO continuously writes product specs into `products/` (operator-
+  owned), so its tree is near-always dirty; the old refusal blocked ANY non-empty
+  `git status`, so every routine sync refused it and it silently stayed on STALE
+  doctrine — yet `manifest_apply` SKIPS operator-owned in sync mode and the commit
+  set excludes it, so the refusal blocked a sync that provably wouldn't touch the
+  dirty files. Change (the dirty-tree block only): classify the dirt against the
+  repo's stamped `.claude/operator-owned-paths` via the existing canonical-prefix
+  matcher (`_swarm_target_in_oo_subtree`); ALL dirty paths operator-owned → PROCEED
+  with a note (sync skips + never commits them); ANY sync-managed path dirty →
+  REFUSE as before; `--force` still overrides; `--check` unaffected. Fail-safe: a
+  missing OO list yields an empty set, so classification errs to REFUSE. New helpers
+  `_swarm_load_oo_from_list` + `swarm_dirty_classify_oo` in `swarm-lib.sh`. Tested
+  (`tests/test-swarm-sync-operator-owned-dirty.sh`, 25 assertions: unit classifier +
+  end-to-end — products-only-dirty syncs without staging the dirt; a dirty doctrine
+  file still refuses; `--force` overrides). Gate green: bun 142/0, shell 43/43 under
+  bash 3.2.57. Branch-only (`fix/sync-operator-owned-dirty`); operator merges.
