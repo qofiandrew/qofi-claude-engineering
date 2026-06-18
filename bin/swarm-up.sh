@@ -400,6 +400,14 @@ launch_one() {  # name repo tokvar [channel] [account]
   tmux send-keys -t "$sess" "unset ANTHROPIC_API_KEY; export SWARM_HOME='$SWARM_HOME'; $bound_exports; unset IFS; for v in \$(env | sed -n 's/^\(BOT_[A-Za-z0-9_]*\)=.*/\1/p;s/^\(OAUTH_TOKEN_[A-Za-z0-9_]*\)=.*/\1/p'); do unset \"\$v\"; done; export DISCORD_BOT_TOKEN=\"\$(. '$TOKENS' >/dev/null 2>&1; printf '%s' \"\$$tokvar\")\"$acct_env" C-m
   # CRITICAL: --dangerously-load-development-channels (not --channels) because the
   # qofi-swarm marketplace is self-published, not on Anthropic's approved allowlist.
+  # --permission-mode auto: guarantees auto mode on every launch regardless of any
+  # prior session state or settings.json permissionMode. Without this, a session
+  # could start in plan or default mode (e.g. if a prior session changed the mode
+  # and that state persisted, or if a repo's settings.json specifies a different
+  # mode) — the CTO would boot but silently refuse to execute work. This flag is
+  # a launch-time pin; it also keeps the "auto mode" footer readiness gate (below)
+  # reliable: the gate checks for the "auto mode" string, which appears when this
+  # flag is in effect, so it can't be fooled by a different mode taking effect first.
   # --remote-control "$name" enables Remote Control and NAMES the remote session
   # after the swarm/repo (e.g. "qofi-product"), so it shows up by that name at
   # claude.ai/code and in the mobile app — the operator can drive any swarm
@@ -411,7 +419,7 @@ launch_one() {  # name repo tokvar [channel] [account]
   # `update` all inherit it. $name is the swarm.conf session name == repo name.
   # acct_rc carries the --remote-control fragment: kept for the default
   # account, dropped for a LABELED (token-auth) account — see above.
-  tmux send-keys -t "$sess" "claude --dangerously-load-development-channels $PLUGIN$acct_rc" C-m
+  tmux send-keys -t "$sess" "claude --dangerously-load-development-channels $PLUGIN$acct_rc --permission-mode auto" C-m
 
   # --dangerously-load-development-channels opens an interactive warning prompt:
   #   ❯ 1. I am using this for local development
