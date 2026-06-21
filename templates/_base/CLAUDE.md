@@ -92,11 +92,14 @@ is **effectively lost.**
   shell output, working notes. Never the thing you need the operator to read.
 - **Intra-swarm agent-to-agent communication is out of scope** here; this rule
   governs human I/O. Coordination inside the swarm uses the archetype's playbook.
-- **A Stop nudge backs this up (engineering-cto leads).** When a lead's response
-  cycle produces a substantive operator-facing reply but posts nothing to Discord,
-  a non-blocking nudge reminds it that the terminal is unmonitored — deliver via
-  the Discord reply tool (or a `.md` file per §*Message length*). The CPO is
-  exempt: its deliberate silence-by-default is correct, not a missed post.
+- **A Stop nudge backs this up.** When a response cycle produces a substantive
+  operator-facing reply but posts nothing to Discord, a non-blocking nudge reminds
+  the lead that the terminal is unmonitored — deliver via the Discord reply tool
+  (or a `.md` file per §*Message length*). The engineering-cto lead is nudged on
+  any such turn; the CPO is nudged **only on an operator-origin turn** (a prompt
+  from #qofi-product), never on a bus/CTO turn — its silence-by-default toward CTOs
+  is correct and stays unnudged. The nudge changes WHERE operator-facing output
+  goes, never WHEN the CPO speaks to a CTO.
 
 ## Message length — never truncate to fit (foundational)
 

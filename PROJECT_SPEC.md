@@ -408,3 +408,27 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   end-to-end — products-only-dirty syncs without staging the dirt; a dirty doctrine
   file still refuses; `--force` overrides). Gate green: bun 142/0, shell 43/43 under
   bash 3.2.57. Branch-only (`fix/sync-operator-owned-dirty`); operator merges.
+- `2026-06-21` — CPO Stop nudge — the **mechanical backstop** behind the
+  doctrine-only "Discord is the only surface" fix (`0158441`). Symptom: the CPO
+  still intermittently answered the operator in the pane, not Discord — the
+  doctrine was correctly stamped and live, but nothing CAUGHT a missed post. The
+  engineering-cto `discord-reply-nudge.sh` exempted the CPO wholesale (its
+  silence-by-default toward CTOs made a naïve nudge nag the legitimate silence).
+  New `templates/cpo/hooks/discord-reply-nudge.sh` re-introduces the nudge
+  CPO-shaped: it anchors the turn on the LAST Discord-framed prompt (the bridge's
+  `<channel … chat_id="…">`, isMeta), and fires ONLY when that chat_id ==
+  `DISCORD_OPERATOR_CHANNEL` — an **operator-origin** turn — with a substantive
+  (≥150-char) final non-sidechain text and NO `reply` tool_use in the window. A
+  bus/CTO turn, an unknown/unset operator channel, a delivered reply (CPO or
+  teammate-sidechain), short/tool-only output, or any parse error → SILENT
+  (fail-open). It changes WHERE operator-facing output goes, never WHEN the CPO
+  speaks to a CTO; silence-by-default on the bus is untouched. Never blocks
+  (always exit 0). Wired under `hooks.Stop` in `cpo/settings.example.json` +
+  manifest `refresh` row (stamped by sync/init/onboard like every other hook).
+  Floor doctrine (`_base/CLAUDE.md` §"Reaching the operator") updated — the "CPO
+  is exempt" line was now false. Tests: `tests/test-cpo-discord-reply-nudge.sh`
+  (14 assertions: operator→nudge, bus→silent, current-turn windowing both
+  directions, delivered/short/tool-only/no-anchor/unset-channel/fail-open/
+  re-entry); compose fixtures regenerated (3). Gate green: bun 142/0, shell all
+  green. Branch-only (`feat/cpo-discord-reply-nudge`); **operator merges AND
+  restarts the qofi-product swarm** to make it live (a hook is read at launch).
