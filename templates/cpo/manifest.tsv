@@ -33,6 +33,7 @@
 #
 # behavior        | template-path                                                                                                | target-path
 compose           | cpo/CLAUDE.preamble.md+_base/CLAUDE.md+cpo/CLAUDE.md                                                          | CLAUDE.md
+refresh           | _base/AGENTS.md                                                                                              | AGENTS.md
 compose           | cpo/ESCALATION.preamble.md+_base/ESCALATION.md+cpo/ESCALATION.md                                              | ESCALATION.md
 refresh           | cpo/CONVERSATION.md                                                                                           | CONVERSATION.md
 refresh           | cpo/EVALUATION.md                                                                                             | EVALUATION.md
