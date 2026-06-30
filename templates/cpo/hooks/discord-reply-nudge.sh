@@ -26,17 +26,22 @@
 # nudge, never disrupt. We would rather miss a nudge than nag a correct silence.
 #
 # Detection (the confirmed heuristic):
-#   1. Window the current turn: anchor on the LAST Discord-framed prompt — a user
-#      record whose string content carries `chat_id="<id>"` (how the bridge
-#      delivers, server.ts: `<channel source="…discord" chat_id="…" …>`). No such
-#      record → fail-open silent.
-#   2. ORIGIN GATE: the anchor's chat_id must equal DISCORD_OPERATOR_CHANNEL (the
-#      env the CPO launch sets, swarm_bound_exports). Bus/other/unset → silent.
-#   3. DELIVERED if any mcp__plugin_discord-b2b_discord__reply tool_use appears in
-#      the turn — the CPO's OR a teammate's (isSidechain), inline or .md-attach. →
-#      silent. (The reply routes by the answered prompt's channel_id; we don't
-#      re-check the target — a reply this cycle means the CPO spoke.)
-#   4. Else take the CPO's FINAL assistant message text (drop thinking/tool_use),
+#   1. Window the current turn: anchor on the LAST OPERATOR-channel prompt — a
+#      user record whose string content carries `chat_id="<operator>"` (how the
+#      bridge delivers, server.ts: `<channel source="…discord" chat_id="…" …>`,
+#      where chat_id == operator equals DISCORD_OPERATOR_CHANNEL, the env the CPO
+#      launch sets via swarm_bound_exports). We anchor on the operator prompt
+#      SPECIFICALLY, not the last chat_id record: an operator turn is routinely
+#      interleaved with bus traffic (CTO replies, watcher pings) that also carry a
+#      chat_id, and anchoring on the last of those lands the window on a BUS record
+#      and misses the operator's question. No operator inbound → fail-open silent.
+#   2. DELIVERED only if a mcp__plugin_discord-b2b_discord__reply tool_use whose
+#      input.chat_id == operator appears in the turn — the CPO's OR a teammate's
+#      (isSidechain), inline or .md-attach. → silent. The TARGET check is the crux:
+#      the CPO legitimately posts to the BUS on an operator turn (driving CTOs,
+#      STATE markers); a bus reply is NOT an operator reply, so it does NOT count
+#      as delivered. Only an operator-targeted reply proves the operator was answered.
+#   3. Else take the CPO's FINAL assistant message text (drop thinking/tool_use),
 #      trim; < FLOOR chars → silent (trivial/internal); else → nudge.
 
 set -uo pipefail
@@ -86,10 +91,15 @@ for ln in raw:
 def content(r):
     return (r.get("message") or {}).get("content")
 
-# 1) Anchor = last user record whose STRING content carries a chat_id (the
-#    Discord-framed prompt that began the cycle). These arrive isMeta=True.
+# 1) Anchor = last OPERATOR-channel inbound (chat_id == operator). We anchor on
+#    the operator prompt SPECIFICALLY, not merely the last chat_id record: an
+#    operator-origin turn is routinely interleaved with bus traffic (CTO replies,
+#    watcher pings) that ALSO carry a chat_id, and anchoring on the last of those
+#    would land the window on a BUS record and miss the operator's question
+#    entirely. Bus records simply don't match `operator`, so this skips them. No
+#    operator inbound at all → fail-open silent (a pure-bus cycle is not in scope).
 CHAT_ID = re.compile(r'chat_id="(\d+)"')
-start, origin = None, None
+start = None
 for i in range(len(recs) - 1, -1, -1):
     r = recs[i]
     if r.get("type") != "user":
@@ -98,14 +108,10 @@ for i in range(len(recs) - 1, -1, -1):
     if not isinstance(c, str):
         continue
     m = CHAT_ID.search(c)
-    if m:
-        start, origin = i, m.group(1)
+    if m and m.group(1) == operator:
+        start = i
         break
 if start is None:
-    print("0"); sys.exit(0)
-
-# 2) Origin gate: only an operator-origin cycle is eligible. Bus/other → silent.
-if origin != operator:
     print("0"); sys.exit(0)
 
 turn = recs[start:]
@@ -113,16 +119,30 @@ turn = recs[start:]
 def blocks(r):
     return content(r) or []
 
-# 3) Delivered? any reply tool_use in the turn (CPO OR teammate-sidechain).
+# 2) Delivered? a reply tool_use TARGETING THE OPERATOR CHANNEL anywhere in the
+#    window (CPO OR teammate-sidechain). The target check is the whole point: on
+#    an operator-origin turn the CPO legitimately posts to the BUS (driving CTOs,
+#    STATE markers) — those are NOT operator replies. Only a reply whose
+#    input.chat_id == operator proves the operator was actually answered. A turn
+#    that posts only to the bus has NOT delivered to the operator.
 for r in turn:
     if r.get("type") != "assistant":
         continue
     for b in blocks(r):
-        if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") == reply_tool:
+        if (isinstance(b, dict) and b.get("type") == "tool_use"
+                and b.get("name") == reply_tool
+                and str((b.get("input") or {}).get("chat_id", "")) == operator):
             print("0"); sys.exit(0)
 
-# 4) CPO's FINAL assistant message text (isSidechain != true), text blocks only.
-final_text = ""
+# 3) The CPO's most substantive operator-owed text in the window (isSidechain
+#    != true), text blocks only — the LONGEST, not merely the last. On an
+#    interleaved operator+bus window the operator's actual answer is often an
+#    EARLY text block (the real reply, written but not posted), while the LAST
+#    text is short bus-narration ("retrying the state declaration"). Taking the
+#    last would let that trailing narration fall below the floor and mask an
+#    unposted operator answer — the documented failure. The longest substantive
+#    text block is the response the operator was owed; floor-test that.
+best_len = 0
 for r in turn:
     if r.get("type") != "assistant" or r.get("isSidechain") is True:
         continue
@@ -130,9 +150,10 @@ for r in turn:
         b.get("text", "") for b in blocks(r)
         if isinstance(b, dict) and b.get("type") == "text"
     )
-    if txt.strip():
-        final_text = txt  # keep the LAST CPO text message
-print("1" if len(final_text.strip()) >= floor else "0")
+    n = len(txt.strip())
+    if n > best_len:
+        best_len = n  # keep the CPO's LONGEST text message (the owed answer)
+print("1" if best_len >= floor else "0")
 PY
 NUDGE="$(cat "$PYOUT" 2>/dev/null)"
 rm -f "$PYOUT"

@@ -317,10 +317,18 @@ per `MEMORY.md` §120 — do not create per-CTO memory files.) The three states:
   (the **AND gate** tripped — both-large-and-unclear; **Type-2 real spend**
   awaiting explicit approval; a vision gap; or another decision genuinely beyond
   your authority) OR drove everything it can (completion folds in: "done on
-  cto-X, what's next?"). It asked in #qofi-product and is parked; it does **not**
-  drive that CTO while waiting. **A decision within your authority — not tripping
-  the AND gate, not Type-2 spend — is NEVER grounds to wait here:** decide it and
-  stay DRIVING.
+  cto-X, what's next?"). It does **not** drive that CTO while waiting. **A
+  decision within your authority — not tripping the AND gate, not Type-2 spend —
+  is NEVER grounds to wait here:** decide it and stay DRIVING.
+  - **Entering this state REQUIRES an operator-facing post to #qofi-product in
+    the SAME turn — the question or the "done, what's next?" itself.** The bus
+    `STATE: <cto> WAITING_FOR_OPERATOR` marker is for the watcher ONLY; it is
+    **never** the operator surface and the operator never sees the bus. Emitting
+    the bus marker without the accompanying #qofi-product post is NOT "parked
+    waiting on the operator" — it is the **exact silent-failure** §*Discord is
+    the only surface* forbids: the operator asked, you answered into the void.
+    `STATE: … WAITING_FOR_OPERATOR` and the operator post are **one atomic act**,
+    never the marker alone.
 - **STOOD_DOWN** — operator said stand down that CTO; idle for that loop until go.
 
 **The liveness guarantee is YOUR discipline, not the ping.** You **never wait on a
@@ -389,6 +397,15 @@ the bus** in the EXACT grammar: `STATE: <cto-name> DRIVING` /
 enum spelling). The marker **precedes** the behavior change, every time. **State
 described in prose is NOT a declaration** — the watcher is a dumb parser and will
 correctly act as if no transition happened.
+
+**The bus `STATE:` marker is NEVER the operator surface — it does not reach the
+operator, and emitting it is never "I surfaced."** It is a watcher-only signal on
+the bus. Whenever a transition owes the operator something — most sharply
+`WAITING_FOR_OPERATOR`, which by definition needs the operator — the bus marker
+and the operator-facing #qofi-product post are **one atomic act**: emit the
+marker AND post to the operator in the same turn, never the marker alone.
+Satisfying the mechanical bus grammar and stopping is the silent-failure
+§*Discord is the only surface* forbids — the operator sees nothing.
 
 **Two rigid grammars on the bus — nothing else carries meaning to the watcher.**
   1. **DIRECTIVE** — `[<cto-name>] <directive>` → shuttled to that CTO.
