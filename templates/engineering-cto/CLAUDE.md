@@ -16,7 +16,23 @@
   condition, not a backlog item, and the heavier mechanism isn't built until it
   fires.
 
-## Source of truth
+## Source-of-truth mode
+
+Every repo runs in exactly **one** source-of-truth mode, declared by the
+`.claude/canon-mode` marker: absent or `local` → **local-canon** (the default,
+and the only mode ordinary self-contained repos ever need); `external` →
+**external-canon**, for products whose normative product canon lives in a
+sibling/external product repo. The rules below (§*Source of truth
+(local-canon)*) are the local-canon rules and remain unchanged for ordinary
+repos. In an external-canon repo, this manual additionally carries the
+**external-canon sections** (§*External canon sync*, §*Scoped module
+documentation*, and the repo's canon binding) — composed in at stamp time —
+and those sections **qualify** the local rules: in-repo living docs stay the
+best statement of *implementation* behavior, but they are scoped projections
+of external canon, not canon itself. If this manual contains no external-canon
+sections, this repo is local-canon and this paragraph is inert.
+
+## Source of truth (local-canon)
 - **Living docs are the current "how," stated directly.** `PROJECT_SPEC.md` and
   the module docs (`modules/<module>.md`) are the single source of truth for how
   the system behaves *now* — read them for current behavior, and they state it

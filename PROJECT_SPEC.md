@@ -432,3 +432,24 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   re-entry); compose fixtures regenerated (3). Gate green: bun 142/0, shell all
   green. Branch-only (`feat/cpo-discord-reply-nudge`); **operator merges AND
   restarts the qofi-product swarm** to make it live (a hook is read at launch).
+- `2026-07-02` — **Source-of-truth modes (local-canon | external-canon)** —
+  promoted the deployment-core canon-sync/module-doc pattern into the template
+  system (`docs/CANON-MODES.md`). New orthogonal `.claude/canon-mode` marker
+  (same no-op-default posture as the ADR-0013 profile axis): absent/`local` →
+  every existing swarm composes and validates byte-identically; `external` →
+  the composed CLAUDE.md appends `canon/CLAUDE.external-canon.md` (external
+  canon wins over module docs/code/tests; module docs are scoped projections;
+  read-order routing rule; classify-and-route-upstream drift rule) plus the
+  repo-local `.claude/canon-binding.md` naming the canon repo. New
+  `bin/swarm-canon-enable.sh` seeds `docs/CANON_SYNC.md`, `MODULE_INDEX`,
+  `TRACEABILITY_LEDGER`, `GAP_LEDGER`, and per-module
+  `docs/modules/<m>/{README,CANON_MAP,INTERFACES,INVARIANTS,OPEN_GAPS,TEST_MAP,
+  CODE_MAP}` packs (LIFECYCLE optional). New `canon-check.sh` TaskCompleted
+  gate (manifest + settings-merge): blocks on missing/placeholder CANON_SYNC
+  metadata, missing packs, dead CODE_MAP/TEST_MAP paths, INVARIANTS entries
+  lacking `tests:`/`gap:`, and `[adr-required]` gaps unrouted to GAP_LEDGER;
+  guaranteed no-op in local mode. Covered by `tests/test-canon-mode.sh`
+  (resolution, live compose injection, every gate failure class, enable-script
+  seeding/idempotency). First instance: `deployment-core`, bound to
+  `qofi-product/products/deployment-core` (normative canon: product ADRs,
+  requirements, live technical architecture).

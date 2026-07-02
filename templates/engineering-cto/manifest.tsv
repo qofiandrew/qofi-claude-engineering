@@ -11,12 +11,21 @@
 # .claude/swarm-profile marker (frontend|backend) appends a stack-specific
 # overlay to the COMPOSED CLAUDE.md target ONLY. The overlay
 # (templates/engineering-cto/profiles/<profile>/CLAUDE.md) is injected by
-# manifest_apply_compose in swarm-lib.sh as the FINAL compose source when the
-# fragment exists. This is the ONE dynamically-sourced compose input and is
-# deliberately NOT declared on the CLAUDE.md line below (which stays
-# profile-agnostic). An absent marker, or a label-only profile with no overlay
+# manifest_apply_compose in swarm-lib.sh after the static sources when the
+# fragment exists. An absent marker, or a label-only profile with no overlay
 # fragment (v1 'backend' — today's engineering-cto already IS the backend
 # case), appends nothing and composes byte-identically to a pre-profile swarm.
+#
+# Canon-mode overlay (engineering-cto only, see docs/CANON-MODES.md): an
+# ORTHOGONAL .claude/canon-mode marker ('external'; absent/anything-else =
+# 'local', the no-op default) appends two more sources to the COMPOSED
+# CLAUDE.md target only: templates/engineering-cto/canon/CLAUDE.external-canon.md
+# (shared external-canon doctrine) and then the repo-local
+# .claude/canon-binding.md (names that repo's canon/spec repo; seeded by
+# bin/swarm-canon-enable.sh). These, with the profile overlay, are the ONLY
+# dynamically-sourced compose inputs and are deliberately NOT declared on the
+# CLAUDE.md line below (which stays profile- and mode-agnostic). A markerless
+# repo composes byte-identically to a pre-canon-mode swarm.
 #
 # Format: behavior | template-path | target-path [| covers]
 #   - lines starting with '#' and blank lines are ignored
@@ -86,6 +95,7 @@ refresh      | engineering-cto/hooks/test-gate.sh                               
 refresh      | engineering-cto/hooks/docs-check.sh                                                                       | .claude/hooks/docs-check.sh
 compose      | _base/hooks/permission-gate-prelude.sh+engineering-cto/hooks/permission-gate-policy.sh+_base/hooks/permission-gate-tail.sh | .claude/hooks/permission-gate.sh
 refresh      | engineering-cto/hooks/dod-affirm.sh                                                                       | .claude/hooks/dod-affirm.sh
+refresh      | engineering-cto/hooks/canon-check.sh                                                                      | .claude/hooks/canon-check.sh | TaskCompleted: external-canon validation gate (CANON_SYNC metadata, module doc packs, CODE_MAP/TEST_MAP path existence, INVARIANTS coverage, OPEN_GAPS→GAP_LEDGER routing); guaranteed no-op in local-canon repos
 refresh      | engineering-cto/hooks/quality-check.sh                                                                    | .claude/hooks/quality-check.sh   | PostToolUse: per-file lint/typecheck nudge on edit (non-blocking); honors QOFI_* runtime controls
 refresh      | engineering-cto/hooks/session-summary.sh                                                                  | .claude/hooks/session-summary.sh | Stop: writes in-repo .claude/session-summary.md resume aid (never evidence, never ~/.claude)
 refresh      | engineering-cto/hooks/discord-reply-nudge.sh                                                              | .claude/hooks/discord-reply-nudge.sh | Stop: non-blocking nudge when a lead's substantive response went to the terminal without a Discord post (CPO exempt)

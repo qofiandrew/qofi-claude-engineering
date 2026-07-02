@@ -490,6 +490,27 @@ swarm_profile_of() {
   printf '%s' ""
 }
 
+# swarm_canon_mode_of REPO
+#
+# Resolve a repo's source-of-truth mode from the .claude/canon-mode marker.
+# Returns 'external' only when the marker exists and says so; ANYTHING else
+# (absent marker, empty, 'local', junk) resolves to 'local' — the no-op
+# default that keeps every existing swarm byte-identical (same posture as
+# swarm_profile_of; do NOT change the default). Whitespace stripped.
+swarm_canon_mode_of() {
+  local repo="$1"
+  local marker="$repo/.claude/canon-mode"
+  if [ -f "$marker" ]; then
+    local m
+    m="$(head -n 1 "$marker" 2>/dev/null | tr -d '[:space:]')"
+    if [ "$m" = "external" ]; then
+      printf 'external\n'
+      return 0
+    fi
+  fi
+  printf 'local\n'
+}
+
 # swarm_required_doctrine TYPE
 #
 # Emit the doctrine filenames (relative to the swarm repo root, one per
@@ -906,16 +927,36 @@ manifest_apply_compose() {
   #   - a profile WITH a fragment    -> appended (e.g. 'frontend')
   # Gated on SWARM_APPLY_TYPE=engineering-cto so a non-engineering-cto compose
   # (e.g. the cpo CLAUDE.md, same target name) is never touched even if a
-  # stray marker exists. This is the ONE dynamically-sourced compose input;
-  # every other source is the static '+'-joined list on the manifest line,
-  # which stays profile-agnostic (see templates/engineering-cto/manifest.tsv
-  # header + templates/_base/README.md).
+  # stray marker exists. This and the canon-mode overlay below are the ONLY
+  # dynamically-sourced compose inputs; every other source is the static
+  # '+'-joined list on the manifest line, which stays profile- and
+  # mode-agnostic (see templates/engineering-cto/manifest.tsv header +
+  # templates/_base/README.md).
   if [ "$tgt_rel" = "CLAUDE.md" ] && \
      [ "${SWARM_APPLY_TYPE:-}" = "engineering-cto" ] && \
      [ -n "${SWARM_APPLY_PROFILE:-}" ]; then
     local _overlay_rel="engineering-cto/profiles/${SWARM_APPLY_PROFILE}/CLAUDE.md"
     if [ -f "$SWARM_HOME/templates/$_overlay_rel" ]; then
       src_list="${src_list}+${_overlay_rel}"
+    fi
+  fi
+  # Canon-mode overlay (source-of-truth axis) — engineering-cto only,
+  # CLAUDE.md only, external mode only. Appends AFTER any profile overlay:
+  # first the shared external-canon doctrine fragment (template-sourced),
+  # then — post-compose, below — the repo-local canon binding, which names
+  # this repo's canon/spec repo and cannot live in templates/. A repo in
+  # 'local' mode (the default; absent/any-other marker) composes
+  # byte-identically to a pre-canon-mode swarm.
+  local _canon_binding=""
+  if [ "$tgt_rel" = "CLAUDE.md" ] && \
+     [ "${SWARM_APPLY_TYPE:-}" = "engineering-cto" ] && \
+     [ "${SWARM_APPLY_CANON_MODE:-local}" = "external" ]; then
+    local _canon_rel="engineering-cto/canon/CLAUDE.external-canon.md"
+    if [ -f "$SWARM_HOME/templates/$_canon_rel" ]; then
+      src_list="${src_list}+${_canon_rel}"
+    fi
+    if [ -f "$SWARM_APPLY_REPO/.claude/canon-binding.md" ]; then
+      _canon_binding="$SWARM_APPLY_REPO/.claude/canon-binding.md"
     fi
   fi
   local tgt="$SWARM_APPLY_REPO/$tgt_rel"
@@ -930,6 +971,17 @@ manifest_apply_compose() {
     SWARM_RESULT_FATAL=1
     rm -f "$tmp"
     return 1
+  fi
+  # Repo-local canon binding: the ONE compose input sourced from the target
+  # repo itself (seeded by bin/swarm-canon-enable.sh, operator/CTO-owned).
+  # Appended last so the binding always terminates the composed manual.
+  if [ -n "$_canon_binding" ]; then
+    cat "$_canon_binding" >> "$tmp" || {
+      echo "  ERROR: compose failed appending canon binding for $tgt_rel" >&2
+      SWARM_RESULT_FATAL=1
+      rm -f "$tmp"
+      return 1
+    }
   fi
 
   if [ ! -e "$tgt" ]; then
@@ -1611,6 +1663,11 @@ manifest_apply() {
   # Consumed by manifest_apply_compose to optionally append a profile overlay
   # to the composed CLAUDE.md (engineering-cto only).
   SWARM_APPLY_PROFILE="$(swarm_profile_of "$repo")"
+  # Orthogonal source-of-truth axis: 'local' (default, no-op) or 'external'.
+  # Consumed by manifest_apply_compose to append the external-canon overlay
+  # + the repo-local canon binding to the composed CLAUDE.md
+  # (engineering-cto only). See docs/CANON-MODES.md.
+  SWARM_APPLY_CANON_MODE="$(swarm_canon_mode_of "$repo")"
   SWARM_RESULT_CHANGED=0
   SWARM_RESULT_DRIFT=0
   SWARM_RESULT_COLLISIONS=""
@@ -1622,7 +1679,7 @@ manifest_apply() {
   # enforced across every class, every --force flag).
   SWARM_OO_PREFIXES=""
   SWARM_OO_FILES=""
-  export SWARM_APPLY_REPO SWARM_APPLY_MODE SWARM_APPLY_TYPE SWARM_APPLY_PROFILE
+  export SWARM_APPLY_REPO SWARM_APPLY_MODE SWARM_APPLY_TYPE SWARM_APPLY_PROFILE SWARM_APPLY_CANON_MODE
   manifest_walk _swarm_collect_oo_prefixes >/dev/null || return $?
   manifest_walk _manifest_apply_one || return $?
   [ "$SWARM_RESULT_FATAL" -eq 1 ] && return 1
