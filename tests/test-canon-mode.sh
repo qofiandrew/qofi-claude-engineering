@@ -176,6 +176,7 @@ m_no_sync()        { rm "$1/docs/CANON_SYNC.md"; }
 m_placeholder()    { sed -i '' 's|abc1234|<canon-repo commit hash>|' "$1/docs/CANON_SYNC.md"; }
 m_missing_meta()   { sed -i '' '/Canon commit/d' "$1/docs/CANON_SYNC.md"; }
 m_missing_current(){ sed -i '' '/Current implementation repo commit/d' "$1/docs/CANON_SYNC.md"; }
+m_empty_value()    { sed -i '' 's|\(- \*\*Canon commit:\*\*\).*|\1|' "$1/docs/CANON_SYNC.md"; }
 m_missing_reviewed(){ sed -i '' '/Last implementation-behavior commit/d' "$1/docs/CANON_SYNC.md"; }
 m_no_pack()        { rm -rf "$1/docs/modules/alpha"; }
 m_missing_file()   { rm "$1/docs/modules/alpha/CANON_MAP.md"; }
@@ -194,6 +195,7 @@ break_check "placeholder sync metadata"             m_placeholder   "template pl
 break_check "missing sync metadata line"            m_missing_meta  "lacks 'Canon commit:'"
 break_check "missing behavior-reviewed commit field" m_missing_reviewed "lacks 'Last implementation-behavior commit reviewed against canon:'"
 break_check "missing current-repo-commit field"     m_missing_current "lacks 'Current implementation repo commit at sync-doc update:'"
+break_check "field label with empty value"          m_empty_value   "'Canon commit:' has an empty value"
 break_check "src module without doc pack"           m_no_pack       "no doc pack"
 break_check "pack missing a required file"          m_missing_file  "CANON_MAP.md missing"
 break_check "CODE_MAP references missing path"      m_dead_codepath "missing path: src/alpha/ghost.ts"

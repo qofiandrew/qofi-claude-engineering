@@ -82,6 +82,11 @@ else
       err "$SYNC lacks '$field' sync metadata"
     elif printf '%s' "$line" | grep -q '<[a-zA-Z].*>'; then
       err "$SYNC '$field' still carries a template placeholder — fill in the real value"
+    else
+      # A label with an EMPTY value is a false claim, not metadata: strip the
+      # label and markdown dressing; something real must remain.
+      val="$(printf '%s' "${line#*"$field"}" | tr -d ' \t`*_-')"
+      [ -n "$val" ] || err "$SYNC '$field' has an empty value — fill in the real value"
     fi
   done
 fi
