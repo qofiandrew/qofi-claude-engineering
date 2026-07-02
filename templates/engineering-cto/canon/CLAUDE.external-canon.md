@@ -44,8 +44,11 @@ its citations.
   it;
 - **Canon commit** — the canon-repo commit this implementation is currently
   synced against;
-- **Implementation commit** — the last implementation commit reviewed against
-  that canon commit;
+- **Last implementation-behavior commit reviewed against canon** — the last
+  code/behavior commit reviewed against that canon commit;
+- **Current implementation repo commit at sync-doc update** — the repo HEAD
+  when the sync doc was last touched. Documentation-only/restamp commits may
+  advance this without moving the behavior-reviewed commit;
 - the normativity statement (canon repo ADRs / requirements / live technical
   architecture are normative; this repo's module docs are projections).
 

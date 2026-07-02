@@ -54,9 +54,13 @@ CLAUDE.md as: preamble + `_base` + engineering-cto + (profile overlay) +
 
 Root docs (seeded by the enable script):
 
-- `docs/CANON_SYNC.md` — the sync contract: canon repo + product path,
-  **canon commit** synced against, **implementation commit** last reviewed,
-  sync date + log.
+- `docs/CANON_SYNC.md` — the sync contract: canon repo + product path, sync
+  date + log, and **three distinct commits**: the **canon commit** synced
+  against, the **last implementation-behavior commit reviewed against canon**
+  (moves only when a code/behavior review happens), and the **current
+  implementation repo commit at sync-doc update** (documentation-only or
+  restamp commits legitimately advance this one alone — the two impl fields
+  diverging is normal).
 - `docs/MODULE_INDEX.md` — routing table module → pack → one-line scope.
 - `docs/TRACEABILITY_LEDGER.md` — canon ref → module(s) → tests roll-up.
 - `docs/GAP_LEDGER.md` — root roll-up of ADR-required / conflict gaps.

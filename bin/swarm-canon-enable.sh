@@ -114,7 +114,8 @@ sed -e "s|<absolute-or-relative-path-to-canon-repo>|$CANON_ROOT|" \
     -e "s|<path-within-canon-repo, e.g. products/<product>>|$PRODUCT_PATH|" \
     -e "s|<this repo's path>|$REPO|" \
     -e "s|<canon-repo commit hash this implementation is synced against>|$CANON_COMMIT|" \
-    -e "s|<last implementation commit reviewed against that canon commit>|$IMPL_COMMIT|" \
+    -e "s|<last code/behavior commit reviewed against that canon commit>|$IMPL_COMMIT|" \
+    -e "s|<implementation repo HEAD when this doc was last updated>|$IMPL_COMMIT|" \
     -e "s|<YYYY-MM-DD>|$TODAY|" \
     "$TPL/CANON_SYNC.template.md" > "$tmp_sync"
 seed "$REPO/docs/CANON_SYNC.md" < "$tmp_sync"

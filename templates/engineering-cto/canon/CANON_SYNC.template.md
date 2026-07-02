@@ -17,9 +17,17 @@ per-module doc packs (under `docs/modules/`) are **projections**, not canon.
 
 ## Sync point
 
+Three distinct commits — do not conflate them:
+
 - **Canon commit:** `<canon-repo commit hash this implementation is synced against>`
-- **Implementation commit:** `<last implementation commit reviewed against that canon commit>`
+- **Last implementation-behavior commit reviewed against canon:** `<last code/behavior commit reviewed against that canon commit>`
+- **Current implementation repo commit at sync-doc update:** `<implementation repo HEAD when this doc was last updated>`
 - **Synced:** `<YYYY-MM-DD>`
+
+Documentation-only, restamp, or hygiene commits may advance the
+*current-repo-commit* field without changing the *last behavior-reviewed*
+commit — the two diverging is normal and expected; only a new code/behavior
+review against canon moves the reviewed field.
 
 Advance this block deliberately: a sync pass updates module `CANON_MAP.md` /
 `OPEN_GAPS.md` files first, then moves the commits here. Stale metadata fails
@@ -27,5 +35,5 @@ the `canon-check` validation gate.
 
 ## Sync log
 
-| Date | Canon commit | Implementation commit | Notes |
-|------|--------------|-----------------------|-------|
+| Date | Canon commit | Behavior-reviewed impl commit | Current impl commit | Notes |
+|------|--------------|-------------------------------|---------------------|-------|

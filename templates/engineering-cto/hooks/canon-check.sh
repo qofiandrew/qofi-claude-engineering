@@ -7,7 +7,9 @@
 # In EXTERNAL-canon mode it fails task completion (exit 2) when:
 #   1. docs/CANON_SYNC.md is missing;
 #   2. CANON_SYNC.md lacks sync metadata (Canon repo / Canon commit /
-#      Implementation commit lines with real values, no template placeholders);
+#      Last implementation-behavior commit reviewed against canon /
+#      Current implementation repo commit at sync-doc update — real values,
+#      no template placeholders);
 #   3. a src module (top-level dir under src/) has no doc pack at
 #      docs/modules/<module>/ with the 7 required files (LIFECYCLE optional);
 #   4. a CODE_MAP.md / TEST_MAP.md backtick-quoted repo path doesn't exist;
@@ -68,7 +70,13 @@ SYNC="docs/CANON_SYNC.md"
 if [ ! -s "$SYNC" ]; then
   err "$SYNC missing — external-canon mode requires the sync contract (see CLAUDE.md §External canon sync; seed via swarm-canon-enable.sh)"
 else
-  for field in "Canon repo:" "Canon commit:" "Implementation commit:"; do
+  # The three commit fields are DISTINCT (see CANON_SYNC.template.md):
+  # canon commit synced against; last implementation-BEHAVIOR commit reviewed
+  # against it; current repo commit when the sync doc was last updated
+  # (docs-only/restamp commits legitimately advance only the last one).
+  for field in "Canon repo:" "Canon commit:" \
+               "Last implementation-behavior commit reviewed against canon:" \
+               "Current implementation repo commit at sync-doc update:"; do
     line="$(grep -F "$field" "$SYNC" | head -n 1)"
     if [ -z "$line" ]; then
       err "$SYNC lacks '$field' sync metadata"
