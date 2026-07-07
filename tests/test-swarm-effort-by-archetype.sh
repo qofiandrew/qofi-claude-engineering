@@ -4,7 +4,7 @@
 # swarm-up's launch_one() sends a `/effort` command into each freshly-booted
 # swarm pane (effort is session-only; ultracode has no settings/env form). The
 # level is data-driven per archetype via swarm_effort_for() in swarm-lib.sh:
-#   cpo                 -> /effort low      (single conversational product agent)
+#   cpo                 -> /effort medium   (single conversational product agent)
 #   engineering-cto     -> /effort ultracode (CTO swarms fan out under workflows)
 #   unknown / future    -> /effort ultracode (fail-safe to the engineering path,
 #                          consistent with swarm_required_doctrine/_launch_brief)
@@ -27,7 +27,7 @@ eq() {  # eq EXPECT ACTUAL LABEL
 }
 
 echo "=== swarm_effort_for() per archetype ==="
-eq "/effort low"       "$(swarm_effort_for cpo)"             "cpo            -> /effort low"
+eq "/effort medium"    "$(swarm_effort_for cpo)"             "cpo            -> /effort medium"
 eq "/effort ultracode" "$(swarm_effort_for engineering-cto)" "engineering-cto -> /effort ultracode"
 eq "/effort ultracode" "$(swarm_effort_for company-brain)"   "unknown/future  -> /effort ultracode (fail-safe)"
 eq "/effort ultracode" "$(swarm_effort_for '')"              "empty type      -> /effort ultracode (fail-safe)"

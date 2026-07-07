@@ -573,7 +573,7 @@ swarm_launch_brief() {
 # Emit the `/effort` command swarm-up's launch_one() sends into the tmux pane
 # right after `claude` boots, per archetype. The CPO swarm is a single
 # conversational product agent that should NOT fan every turn out to a workflow,
-# so it launches at low effort; every engineering CTO swarm stays on ultracode
+# so it launches at medium effort; every engineering CTO swarm stays on ultracode
 # (xhigh effort + automatic workflow orchestration). Effort is SESSION-ONLY
 # (ultracode has no settings.json / env / --effort form — see launch_one), which
 # is why it is a launch-time `/effort` send rather than config, and why this
@@ -585,7 +585,7 @@ swarm_launch_brief() {
 swarm_effort_for() {
   case "$1" in
     cpo)
-      printf '%s' "/effort low"
+      printf '%s' "/effort medium"
       ;;
     engineering-cto|*)
       printf '%s' "/effort ultracode"

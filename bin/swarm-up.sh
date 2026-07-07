@@ -448,7 +448,7 @@ launch_one() {  # name repo tokvar [channel] [account]
   # the "auto mode" readiness marker above is the permission/edit mode,
   # independent of effort, so the launch-flag form would NOT have broken that
   # gate.) The level is per-archetype (swarm_effort_for in swarm-lib.sh): the CPO
-  # swarm launches at /effort low; every CTO swarm (and any unknown/future type)
+  # swarm launches at /effort medium; every CTO swarm (and any unknown/future type)
   # stays on ultracode. Resolve the archetype ONCE here and reuse it for the
   # brief below. Send text and Enter as separate calls (same idiom as the brief).
   local repo_type
