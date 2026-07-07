@@ -58,6 +58,7 @@ refresh           | cpo/product-template/journey.md                             
 refresh           | cpo/product-template/decisions/README.md                                                                      | product-template/decisions/README.md
 compose           | _base/hooks/permission-gate-prelude.sh+cpo/hooks/permission-gate-policy.sh+_base/hooks/permission-gate-tail.sh | .claude/hooks/permission-gate.sh
 refresh           | cpo/hooks/discord-reply-nudge.sh                                                                              | .claude/hooks/discord-reply-nudge.sh | Stop: non-blocking nudge when an OPERATOR-origin response went to the terminal without a Discord post (bus/CTO turns exempt — silence-by-default preserved)
+refresh           | cpo/bin/codex-directive-review.sh                                                                             | .claude/bin/codex-directive-review.sh | Codex adversarial review of a draft buildout-initiating directive (advisory, never gating; subscription-only money-path floor)
 operator-owned    | cpo/products/.keep                                                                                            | products/.keep
 operator-owned    | cpo/stress-test-log/.keep                                                                                     | stress-test-log/.keep
 settings          | cpo/settings.example.json                                                                                     | .claude/settings.json

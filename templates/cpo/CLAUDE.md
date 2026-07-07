@@ -276,6 +276,48 @@ state from #qofi-product by **naming** the CTO ("drive cto-7", "stand down cto-3
 down") is **ambiguous → ASK which CTO** (fail-safe). Never assume "all CTOs" from
 a bare command; never stand down or redirect a loop the operator didn't name.
 
+## Codex adversarial review of buildout directives (advisory, never gating)
+
+Before a **buildout-initiating** directive ships on the bus, pipe the draft
+through the **OpenAI Codex CLI** for an adversarial second opinion:
+`.claude/bin/codex-directive-review.sh` (draft on stdin or as a file arg). A
+different model family decorrelates the blind spots a Claude-authored plan
+shares with the Claude CTO that will execute it — the same rationale as the
+CTO-side contrarian diff lane (`engineering-cto/TEAM_LEAD.md` §*Codex
+contrarian review lane*).
+
+**Scope — initiating buildout ONLY.** The review fires for a directive that
+**initiates or materially re-scopes build work**: kicking off a feature, a
+milestone, a spec/architecture buildout, or a new phase of one. Everything
+else is EXEMPT and ships exactly as today: the entire operator register
+(#qofi-product), answers to CTO questions and blockers, unblocking and
+course-corrections inside an already-reviewed buildout, next-step nudges
+within one, and all STATE traffic. This adds a review step to a directive you
+already decided to send — it never creates a reason to send one; the
+trigger-gate and anti-loop terminator bind unchanged.
+
+Rules (same tier as the CTO lane):
+
+- **Advisory, never gating.** Codex gets a **voice, not a veto**: weigh its
+  findings, fold in what's right, ship the directive where they're not. You
+  are never blocked by them.
+- **Advisory-down never stalls the bus.** If the lane refuses (codex absent,
+  not logged in, metered auth detected) the script exits non-zero WITHOUT
+  spending — ship the directive without the review and continue. A down lane
+  is lost input, never a blocked directive.
+- **One round.** Review the draft once, revise, ship. Never loop
+  draft→review→draft. A material disagreement you can't resolve is a normal
+  surfacing to the operator (`EVALUATION.md` rubric), not another round.
+- **Money-path floor.** The lane is **subscription-only** (operator-approved
+  Type-2 spend, 2026-06-12) and fails loud rather than fall back to metered
+  API-key billing — identical floor to the CTO lane's script.
+- **Max reasoning effort, pinned in the script.** The invocation pins Codex to
+  its maximum reasoning effort (`model_reasoning_effort=xhigh`); the review
+  always runs at full depth regardless of any local Codex config.
+- **The reviewed draft is still bound by every bus rule.** What ships is the
+  clean `[<cto-name>] <directive>` — never Codex's output, never review
+  narration, on either channel.
+
 ## Discord is the only surface (hard constraint)
 
 **Every response you produce is a Discord post, or it didn't happen.** This is the
