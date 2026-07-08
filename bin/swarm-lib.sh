@@ -1737,10 +1737,27 @@ settings_merge_swarm() {
   tmp="$(mktemp -t swarm-settings.XXXXXX)" || return 2
 
   # Run merger in python3, write result to $tmp, signal status via exit code.
-  python3 - "$target" "$template" "$tmp" "${check_only:-}" <<'PY'
+  # argv[5]: optional retired-rules file — permission rules doctrine has
+  # explicitly RETIRED; the merge REMOVES exact matches from the target's
+  # permissions.allow/deny (the merge is otherwise additive-only, so a rule
+  # doctrine walked back would persist in every stamped repo forever).
+  python3 - "$target" "$template" "$tmp" "${check_only:-}" "${SWARM_HOME:+$SWARM_HOME/templates/settings-retired.conf}" <<'PY'
 import json, sys, os
 
 target_path, template_path, out_path, check_only = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+
+retired = set()
+retired_path = sys.argv[5] if len(sys.argv) > 5 else ""
+if retired_path and os.path.exists(retired_path):
+    try:
+        with open(retired_path) as f:
+            for line in f:
+                line = line.split("#", 1)[0].strip()
+                if line:
+                    retired.add(line)
+    except Exception as e:
+        sys.stderr.write(f"settings_merge_swarm: retired-rules read failure: {e}\n")
+        sys.exit(2)
 
 def load(p):
     with open(p) as f:
@@ -1785,21 +1802,26 @@ for k, v in tpl_ep.items():
 if tpl_ep or tgt_ep:
     tgt["enabledPlugins"] = tgt_ep
 
-# --- permissions.allow: union + dedup, preserve order with new items appended ---
+# --- permissions.allow/deny: union + dedup, preserve order with new items
+# appended; then drop doctrine-RETIRED rules from both lists (the only
+# subtractive step in the merge, driven solely by settings-retired.conf) ---
 tpl_perm = tpl.get("permissions") or {}
 tgt_perm = tgt.get("permissions") or {}
-tpl_allow = list(tpl_perm.get("allow") or [])
-tgt_allow = list(tgt_perm.get("allow") or [])
-seen = set(tgt_allow)
-for item in tpl_allow:
-    if item not in seen:
-        tgt_allow.append(item)
-        seen.add(item)
+def union_rules(key):
+    tpl_list = list(tpl_perm.get(key) or [])
+    tgt_list = list(tgt_perm.get(key) or [])
+    seen = set(tgt_list)
+    for item in tpl_list:
+        if item not in seen:
+            tgt_list.append(item)
+            seen.add(item)
+    return [r for r in tgt_list if r not in retired]
 if tpl_perm or tgt_perm:
-    tgt_perm["allow"] = tgt_allow
+    tgt_perm["allow"] = union_rules("allow")
+    tgt_perm["deny"] = union_rules("deny")
     # Preserve any other fields the operator may have under permissions.
     for k, v in tpl_perm.items():
-        if k != "allow" and k not in tgt_perm:
+        if k not in ("allow", "deny") and k not in tgt_perm:
             tgt_perm[k] = copy.deepcopy(v)
     tgt["permissions"] = tgt_perm
 

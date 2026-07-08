@@ -147,7 +147,8 @@ correct move is always the file (where a limit exists) or the full inline messag
   branch-delete push (`--delete`), bulk push (`--all`), or any variant that
   rewrites or destroys shared history. **Force-push (`--force`/`-f`/
   `--force-with-lease`) of your own non-protected feature/worktree branch is
-  routine (rebase/squash) and auto-approved; to a protected branch it is
+  routine (rebase/squash) and auto-approved; to a protected branch OR to the
+  integration branch `dev` (shared history even where unprotected) it is
   destruction and denied** (ADR-0012). Routine push is archetype-shaped (see the
   archetype's own push rules); destruction of a protected branch or shared
   history is not.

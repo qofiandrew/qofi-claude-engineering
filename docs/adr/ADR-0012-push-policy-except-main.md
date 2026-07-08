@@ -256,3 +256,44 @@ The lesson generalized: for a bare push the gate must resolve git's *actual*
 destination (push.default → branch.merge; remote.push; remote.mirror), not the
 apparent current branch. The durable floor remains server-side branch protection —
 these are defense-in-depth against an adversarial/unusual local git config.
+
+---
+
+## Amendment — 2026-07-08 (per-target settings split, never-force dev, retired-rule channel)
+
+Operator-directed fix for the recurring force-push tax: the **settings deny
+rules** still blanket-denied every force-push (`Bash(git push *--force*)` etc.),
+overriding the classifier's 2026-06-14 relaxation — a `--force-with-lease` of an
+agent's own `worktree-*` branch was denied at the settings layer before the
+permission-gate hook ever ran. Three changes:
+
+1. **Settings rules split by target** (`settings.example.json`): the blanket
+   force denies are removed; targeted denies land for the canonical force forms
+   whose destination token is `main` or `dev`; explicit allows land for the
+   canonical force forms to `worktree-*` (`--force-with-lease`/`--force`/`-f`
+   `origin worktree-*`). Everything non-canonical falls through to the
+   permission-gate classifier, which remains deny-biased and never fail-open.
+
+2. **NEVER-FORCE tier in the classifier** (`_git_push_class`): force-push whose
+   resolved destination is in `PROTECTED ∪ {dev}` is **denied** even where `dev`
+   is not in the protected set (default shape: `origin/HEAD=main`). Rationale:
+   `dev` is the integration branch — shared history the whole swarm builds on —
+   so rewriting it is destruction regardless of protection status; non-force
+   `dev` pushes keep their existing classification (the CTO's routine cadence).
+   Applies to explicit refspecs (`+dev`, `HEAD:dev`), and bare force-pushes via
+   the `push.default` destination resolution. Complex-command force-pushes still
+   defer (human decides), never auto-approve.
+
+3. **Retired-rule channel for the settings merge** (`settings-retired.conf` +
+   `settings_merge_swarm`): the sync-time settings merge was additive-only, so a
+   rule doctrine walks back would persist in every stamped repo forever (agents
+   cannot edit `settings.json` — it is itself a hard floor). Exact-match rules
+   listed in `templates/settings-retired.conf` are now removed from
+   `permissions.allow`/`deny` during merge, and `permissions.deny` now unions
+   from the template like `allow` always did. The three blanket force denies are
+   the first retired set.
+
+Pinned by `tests/test-permission-gate-push-policy.sh` (NEVER-FORCE tier) and
+`tests/test-settings-merge-retired.sh` (deny-union, retirement, operator-rule
+preservation, idempotency). The durable floor remains server-side branch
+protection on `main`.

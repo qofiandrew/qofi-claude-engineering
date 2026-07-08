@@ -107,6 +107,19 @@ assert deny 'git push -f origin master'                 '-f to master'
 assert deny 'git push --force-with-lease origin main'   '--force-with-lease to main'
 
 echo ""
+echo "=== NEVER-FORCE tier: force-push to dev (integration branch) DENIED even unprotected ==="
+# Default repo shape: origin/HEAD=main -> PROTECTED={main,master}, dev is
+# staging/pushable NON-force. Force to dev is shared-history destruction and
+# denies regardless of the protected set; non-force dev push stays allowed
+# (asserted in the ALLOW section below).
+assert deny 'git push --force origin dev'               '--force to dev (never-force tier)'
+assert deny 'git push -f origin dev'                    '-f to dev'
+assert deny 'git push --force-with-lease origin dev'    '--force-with-lease to dev'
+assert deny 'git push origin +dev'                      '+dev (leading + = force) to dev'
+assert deny 'git push --force origin HEAD:dev'          '--force HEAD:dev (dst resolves to dev)'
+assert allow 'git push --force-with-lease origin worktree-alice' '--force-with-lease to own worktree branch stays ALLOWED'
+
+echo ""
 echo "=== DENY: broad/destructive push (target-independent) ==="
 assert deny 'git push --mirror origin'                  '--mirror'
 assert deny 'git push --all origin'                     '--all'

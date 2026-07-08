@@ -136,7 +136,9 @@ PY
 # Called by the archetype policy fragment for any command containing `git push`.
 #
 # POLICY: DENY any push (force or not) whose destination is a PROTECTED branch;
-# ALLOW non-force push AND force-push (rebase/squash) to non-protected branches;
+# DENY force-push to the NEVER-FORCE tier (protected ∪ dev — the integration
+# branch is shared history even when unprotected);
+# ALLOW non-force push AND force-push (rebase/squash) to other branches;
 # DENY broad/destructive push (--mirror/--all/--delete/--prune/wildcard/ref-delete);
 # DEFER anything not statically provable. The protected set is repo-aware (see
 # protected_set(): {main,master} ∪ the repo's release branch, fail-safe +dev).
@@ -202,6 +204,15 @@ def protected_set():
     return frozenset(prot)
 
 PROTECTED = protected_set()
+
+# NEVER-FORCE tier: the integration branch `dev` accepts routine NON-force
+# pushes (the CTO's merge-and-push cadence) but is SHARED history — rewriting
+# it is destruction even in repos where dev is not in the protected set (the
+# default shape: origin/HEAD=main -> PROTECTED={main,master}). A force-push
+# whose resolved destination is in NEVER_FORCE is DENIED; non-force pushes to
+# dev keep their existing classification. Protected branches deny any push
+# already, so the tier only adds `dev`.
+NEVER_FORCE = frozenset(PROTECTED | {"dev"})
 
 def out(s):
     sys.stdout.write(s)
@@ -300,6 +311,8 @@ def classify_clean(args):
                 return ("defer", "")
         if d.lower() in PROTECTED:           # case-insensitive: macOS folds Main->main
             return ("deny", "push to protected branch %s" % d)
+        if force and d.lower() in NEVER_FORCE:
+            return ("deny", "force-push to integration branch %s (shared history)" % d)
     # Force-push is ALLOWED to a non-protected branch (routine rebase/squash of a
     # feature/worktree branch). A force-push to a protected branch was already
     # denied by the dst check above; an unresolvable force target defers below.
@@ -338,8 +351,14 @@ def classify_clean(args):
             if norm(up).lower() in PROTECTED:
                 return ("deny", "bare push targets protected upstream %s (push.default=%s)"
                         % (norm(up), pd))
+            if force and norm(up).lower() in NEVER_FORCE:
+                return ("deny", "bare force-push targets integration upstream %s (push.default=%s)"
+                        % (norm(up), pd))
             return ("allow", "")
         if pd in ("current", "simple", "nothing"):
+            if force and cur.lower() in NEVER_FORCE:
+                return ("deny", "bare force-push of integration branch %s (push.default=%s)"
+                        % (cur, pd))
             # current: dst = current branch (already checked non-protected).
             # simple: dst = current branch's SAME-NAME upstream; git refuses on a
             #   name mismatch, so the only ref it writes is `cur` (non-protected).
@@ -486,10 +505,12 @@ esac
 # ---------------------------------------------------------------------------
 case "$TOOL" in
   Bash)
-    # Git-push policy — routine push to a feature/worktree/topic branch and
-    # non-force push to `dev` (staging) are auto-allowed; push to main/master,
-    # any force-push, and broad/destructive push are denied; anything ambiguous
-    # defers to a human. Resolved by the shared _git_push_class in the prelude
+    # Git-push policy — routine push (incl. force-push: rebase/squash) to a
+    # feature/worktree/topic branch and non-force push to `dev` (staging) are
+    # auto-allowed; push to a protected branch (main/master), force-push to
+    # `dev` (shared integration history), and broad/destructive push are
+    # denied; anything ambiguous defers to a human. Resolved by the shared
+    # _git_push_class in the prelude
     # (deny-biased, never fail-open). Pushing `main` stays operator-only — the
     # real floor is GitHub branch protection. See ESCALATION.md / ADR-0012.
     if printf '%s' "$CMD" | grep -Eq '(^|[^[:alnum:]_])git[[:space:]]+push([[:space:]]|$)'; then
