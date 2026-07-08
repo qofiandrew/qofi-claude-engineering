@@ -140,8 +140,13 @@ EOF
 }
 
 run_hook() { # run_hook DIR -> rc; stderr in $HOOK_ERR
-  local d="$1" rc=0
-  HOOK_ERR="$( (cd "$d" && CLAUDE_PROJECT_DIR="$d" bash "$HOOK" </dev/null) 2>&1 1>/dev/null )" || rc=$?
+  # The hook resolves its work tree from the TaskCompleted payload's `cwd`
+  # (worktree-topology fix) and fail-CLOSES when it isn't a git work tree —
+  # so the fixture must be a git repo and the payload must carry its path.
+  local d="$1" rc=0 ev
+  [ -e "$d/.git" ] || git -C "$d" init -q 2>/dev/null
+  ev="$(python3 -c 'import json,sys; print(json.dumps({"cwd": sys.argv[1]}))' "$d")"
+  HOOK_ERR="$( (cd "$d" && CLAUDE_PROJECT_DIR="$d" bash "$HOOK" <<<"$ev") 2>&1 1>/dev/null )" || rc=$?
   return $rc
 }
 

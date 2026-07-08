@@ -26,12 +26,16 @@ assert_has(){ if printf '%s' "$2" | grep -qF -- "$1"; then pass "$3"; else fail 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/qs-hooks.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
+# The payload carries cwd — quality-check resolves the work tree (and its
+# .claude/quality-cmd) from the payload's cwd (worktree-topology fix); an
+# unresolvable/non-git cwd fail-softs to silence, so WORK is a git repo.
 qc_event(){ python3 -c '
 import json,sys
-print(json.dumps({"tool_name":sys.argv[1],"tool_input":{"file_path":sys.argv[2]},"hook_event_name":"PostToolUse"}))' "$1" "$2"; }
+print(json.dumps({"tool_name":sys.argv[1],"tool_input":{"file_path":sys.argv[2]},"hook_event_name":"PostToolUse","cwd":sys.argv[3]}))' "$1" "$2" "$WORK"; }
 
 echo "=== quality-check.sh (PostToolUse nudge) ==="
 WORK="$TMP/qc"; mkdir -p "$WORK/.claude"
+git -C "$WORK" init -q
 printf "sh -c 'echo lint-problem; exit 1'\n" > "$WORK/.claude/quality-cmd"
 printf 'export const x = 1\n' > "$WORK/foo.ts"
 printf '# readme\n' > "$WORK/README.md"
@@ -85,7 +89,10 @@ REPO="$TMP/repo"; mkdir -p "$REPO/.claude"
    && printf 'a\n' > a.txt && git add a.txt && git commit -qm init && printf 'b\n' > b.txt )
 mkdir -p "$TMP/fakehome"
 
-ss_event(){ printf '{"hook_event_name":"Stop","stop_hook_active":%s}' "${1:-false}"; }
+# The payload carries cwd — session-summary resolves the work tree to write
+# the resume aid into from the payload's cwd (worktree-topology fix), not
+# from the process CWD / CLAUDE_PROJECT_DIR.
+ss_event(){ printf '{"hook_event_name":"Stop","stop_hook_active":%s,"cwd":"%s"}' "${1:-false}" "$REPO"; }
 run_ss(){ # envstr stopactive -> exitcode (runs in REPO, HOME=fakehome)
   local envstr="$1" active="$2"
   ( cd "$REPO" && ss_event "$active" | env -i PATH="$PATH" HOME="$TMP/fakehome" CLAUDE_PROJECT_DIR="$REPO" $envstr bash "$SS" >/dev/null 2>&1 ); echo $?

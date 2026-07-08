@@ -23,7 +23,7 @@
 # Wired in settings.json under hooks.TaskCompleted.
 
 set -uo pipefail
-cat >/dev/null   # drain stdin payload
+EVENT="$(cat)"   # capture stdin payload — need its `cwd` to resolve the tree
 
 # --- QOFI quality-hook runtime control (see test-gate.sh for the rationale) -
 __qofi_hook="canon-check"
@@ -44,16 +44,40 @@ if __qofi_disabled; then
 fi
 # --- end QOFI quality-hook runtime control ---------------------------------
 
-# Worktree-aware root resolution (same as test-gate.sh / docs-check.sh):
-# validate the tree the agent actually works in.
-if ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"; then
-  :
-else
-  ROOT="${CLAUDE_PROJECT_DIR:-$PWD}"
+# Worktree-topology resolution — validate the tree the agent actually works in,
+# resolved from the hook payload's `cwd` field (the invoking session's working
+# directory), NOT from `git rev-parse` on the process's inherited CWD nor
+# $CLAUDE_PROJECT_DIR. A hook subprocess does not inherit the teammate's worktree
+# CWD, so the old resolution validated the WRONG tree — a teammate whose own tree
+# had broken/absent canon packs could FALSE-PASS by validating the lead's clean
+# main tree. Extract cwd with python3 (repo idiom — permission-gate.sh does the
+# same; no jq dep). See tests/test-hooks-worktree-resolution.sh.
+PAYLOAD_CWD="$(printf '%s' "$EVENT" | python3 -c '
+import sys, json
+try:
+    print(json.load(sys.stdin).get("cwd") or "")
+except Exception:
+    print("")
+' 2>/dev/null)"
+
+# FAIL-CLOSED on ANY unresolvable topology (no/unparseable/non-string cwd, cwd not
+# a git tree, or python3 absent → PAYLOAD_CWD empty). Unlike dod-affirm/test-gate,
+# canon-check has NO CI referee backstop — the canon repo is never checked out on
+# CI runners, so this gate can ONLY ever run locally — and canon consistency is
+# this repo's spine. A gate with no backstop gets no fail-open corner, not even a
+# degenerate one: it BLOCKS (exit 2) with the cause named rather than pass a task
+# whose canon it could not validate. When cwd DOES resolve, the full external-canon
+# validation below runs at its strict exit-2-on-error posture against THAT tree.
+if [ -z "$PAYLOAD_CWD" ] || ! ROOT="$(git -C "$PAYLOAD_CWD" rev-parse --show-toplevel 2>/dev/null)"; then
+  {
+    echo "canon-check: BLOCKED — could not resolve the work tree from the payload cwd (cwd='${PAYLOAD_CWD}')."
+    echo "canon-check is a local gate with NO CI backstop, so it fail-CLOSES rather than"
+    echo "pass a task whose external-canon it could not validate. Ensure the TaskCompleted"
+    echo "payload carries a valid cwd inside a git work tree, then complete the task again."
+  } >&2
+  exit 2
 fi
-# Fail CLOSED on an unreachable root (same posture as test-gate.sh): this is
-# a gate, and "couldn't look" must never read as "passed".
-cd "$ROOT" 2>/dev/null || { echo "canon-check: BLOCKED — cannot cd to repo root ($ROOT)" >&2; exit 2; }
+cd "$ROOT" 2>/dev/null || { echo "canon-check: BLOCKED — cannot cd to resolved tree ($ROOT)." >&2; exit 2; }
 
 # Mode gate: anything but an explicit 'external' marker is local mode → no-op.
 MARKER="$ROOT/.claude/canon-mode"
@@ -112,7 +136,9 @@ check_map_paths() {
   [ "$found" -eq 1 ] || err "$map cites no backtick-quoted src/tests path — maps must cite real paths in backticks"
 }
 
-# 3–6. Per-module doc packs for every top-level src module.
+# 3–6. Per-module doc packs for every LEAF src module (modules live nested under
+#       engine dirs, src/<engine>/<module>/, per the ENGINE_MAP org — the doc
+#       packs stay keyed by module basename at docs/modules/<module>/).
 if [ -d src ]; then
   while IFS= read -r m; do
     [ -z "$m" ] && continue
@@ -163,7 +189,7 @@ if [ -d src ]; then
         fi
       done < <(grep '^\- GAP.*\[adr-required\]' "$pack/OPEN_GAPS.md" 2>/dev/null)
     fi
-  done < <(find src -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sed 's|^src/||' | sort)
+  done < <(find src -mindepth 1 -type d 2>/dev/null | while IFS= read -r d; do ls "$d"/*.ts >/dev/null 2>&1 && basename "$d"; done | sort -u)
 fi
 
 if [ -n "$ERRORS" ]; then

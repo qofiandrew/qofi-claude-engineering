@@ -22,8 +22,19 @@
 # answer is no — that is a §Honesty violation that the CTO must catch at
 # review. This hook is the mechanical floor; honesty + review is the ceiling.
 #
-# Fail-safe: on any parse failure or read error, BLOCK (exit 2) and surface
-# "couldn't verify affirmation, rerun". Never fail open on a done-gate.
+# Posture (three cases, decided at the cwd-extraction point):
+#   1. Payload PRESENT but unparseable as JSON → BLOCK (exit 2), the pre-fix
+#      couldn't-verify posture: a done-gate must not fail-soft (pass) on a garbage
+#      payload it cannot read to resolve the tree.
+#   2. Payload parsed but no usable cwd (dict without cwd, a non-dict payload, a
+#      null/non-string cwd), OR cwd present but not a git tree, OR python3 absent
+#      (nothing to parse WITH) → fail-soft (exit 0 + stderr note): topology is
+#      genuinely unresolvable, and an advisory-local gate must never false-block
+#      on a tree it cannot locate (the CI referee is the real gate). Note the
+#      asymmetry: permission-gate — a SECURITY floor — fail-CLOSES on python3
+#      absent; this advisory gate fail-softs. Both are correct for their tier.
+#   3. Tree resolves → a missing/malformed affirmation BLOCKS (exit 2) as always;
+#      never fail open on a resolvable done-gate.
 
 set -uo pipefail
 
@@ -48,24 +59,60 @@ if __qofi_disabled; then
 fi
 # --- end QOFI quality-hook runtime control ---------------------------------
 
-# Same worktree-topology fix as test-gate.sh — the teammate's HEAD commit
-# (where the [DoD-*] block should live) is on the worktree-<name> branch
-# in the teammate's worktree, NOT on whatever branch the lead's main tree
-# happens to have checked out. Trusting $CLAUDE_PROJECT_DIR read the lead's
-# HEAD from every teammate invocation, false-BLOCKING the teammate whose
-# own commit had the affirmation. See tests/test-hooks-worktree-resolution.sh.
-if ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"; then
-  :
-else
-  ROOT="${CLAUDE_PROJECT_DIR:-$PWD}"
+# Worktree-topology resolution — the teammate's HEAD commit (where the [DoD-*]
+# block naturally lives) is on the worktree-<name> branch in the teammate's OWN
+# work tree, not the lead's main tree. Resolve that tree from the hook payload's
+# `cwd` field (the invoking session's working directory, per the Claude Code
+# hook contract), NOT from `git rev-parse` on the process's inherited CWD: a
+# hook subprocess does not inherit the teammate's worktree CWD, so the old
+# `git rev-parse --show-toplevel` / $CLAUDE_PROJECT_DIR resolution read the
+# WRONG tree's HEAD from every teammate invocation and false-BLOCKED the
+# teammate whose own commit carried the affirmation. Extract cwd with python3
+# (repo idiom — permission-gate.sh does the same; no jq dependency). See
+# tests/test-hooks-worktree-resolution.sh for the regression proof.
+# Extract cwd AND classify the payload in one python3 pass (repo idiom — no jq).
+# Emits exactly one of: <cwd> (a usable string) | __NO_CWD__ (parsed OK but no
+# usable cwd — dict without cwd, a non-dict payload, or a null/non-string cwd) |
+# __PARSE_FAILED__ (the payload did not parse as JSON at all). An EMPTY result
+# means python3 itself was unavailable (nothing to parse WITH).
+PAYLOAD_RAW="$(printf '%s' "$EVENT" | python3 -c '
+import sys, json
+try:
+    e = json.loads(sys.stdin.read())
+except Exception:
+    print("__PARSE_FAILED__"); sys.exit(0)
+cwd = e.get("cwd") if isinstance(e, dict) else None
+print(cwd if (isinstance(cwd, str) and cwd) else "__NO_CWD__")
+' 2>/dev/null || true)"
+
+# Case 1 — PRESENT-but-unparseable payload → BLOCK (couldn't-verify): a done-gate
+# must not fail-soft on a garbage payload it cannot read to resolve the tree.
+if [ "$PAYLOAD_RAW" = "__PARSE_FAILED__" ]; then
+  {
+    echo "dod-affirm: BLOCKED — couldn't verify affirmation, rerun."
+    echo ""
+    echo "The TaskCompleted event payload did not parse as JSON, so the work tree"
+    echo "(and its HEAD commit) could not be resolved to check the affirmation."
+    echo "Re-run the task; include the six [DoD-1]..[DoD-6] lines in your task"
+    echo "summary or commit message. See CLAUDE.md §Definition of done."
+  } >&2
+  exit 2
+fi
+# Case 2 — parsed but no usable cwd / cwd not a git tree / python3 absent →
+# FAIL-SOFT: topology genuinely unresolvable; never false-block on a tree we
+# cannot locate (the CI referee is the real gate).
+if [ "$PAYLOAD_RAW" = "__NO_CWD__" ] || [ -z "$PAYLOAD_RAW" ] \
+   || ! ROOT="$(git -C "$PAYLOAD_RAW" rev-parse --show-toplevel 2>/dev/null)"; then
+  echo "dod-affirm: SKIPPED — no work tree resolvable from payload cwd; advisory hook fail-soft (CI referee remains the gate)." >&2
+  exit 0
 fi
 
 # Collect candidate text to search in: every string-valued field of the stdin
-# JSON event, joined with newlines. A parse failure (non-JSON stdin or empty
-# stdin) emits the sentinel "__PARSE_FAILED__" so the bash side can distinguish
-# "agent didn't write the affirmation" from "we couldn't read what the agent
-# said" — those need different surfaced messages, even though both block.
-CANDIDATES_RAW="$(printf '%s' "$EVENT" | python3 -c '
+# JSON event, joined with newlines. We only reach this point once the payload
+# has parsed as JSON (the cwd resolution above succeeded on the same $EVENT), so
+# a parse-failure sentinel is unnecessary — an unparseable payload fail-softed
+# out already.
+CANDIDATES="$(printf '%s' "$EVENT" | python3 -c '
 import sys, json
 try:
     e = json.loads(sys.stdin.read())
@@ -79,16 +126,8 @@ try:
     walk(e)
     print("\n".join(out))
 except Exception:
-    print("__PARSE_FAILED__")
-' 2>/dev/null || echo "__PARSE_FAILED__")"
-
-PARSE_FAILED=0
-CANDIDATES=""
-if [ "$CANDIDATES_RAW" = "__PARSE_FAILED__" ]; then
-  PARSE_FAILED=1
-else
-  CANDIDATES="$CANDIDATES_RAW"
-fi
+    pass
+' 2>/dev/null || true)"
 
 # Also pull the most recent commit message on HEAD (if this is a git repo and
 # there is at least one commit). Tasks routinely end in a commit, so the
@@ -100,8 +139,12 @@ fi
 
 CORPUS="$(printf '%s\n%s\n' "$CANDIDATES" "$HEAD_MSG")"
 
-# Every item must be present on its own line with either "yes" or "n/a:<reason>".
+# Every item must be present on its own line, affirmed as "yes" or "n/a:<reason>".
 # The match is anchored to the exact tag so "almost-DoD" prose doesn't pass.
+# "yes" may be followed by " | <detail>" — the commit-summary template renders
+# the choice as "yes | n/a:<reason>", and agents legitimately read the "|" as a
+# separator and append detail after "yes". An affirmative with trailing detail
+# is still an affirmative; only the leading verdict token is load-bearing.
 missing=""
 for n in 1 2 3 4 5 6; do
   case "$n" in
@@ -112,28 +155,13 @@ for n in 1 2 3 4 5 6; do
     5) label="Scale" ;;
     6) label="No conflicts" ;;
   esac
-  pat="^\[DoD-${n}\] ${label}: (yes|n/a:.+)$"
+  pat="^\[DoD-${n}\] ${label}: (yes([[:space:]]*\|.*)?|n/a:.+)$"
   if ! printf '%s\n' "$CORPUS" | grep -Eq "$pat"; then
     missing="${missing}  [DoD-${n}] ${label}\n"
   fi
 done
 
 if [ -n "$missing" ]; then
-  if [ "$PARSE_FAILED" -eq 1 ]; then
-    # Stdin wasn't parseable AND the HEAD commit also lacks affirmation — we
-    # genuinely couldn't verify. Distinct from "agent forgot lines" so the
-    # surfaced guidance points at the right fix.
-    {
-      echo "dod-affirm: BLOCKED — couldn't verify affirmation, rerun."
-      echo ""
-      echo "Could not parse the TaskCompleted event payload, and the HEAD"
-      echo "commit message does not contain the Definition-of-Done affirmation"
-      echo "either. Re-run the task; include the six [DoD-1]..[DoD-6] lines"
-      echo "in your task summary or your commit message before marking complete."
-      echo "See CLAUDE.md §Definition of done for the exact format."
-    } >&2
-    exit 2
-  fi
   {
     echo "dod-affirm: BLOCKED — Definition-of-Done affirmation incomplete."
     echo ""
@@ -142,8 +170,10 @@ if [ -n "$missing" ]; then
     echo ""
     printf '%b' "$missing"
     echo ""
-    echo "Each line must end with either 'yes' or 'n/a:<reason>' — for example:"
+    echo "Each line must affirm either 'yes' (optionally 'yes | <detail>') or"
+    echo "'n/a:<reason>' — for example:"
     echo "  [DoD-1] Contract: yes"
+    echo "  [DoD-2] Tests: yes | 42 passing, suite green"
     echo "  [DoD-4] Operability: n/a:doc-only task, no module surface"
     echo ""
     echo "See CLAUDE.md §Definition of done for what each item means. Item 7"

@@ -12,7 +12,7 @@
 # docs path, the check passes — so it cannot loop forever.
 
 set -uo pipefail
-cat >/dev/null   # drain stdin payload
+EVENT="$(cat)"   # capture stdin payload — need its `cwd` to resolve the tree
 
 # --- QOFI quality-hook runtime control (see test-gate.sh for the rationale) -
 __qofi_hook="docs-check"
@@ -33,23 +33,36 @@ if __qofi_disabled; then
 fi
 # --- end QOFI quality-hook runtime control ---------------------------------
 
-# Same worktree-topology fix as test-gate.sh — the teammate's actual
-# changes (which this hook inspects via `git status`) live in the worktree,
-# not the lead's main tree. Trusting $CLAUDE_PROJECT_DIR ran `git status`
-# in the lead's clean tree from every teammate invocation, false-ALLOWING
-# idle even when the teammate had modified source without touching docs.
-# See tests/test-hooks-worktree-resolution.sh.
+# Worktree-topology resolution — the teammate's actual changes (which this hook
+# inspects via `git status`) live in its OWN work tree, not the lead's main tree.
+# Resolve that tree from the hook payload's `cwd` field (the invoking session's
+# working directory, per the Claude Code hook contract), NOT from `git rev-parse`
+# on the process's inherited CWD nor $CLAUDE_PROJECT_DIR. A hook subprocess does
+# not inherit the teammate's worktree CWD, so the old resolution ran `git status`
+# against the WRONG tree — false-blocking a teammate on a dirty SIBLING tree, and
+# (with $CLAUDE_PROJECT_DIR) false-ALLOWING idle by inspecting the lead's clean
+# tree. Extract cwd with python3 (repo idiom — permission-gate.sh does the same;
+# no jq dependency). See tests/test-hooks-worktree-resolution.sh.
 #
-# Preserves docs-check's existing fail-OPEN posture: any environment
-# oddity (no git, can't cd) silently exits 0 — this is a nudge, not a
-# hard gate. Both branches keep that behavior.
-if ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"; then
-  cd "$ROOT" || exit 0
-else
-  ROOT="${CLAUDE_PROJECT_DIR:-$PWD}"
-  cd "$ROOT" 2>/dev/null || exit 0
-  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0
+# Preserves docs-check's fail-OPEN posture: any unresolvable cwd → exit 0 (this is
+# an advisory nudge, not a hard gate). The trigger set collapses to exit 0 here:
+# unparseable payload, non-dict payload, no/null/non-string cwd, cwd not a git
+# tree, or python3 absent — all → exit 0 (unlike the TaskCompleted BLOCK gates,
+# which BLOCK on a present-but-unparseable payload). When cwd resolves, the
+# src-vs-doc check below runs unchanged against THAT tree.
+PAYLOAD_CWD="$(printf '%s' "$EVENT" | python3 -c '
+import sys, json
+try:
+    print(json.load(sys.stdin).get("cwd") or "")
+except Exception:
+    print("")
+' 2>/dev/null)"
+
+if [ -z "$PAYLOAD_CWD" ] || ! ROOT="$(git -C "$PAYLOAD_CWD" rev-parse --show-toplevel 2>/dev/null)"; then
+  echo "docs-check: SKIPPED — could not resolve work tree from payload cwd ('${PAYLOAD_CWD}'); advisory nudge fail-soft." >&2
+  exit 0
 fi
+cd "$ROOT" 2>/dev/null || exit 0
 
 # Uncommitted changes (staged + unstaged), as porcelain paths.
 CHANGED="$(git status --porcelain 2>/dev/null | sed 's/^...//')"
