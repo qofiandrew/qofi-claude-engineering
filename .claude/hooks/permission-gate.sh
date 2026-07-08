@@ -116,6 +116,15 @@ def protected_set():
 
 PROTECTED = protected_set()
 
+# NEVER-FORCE tier: the integration branch `dev` accepts routine NON-force
+# pushes (the CTO's merge-and-push cadence) but is SHARED history — rewriting
+# it is destruction even in repos where dev is not in the protected set (the
+# default shape: origin/HEAD=main -> PROTECTED={main,master}). A force-push
+# whose resolved destination is in NEVER_FORCE is DENIED; non-force pushes to
+# dev keep their existing classification. Protected branches deny any push
+# already, so the tier only adds `dev`.
+NEVER_FORCE = frozenset(PROTECTED | {"dev"})
+
 def out(s):
     sys.stdout.write(s)
     raise SystemExit(0)
@@ -213,6 +222,8 @@ def classify_clean(args):
                 return ("defer", "")
         if d.lower() in PROTECTED:           # case-insensitive: macOS folds Main->main
             return ("deny", "push to protected branch %s" % d)
+        if force and d.lower() in NEVER_FORCE:
+            return ("deny", "force-push to integration branch %s (shared history)" % d)
     # Force-push is ALLOWED to a non-protected branch (routine rebase/squash of a
     # feature/worktree branch). A force-push to a protected branch was already
     # denied by the dst check above; an unresolvable force target defers below.
@@ -251,8 +262,14 @@ def classify_clean(args):
             if norm(up).lower() in PROTECTED:
                 return ("deny", "bare push targets protected upstream %s (push.default=%s)"
                         % (norm(up), pd))
+            if force and norm(up).lower() in NEVER_FORCE:
+                return ("deny", "bare force-push targets integration upstream %s (push.default=%s)"
+                        % (norm(up), pd))
             return ("allow", "")
         if pd in ("current", "simple", "nothing"):
+            if force and cur.lower() in NEVER_FORCE:
+                return ("deny", "bare force-push of integration branch %s (push.default=%s)"
+                        % (cur, pd))
             # current: dst = current branch (already checked non-protected).
             # simple: dst = current branch's SAME-NAME upstream; git refuses on a
             #   name mismatch, so the only ref it writes is `cur` (non-protected).
