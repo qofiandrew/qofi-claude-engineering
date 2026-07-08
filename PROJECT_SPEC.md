@@ -453,3 +453,30 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   seeding/idempotency). First instance: `deployment-core`, bound to
   `qofi-product/products/deployment-core` (normative canon: product ADRs,
   requirements, live technical architecture).
+- `2026-07-08` — **Force-push per-target split + hook-fix upstreaming +
+  secret-scan lockfile allowlist** (operator-directed; deployment-core swarm
+  friction report). (1) *Permission gate / settings*: the settings deny layer
+  still blanket-denied all force-pushes, overriding ADR-0012's 2026-06-14
+  relaxation — split by target: canonical force forms to `main`/`dev` denied,
+  force to own `worktree-*` auto-allowed, everything else falls to the
+  classifier; classifier gains a NEVER-FORCE tier (`PROTECTED ∪ {dev}`) so
+  force-to-dev denies even where dev is unprotected; settings merge gains
+  `permissions.deny` union + a retired-rule removal channel
+  (`templates/settings-retired.conf`) so walked-back rules actually leave
+  stamped repos (merge was additive-only). ADR-0012 amendment logged. Tests:
+  `test-permission-gate-push-policy.sh` (116), new
+  `test-settings-merge-retired.sh` (10). (2) *dod-affirm #54*: the DoD-line
+  regex rejected `yes | <detail>` (template's `|` read as separator by agents)
+  — now accepts a trailing `| <detail>` after the mandatory leading verdict,
+  gate not weakened (new `test-dod-affirm-format.sh`, 9); and the hook now
+  resolves the affirming teammate's worktree HEAD from the payload `cwd`.
+  (3) *Payload-cwd upstreaming*: deployment-core's CTO fixes (#23/#26 —
+  test-gate/docs-check/canon-check/session-summary/quality-check/dod-affirm
+  resolve their work tree from the hook payload's `cwd`, fail-closed on the
+  two block-gates for unparseable payloads) adopted into the doctrine
+  templates verbatim, so the next sync no longer regresses them; the expanded
+  six-hook `test-hooks-worktree-resolution.sh` (35) adopted with it.
+  (4) *Secret-scan*: `.gitleaks.toml` allowlists npm lockfile SRI values
+  (`"integrity": "sha512-…"`, content-bound, `regexTarget = "line"`) — public
+  checksums, not credentials; every dep-adding commit had tripped the scan
+  into a CTO-sanctioned bypass. CI referee scan unchanged as backstop.

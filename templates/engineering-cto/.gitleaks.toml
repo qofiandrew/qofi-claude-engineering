@@ -29,6 +29,18 @@
 useDefault = true
 
 [allowlist]
+# regexTarget = "line": match against the full source line, not just the
+# captured secret. Needed because the lockfile SRI allowlist (below) keys on
+# the `"integrity":` field context, which is outside the captured secret; the
+# test-secret rule is unaffected (the line always contains the placeholder).
+regexTarget = "line"
 regexes = [
   '''test-secret-[A-Za-z0-9_-]+''',
+  # npm lockfile SRI integrity hashes ("integrity": "sha512-<base64>") are
+  # PUBLIC content checksums, not credentials — but their entropy trips the
+  # generic rules on every dep-adding commit, forcing a manual bypass+audit.
+  # CONTENT-BOUND: requires the literal integrity field context AND the SRI
+  # shape, so a real secret never matches; the CI referee scan still runs the
+  # full default ruleset on everything else as the backstop.
+  '''"integrity":\s*"sha(256|384|512)-[A-Za-z0-9+/=]+"''',
 ]
