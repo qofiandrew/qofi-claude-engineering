@@ -317,12 +317,30 @@ pane_working() {
 # various pane positions depending on the TUI's modal state.
 SWARM_PANE_STATE_DETAIL=""
 
+# Limit substrings that mean the account is CAPPED RIGHT NOW (a cap was HIT), not
+# merely that a limit exists. The old set matched bare "usage limit", which also
+# appears in Claude Code's INFORMATIONAL notices (e.g. "you can use up to 50% of
+# your weekly usage limit on Fable 5") and in the leads' own conversation about
+# rate limits — producing a false paused-limit verdict on every pane. These are
+# narrowed to cap-HIT phrasings; benign mentions are additionally filtered by
+# _swarm_default_limit_exclude_patterns below. Overridable via SWARM_LIMIT_PATTERNS.
 _swarm_default_limit_patterns() {
-  printf '%s\n' "usage limit"
-  printf '%s\n' "5-hour limit"
+  printf '%s\n' "usage limit reached"
   printf '%s\n' "limit reached"
-  printf '%s\n' "rate limit"
-  printf '%s\n' "approaching usage"
+  printf '%s\n' "reached your usage limit"
+  printf '%s\n' "reached your limit"
+  printf '%s\n' "rate limit exceeded"
+  printf '%s\n' "you have hit your"
+  printf '%s\n' "run out of"
+}
+
+# Benign lines that MENTION a limit word but are NOT a cap — an allowance/notice
+# ("you can use up to N%"), not a hit. A limit-matching line that ALSO matches an
+# exclusion here is dropped (a genuine cap line still wins if one is present).
+# Overridable via SWARM_LIMIT_EXCLUDE_PATTERNS.
+_swarm_default_limit_exclude_patterns() {
+  printf '%s\n' "you can use up to"
+  printf '%s\n' "can use up to"
 }
 
 pane_state() {
@@ -340,18 +358,40 @@ pane_state() {
   local patterns
   if [ -n "$patterns_raw" ]; then
     # Operator override. Accept newline- OR pipe-separated entries.
-    patterns="$(printf '%s' "$patterns_raw" | tr '|' '\n')"
+    patterns="$(printf '%s' "$patterns_raw" | tr '|' '\n' | grep -v '^[[:space:]]*$')"
   else
     patterns="$(_swarm_default_limit_patterns)"
   fi
-  local hit
-  hit="$(printf '%s' "$out" | grep -i -F -m1 -f <(printf '%s' "$patterns") 2>/dev/null)"
-  if [ -n "$hit" ]; then
-    # Trim ANSI / leading whitespace from the captured line for cleaner
-    # downstream parsing. Best-effort; the raw line is fine too.
-    hit="$(printf '%s' "$hit" | sed -e 's/\x1b\[[0-9;]*[A-Za-z]//g' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-    SWARM_PANE_STATE_DETAIL="$hit"
-    return 2
+  # Benign-notice exclusion. A blank pattern line would make grep -f match every
+  # line, so strip blanks from BOTH sets (an empty pattern set then matches
+  # nothing, which is the correct fail-direction here — no false cap).
+  local excl_raw="${SWARM_LIMIT_EXCLUDE_PATTERNS:-}"
+  local excl
+  if [ -n "$excl_raw" ]; then
+    excl="$(printf '%s' "$excl_raw" | tr '|' '\n' | grep -v '^[[:space:]]*$')"
+  else
+    excl="$(_swarm_default_limit_exclude_patterns)"
+  fi
+  local hits real hit
+  # ALL limit-matching lines (not -m1): a benign notice must not shadow a real
+  # cap line elsewhere in the capture.
+  hits="$(printf '%s' "$out" | grep -i -F -f <(printf '%s' "$patterns") 2>/dev/null)"
+  if [ -n "$hits" ]; then
+    # Drop lines that are benign informational notices. What survives is a real
+    # cap-hit line, if any.
+    if [ -n "$excl" ]; then
+      real="$(printf '%s\n' "$hits" | grep -i -v -F -f <(printf '%s' "$excl") 2>/dev/null)"
+    else
+      real="$hits"
+    fi
+    if [ -n "$real" ]; then
+      hit="$(printf '%s\n' "$real" | head -n 1)"
+      # Trim ANSI / leading whitespace from the captured line for cleaner
+      # downstream parsing. Best-effort; the raw line is fine too.
+      hit="$(printf '%s' "$hit" | sed -e 's/\x1b\[[0-9;]*[A-Za-z]//g' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+      SWARM_PANE_STATE_DETAIL="$hit"
+      return 2
+    fi
   fi
 
   if printf '%s' "$out" | grep -qF 'esc to interrupt'; then
