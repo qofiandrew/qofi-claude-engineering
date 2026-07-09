@@ -33,6 +33,7 @@
 #
 # behavior        | template-path                                                                                                | target-path
 compose           | cpo/CLAUDE.preamble.md+_base/CLAUDE.md+cpo/CLAUDE.md                                                          | CLAUDE.md
+refresh           | _base/AGENTS.md                                                                                              | AGENTS.md
 compose           | cpo/ESCALATION.preamble.md+_base/ESCALATION.md+cpo/ESCALATION.md                                              | ESCALATION.md
 refresh           | cpo/CONVERSATION.md                                                                                           | CONVERSATION.md
 refresh           | cpo/EVALUATION.md                                                                                             | EVALUATION.md
@@ -56,6 +57,9 @@ refresh           | cpo/product-template/roadmap.md                             
 refresh           | cpo/product-template/journey.md                                                                               | product-template/journey.md
 refresh           | cpo/product-template/decisions/README.md                                                                      | product-template/decisions/README.md
 compose           | _base/hooks/permission-gate-prelude.sh+cpo/hooks/permission-gate-policy.sh+_base/hooks/permission-gate-tail.sh | .claude/hooks/permission-gate.sh
+refresh           | cpo/hooks/discord-reply-nudge.sh                                                                              | .claude/hooks/discord-reply-nudge.sh | Stop: non-blocking nudge when an OPERATOR-origin response went to the terminal without a Discord post (bus/CTO turns exempt — silence-by-default preserved)
+refresh           | _base/hooks/session-doctrine.sh                                                                               | .claude/hooks/session-doctrine.sh | SessionStart: injects the CPO doctrine-read directive (CONVERSATION/EVALUATION/SURFACING/MEMORY/READINESS_BAR/ESCALATION) into every session — race-free complement to the tmux launch brief
+refresh           | cpo/bin/codex-directive-review.sh                                                                             | .claude/bin/codex-directive-review.sh | Codex adversarial review of a draft buildout-initiating directive (advisory, never gating; subscription-only money-path floor)
 operator-owned    | cpo/products/.keep                                                                                            | products/.keep
 operator-owned    | cpo/stress-test-log/.keep                                                                                     | stress-test-log/.keep
 settings          | cpo/settings.example.json                                                                                     | .claude/settings.json

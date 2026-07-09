@@ -93,7 +93,12 @@ if [ -z "${SWARM_HOME:-}" ] || [ ! -d "${SWARM_HOME:-}/templates" ] || [ ! -f "$
 fi
 CONF="$SWARM_HOME/swarm.conf"
 TOKENS="$SWARM_HOME/tokens.env"
-CLAUDE_PROJECTS="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
+# Projects dir is resolved PER-SWARM inside the loop (multi-account partition):
+# each row's account label (field 6) maps to THAT swarm's projects dir via
+# swarm_account_resolve. A single global dir would read the WRONG account's
+# transcripts for a labeled swarm and disarm the WORKING rail. The default
+# (empty) account resolves to ${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects},
+# byte-identical to the value this script used before partitioning.
 STALE_SECONDS="${SWARM_STALE_SECONDS:-300}"
 STATE_DIR="${SWARM_STATE_DIR:-$HOME/.config/swarm}"
 PREFIX="${SWARM_TMUX_PREFIX:-swarm}"
@@ -323,6 +328,22 @@ grep -vE '^[[:space:]]*(#|$)' "$CONF" | while IFS= read -r _line; do
 
   case "$repo" in "~"*) repo="$HOME${repo#\~}";; esac
 
+  # Resolve THIS swarm's projects dir from ITS account (field 6). Empty account
+  # → ${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects} (default, byte-identical to
+  # the pre-partition global). Labeled → $HOME/.claude-accounts/<label>/projects.
+  # swarm_account_resolve is the SOLE constructor of these paths; resolving here
+  # — per swarm, after the parse — is what keeps the WORKING rail (repo_activity)
+  # pointed at the right account so a live swarm is never read as stale.
+  if ! swarm_account_resolve "$SWARM_CONF_F_ACCOUNT"; then
+    # Invalid account label → resolver rejected (path NOT built; $SWARM_ACCT_* is
+    # STALE from a prior row). Don't probe a stale/foreign projects dir. Skip this
+    # swarm's activity read this tick (fail-safe — a missed heartbeat is harmless,
+    # a wrong-dir read that paints a live swarm STALLED is not).
+    echo "swarm-watch: WARN — '$name' has an invalid account '$SWARM_CONF_F_ACCOUNT'; skipping its activity probe. Fix the swarm.conf ACCOUNT field." >&2
+    continue
+  fi
+  projects="$SWARM_ACCT_PROJECTS_DIR"
+
   session_alive "$name"; rc=$?
   if [ "$rc" -eq 0 ]; then alive=1; elif [ "$rc" -eq 2 ]; then alive=2; else alive=0; fi
 
@@ -337,7 +358,7 @@ grep -vE '^[[:space:]]*(#|$)' "$CONF" | while IFS= read -r _line; do
   # naturally treat it as stale. We compare against the sentinel here
   # only to preserve the more-specific "🟡 starting (no transcript yet)"
   # message; everything else flows through the existing predicate.
-  activity="$(repo_activity "$repo" "$CLAUDE_PROJECTS" "$STALE_SECONDS")"
+  activity="$(repo_activity "$repo" "$projects" "$STALE_SECONDS")"
   a="${activity%%|*}"
   tn="${activity##*|}"
   case "$a" in ''|*[!0-9]*) a="$SWARM_NO_TRANSCRIPT_AGE" ;; esac  # paranoia

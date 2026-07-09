@@ -11,9 +11,12 @@
 # Mac mini in the fleet renders its own copy (sharding-correct by construction).
 #
 # Substitutions:
-#   @@SWARM_HOME@@  -> $SWARM_HOME
-#   @@HOME@@        -> $HOME
-#   @@TMUX_BIN@@    -> $SWARM_TMUX_BIN if set, else `command -v tmux`
+#   @@SWARM_HOME@@     -> $SWARM_HOME
+#   @@HOME@@           -> $HOME
+#   @@TMUX_BIN@@       -> $SWARM_TMUX_BIN if set, else `command -v tmux`
+#   @@TICK_INTERVAL@@  -> $SWARM_TICK_INTERVAL if set, else 300 (seconds between
+#                         rotation-orchestrator ticks; only the rotate-tick plist
+#                         uses it — harmless no-op for templates without it)
 #
 # Usage:
 #   swarm-launchd-install.sh                 # render to ~/Library/LaunchAgents + (re)load
@@ -51,6 +54,19 @@ if [ -z "$TMUX_BIN" ]; then
   exit 1
 fi
 
+# Cadence for the rotation-orchestrator tick (StartInterval, seconds). Only the
+# rotate-tick template carries @@TICK_INTERVAL@@; for every other template the
+# substitution below finds nothing to replace. Validate it's a positive integer
+# so we never render a malformed StartInterval into the plist.
+TICK_INTERVAL="${SWARM_TICK_INTERVAL:-300}"
+case "$TICK_INTERVAL" in
+  ''|*[!0-9]*) echo "swarm-launchd-install: SWARM_TICK_INTERVAL must be a positive integer (seconds); got '$TICK_INTERVAL'" >&2; exit 1 ;;
+esac
+if [ "$TICK_INTERVAL" -lt 1 ]; then
+  echo "swarm-launchd-install: SWARM_TICK_INTERVAL must be >= 1 second; got '$TICK_INTERVAL'" >&2
+  exit 1
+fi
+
 TEMPLATE_DIR="$SWARM_HOME/launchd"
 shopt -s nullglob 2>/dev/null || true
 TEMPLATES=( "$TEMPLATE_DIR"/*.plist.template )
@@ -78,6 +94,7 @@ render_one() {  # template_path -> renders to $OUT_DIR/<basename minus .template
   sed -e "s#@@SWARM_HOME@@#${SWARM_HOME}#g" \
       -e "s#@@HOME@@#${HOME}#g" \
       -e "s#@@TMUX_BIN@@#${TMUX_BIN}#g" \
+      -e "s#@@TICK_INTERVAL@@#${TICK_INTERVAL}#g" \
       "$tmpl" > "$out" || { echo "swarm-launchd-install: render failed for $base" >&2; return 1; }
 
   # Belt-and-suspenders: no placeholder may survive, and the result must be a

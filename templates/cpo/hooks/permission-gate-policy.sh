@@ -8,13 +8,15 @@
 # operator can read them, and it has no test runners / worktree management /
 # swarm-attention.sh (it surfaces directly via Discord per SURFACING.md). The
 # git-push policy is now IDENTICAL to engineering-cto's — routine branch/dev
-# push allowed, push to main/master + force + destructive denied, ambiguous
-# deferred — via the shared _git_push_class in the prelude. See ADR-0012.
+# push allowed (incl. force to a non-protected, non-dev branch), push to
+# main/master + force-to-dev + destructive denied, ambiguous deferred — via
+# the shared _git_push_class in the prelude. See ADR-0012.
 # ---------------------------------------------------------------------------
 case "$TOOL" in
   Bash)
     # Git-push policy — vision-repo push (the cpo's function) is auto-allowed
-    # for branch/non-force pushes; push to main/master, any force-push, and
+    # for branch pushes (incl. force to a non-protected, non-dev branch); push
+    # to main/master, force-push to dev (shared integration history), and
     # broad/destructive push are denied; anything ambiguous defers to a human.
     # Resolved by the shared _git_push_class in the prelude (deny-biased, never
     # fail-open). The real floor is GitHub branch protection on the vision

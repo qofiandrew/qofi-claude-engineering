@@ -7,10 +7,12 @@
 # ---------------------------------------------------------------------------
 case "$TOOL" in
   Bash)
-    # Git-push policy — routine push to a feature/worktree/topic branch and
-    # non-force push to `dev` (staging) are auto-allowed; push to main/master,
-    # any force-push, and broad/destructive push are denied; anything ambiguous
-    # defers to a human. Resolved by the shared _git_push_class in the prelude
+    # Git-push policy — routine push (incl. force-push: rebase/squash) to a
+    # feature/worktree/topic branch and non-force push to `dev` (staging) are
+    # auto-allowed; push to a protected branch (main/master), force-push to
+    # `dev` (shared integration history), and broad/destructive push are
+    # denied; anything ambiguous defers to a human. Resolved by the shared
+    # _git_push_class in the prelude
     # (deny-biased, never fail-open). Pushing `main` stays operator-only — the
     # real floor is GitHub branch protection. See ESCALATION.md / ADR-0012.
     if printf '%s' "$CMD" | grep -Eq '(^|[^[:alnum:]_])git[[:space:]]+push([[:space:]]|$)'; then

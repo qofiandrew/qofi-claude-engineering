@@ -1,0 +1,364 @@
+# qofi-doctrine.yml — R4 semgrep ruleset: doctrine mechanized as deterministic rules.
+#
+# This is the LOCAL ruleset that plugs into bin/security-scan.sh. The scan runs
+#   semgrep scan --config "${SEMGREP_CONFIG:-auto}"
+# so an operator pins this file to run it (offline-capable, deterministic):
+#   SEMGREP_CONFIG=.claude/semgrep/qofi-doctrine.yml bin/security-scan.sh
+# or registers it alongside the registry set:
+#   semgrep scan --config .claude/semgrep/qofi-doctrine.yml --config auto
+# In CI (docs/CI-PROMOTION.md) it is the `config:` passed to the semgrep step.
+#
+# DESIGN POSTURE — conservative, low false-positive. These rules MECHANIZE prose
+# already in CLAUDE.md; a deterministic scanner is the first line precisely
+# because it does not hallucinate (TEAM_LEAD.md §Independent review & security
+# gates). A noisy rule that fires on legitimate code gets the whole scan tuned
+# out — worse than no rule. So each pattern below is written to catch the
+# UNAMBIGUOUS shape of the anti-pattern and deliberately under-reaches rather
+# than risk false positives. A real finding is a hard stop; a genuine false
+# positive is an explicit reviewed `nosemgrep`/allowlist entry, never a silenced
+# scanner (security-scan.sh §FINDINGS note).
+#
+# Languages covered match the fleet's stacks: TypeScript/JavaScript, Python.
+# Rules are inert where the language doesn't match — semgrep only applies a rule
+# to files of its declared `languages`, so this set costs nothing in a repo whose
+# stack it doesn't target (the same on-demand posture as the stack skills).
+
+rules:
+  # ===========================================================================
+  # §Error-handling anti-patterns  — mechanizes CLAUDE.md §Error handling
+  #   "Never silently swallow errors. No empty catch, no ignored return codes,
+  #    no try { ... } catch {} that drops the cause."
+  # ===========================================================================
+
+  - id: qofi-empty-catch-js
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      Empty catch block swallows the error and drops the cause. CLAUDE.md
+      §Error handling: never silently swallow errors. Handle it (log with
+      context, rethrow, or mark the item failed) — or, if the error truly
+      cannot occur, document why with a comment. An empty catch is a finding.
+    metadata:
+      doctrine: "CLAUDE.md §Error handling — never silently swallow errors"
+      category: error-handling
+    # An empty body is the unambiguous swallow. semgrep's `{ ... }` only matches
+    # an EMPTY block here, so a catch that does ANYTHING (logs, rethrows, sets a
+    # flag) is not matched — false-positive rate stays at zero for legitimate
+    # handling. (Verified: fires on `catch (e) {}`, silent on `catch (e) { log(e); }`.)
+    pattern: |
+      try { ... } catch ($E) {}
+
+  - id: qofi-empty-except-py
+    languages: [python]
+    severity: ERROR
+    message: >-
+      `except: pass` (or `except Exception: pass`) swallows the error silently.
+      CLAUDE.md §Error handling: never silently swallow errors. Log with
+      context, re-raise, or mark the item failed — a bare pass drops the cause.
+    metadata:
+      doctrine: "CLAUDE.md §Error handling — never silently swallow errors"
+      category: error-handling
+    patterns:
+      - pattern: |
+          try:
+              ...
+          except $EXC:
+              pass
+      # Only the literal `pass` body is matched — any real handling (logging,
+      # re-raise, continue with a recorded failure) is intentionally allowed.
+
+  - id: qofi-swallowed-promise-rejection-js
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >-
+      Promise rejection swallowed by an empty `.catch(() => {})`. CLAUDE.md
+      §Error handling: never silently swallow errors. A dropped rejection hides
+      a failure and can leave half-written state. Handle the error or let it
+      propagate.
+    metadata:
+      doctrine: "CLAUDE.md §Error handling — never silently swallow errors"
+      category: error-handling
+    patterns:
+      # Only the explicitly-empty handler shapes are matched — a `.catch` with
+      # any real body is legitimate handling and is not flagged.
+      - pattern-either:
+          - pattern: $P.catch(() => {})
+          - pattern: $P.catch(($E) => {})
+          - pattern: $P.catch(function () {})
+          - pattern: $P.catch(function ($E) {})
+
+  - id: qofi-fire-and-forget-async-js
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >-
+      Fire-and-forget async call: a Promise-returning call as a bare expression
+      statement with no `await`, no `void`, and no `.then/.catch`. An unhandled
+      rejection is a swallowed error (CLAUDE.md §Error handling). Await it,
+      attach a handler, or mark intent explicitly with `void`.
+    metadata:
+      doctrine: "CLAUDE.md §Error handling — never silently swallow errors (async)"
+      category: error-handling
+    # Match a call used as a bare expression statement — both a plain function
+    # call `fn(...)` and a method call `obj.method(...)`. Deliberately narrow:
+    # await/void/return and any `.then/.catch/.finally` chaining are excluded so
+    # handled or intentional calls don't fire. The async-intent name filter
+    # (below) is what keeps this conservative — only call names that SIGNAL async
+    # work are flagged, not every bare statement. NOTE: semgrep can't prove a
+    # call returns a Promise without type info, so this is WARNING, not ERROR — a
+    # reviewed `void`/`await`/handler clears it.
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern: $FN(...);
+              - metavariable-regex:
+                  metavariable: $FN
+                  regex: ^(.*Async|send.*|fetch.*|save.*|update.*|delete.*|publish.*|emit.*|enqueue.*|process.*|sync.*|notify.*|flush.*|commit.*|write.*)$
+          - patterns:
+              - pattern: $OBJ.$METHOD(...);
+              - metavariable-regex:
+                  metavariable: $METHOD
+                  regex: ^(.*Async|send.*|fetch.*|save.*|update.*|delete.*|publish.*|emit.*|enqueue.*|process.*|sync.*|notify.*|flush.*|commit.*|write.*)$
+      - pattern-not: await $X;
+      - pattern-not: void $X;
+      - pattern-not: return $X;
+      - pattern-not: $CALL(...).then(...);
+      - pattern-not: $CALL(...).catch(...);
+      - pattern-not: $CALL(...).then(...).catch(...);
+      - pattern-not: $CALL(...).finally(...);
+      - pattern-not: $A.$CALL(...).then(...);
+      - pattern-not: $A.$CALL(...).catch(...);
+      - pattern-not: $A.$CALL(...).then(...).catch(...);
+      - pattern-not: $A.$CALL(...).finally(...);
+
+  # ===========================================================================
+  # §DB hard rules  — mechanizes CLAUDE.md §Data ownership / §Data migrations
+  #   and the ts-node-stack Drizzle+Postgres conventions.
+  # ===========================================================================
+
+  - id: qofi-no-select-star-sql
+    languages: [generic]
+    severity: WARNING
+    message: >-
+      `SELECT *` couples the reader to the table's full shape and breaks when a
+      column is added/reordered; it also reads columns the caller doesn't need.
+      CLAUDE.md §Data ownership: peers read via the owner's contract surface —
+      select explicit columns, never `*`.
+    metadata:
+      doctrine: "CLAUDE.md §Data ownership — explicit columns, not SELECT *"
+      category: database
+    options:
+      generic_ellipsis_max_span: 0
+    # `generic` so it catches raw SQL in strings across any language. Restricted
+    # to .sql + common code files via `paths` below to avoid scanning docs/fixtures.
+    patterns:
+      - pattern-regex: '(?i)\bSELECT\s+\*\s+FROM\b'
+      # `SELECT count(*)` / `SELECT max(*)` etc. are NOT matched — the regex
+      # requires `* FROM`, so aggregate stars don't trip it.
+    paths:
+      include:
+        - "*.sql"
+        - "*.ts"
+        - "*.js"
+        - "*.py"
+      exclude:
+        - "*test*"
+        - "*spec*"
+        - "*fixture*"
+        - "*.md"
+
+  - id: qofi-prefer-timestamptz-sql
+    languages: [generic]
+    severity: WARNING
+    message: >-
+      Column declared `timestamp` (without time zone). Postgres `timestamp`
+      drops the zone and is a recurring correctness bug; doctrine requires
+      `timestamptz`. Use `timestamptz` (Drizzle: `timestamp(..., { withTimezone:
+      true })`).
+    metadata:
+      doctrine: "ts-node-stack / CLAUDE.md §Data migrations — timestamptz over timestamp"
+      category: database
+    options:
+      generic_ellipsis_max_span: 0
+    patterns:
+      # Match a `timestamp` type token NOT immediately followed by `tz` / `with
+      # time zone`. The negative lookahead keeps `timestamptz` and `timestamp
+      # with time zone` from matching. Scoped to .sql files (paths below) so the
+      # bare word `timestamp` in code/prose doesn't trip it — DDL is where the
+      # type choice lives.
+      - pattern-regex: '(?i)\btimestamp\b(?!tz)(?!\s+with\s+time\s+zone)'
+    paths:
+      include:
+        - "*.sql"
+      exclude:
+        - "*test*"
+        - "*fixture*"
+
+  # NOTE on un-indexed FKs: a reliable "foreign key without a covering index"
+  # rule needs cross-statement schema awareness (correlate a FK constraint with
+  # the CREATE INDEX set), which semgrep's single-pattern matching cannot do
+  # without false positives. Mechanizing it here would be a noisy rule, so it is
+  # DELIBERATELY left to the R5 review checklist + the migration review in
+  # ts-node-stack rather than faked as a low-confidence semgrep rule. (Recording
+  # the boundary is the contribution; a noisy rule would be worse than none.)
+
+  # ===========================================================================
+  # §Build-resolver anti-suppression  — mechanizes CLAUDE.md §Verification
+  #   "Never weaken or delete a test to make a build pass — that's a regression."
+  #   A blanket error-suppression added only to make a build/typecheck go green
+  #   is the same regression in a different costume.
+  # ===========================================================================
+
+  - id: qofi-no-blanket-ts-suppression
+    languages: [typescript]
+    severity: WARNING
+    message: >-
+      Blanket compiler-error suppression (`@ts-ignore`, or a file-wide
+      `@ts-nocheck`). CLAUDE.md §Verification: never weaken a check to make a
+      build pass. Prefer `@ts-expect-error` with a one-line reason at the exact
+      site, or fix the type. A blanket suppression hides real errors.
+    metadata:
+      doctrine: "CLAUDE.md §Verification — no suppression to go green"
+      category: build-suppression
+    patterns:
+      - pattern-regex: '@ts-(ignore|nocheck)\b'
+      # `@ts-expect-error` is intentionally NOT matched — it is the narrow,
+      # site-scoped, self-documenting form doctrine prefers (it errors if the
+      # suppressed error disappears, so it can't rot silently).
+
+  - id: qofi-no-blanket-eslint-disable
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >-
+      File-wide `eslint-disable` with no rule list disables ALL lint rules for
+      the file to go green. CLAUDE.md §Verification: never weaken a check to
+      pass. Disable a specific rule on a specific line with a reason, or fix the
+      finding.
+    metadata:
+      doctrine: "CLAUDE.md §Verification — no suppression to go green"
+      category: build-suppression
+    patterns:
+      # Only the blanket, whole-file, ruleless form is matched:
+      #   /* eslint-disable */         <- flagged (disables everything)
+      #   /* eslint-disable no-foo */  <- NOT flagged (scoped to one rule)
+      #   // eslint-disable-next-line no-foo  <- NOT flagged (scoped + one line)
+      - pattern-regex: '/\*\s*eslint-disable\s*\*/'
+
+  - id: qofi-no-blanket-noqa-py
+    languages: [python]
+    severity: WARNING
+    message: >-
+      Bare `# noqa` (no error code) silences ALL lint findings on the line.
+      CLAUDE.md §Verification: never weaken a check to pass. Use `# noqa: E501`
+      (a specific code) with a reason, or fix the finding.
+    metadata:
+      doctrine: "CLAUDE.md §Verification — no suppression to go green"
+      category: build-suppression
+    patterns:
+      # Match `# noqa` that is NOT followed by `:` (a coded, scoped suppression
+      # is allowed). The negative lookahead keeps `# noqa: E501` from matching.
+      - pattern-regex: '#\s*noqa(?!\s*:)'
+
+  # ===========================================================================
+  # §Bounded-loop stop condition  — mechanizes the doctrine intent that a loop
+  #   must terminate (an unbounded loop with no break/return/throw is the runaway
+  #   that the §Error handling "fail fast, don't continue a doomed run" posture
+  #   and the ESCALATION "never autonomously loop" rule both guard against).
+  # ===========================================================================
+
+  - id: qofi-while-true-no-stop-js
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >-
+      `while (true)` with no `break`, `return`, or `throw` in its body has no
+      stop condition — an unbounded loop. Doctrine requires a bounded stop
+      (CLAUDE.md §Error handling fail-fast; ESCALATION never-loop). Add an
+      explicit exit (max iterations / timeout / break) or make the condition
+      real.
+    metadata:
+      doctrine: "CLAUDE.md §Error handling — loops must have a stop condition"
+      category: bounded-loop
+    patterns:
+      - pattern-either:
+          - pattern: while (true) { ... }
+          - pattern: for (;;) { ... }
+      # If the body contains ANY break/return/throw, the loop CAN terminate, so
+      # it is not flagged — this is the low-false-positive guard.
+      - pattern-not: |
+          while (true) { ... break; ... }
+      - pattern-not: |
+          while (true) { ... return ...; ... }
+      - pattern-not: |
+          while (true) { ... throw $E; ... }
+      - pattern-not: |
+          for (;;) { ... break; ... }
+      - pattern-not: |
+          for (;;) { ... return ...; ... }
+      - pattern-not: |
+          for (;;) { ... throw $E; ... }
+
+  - id: qofi-while-true-no-stop-py
+    languages: [python]
+    severity: WARNING
+    message: >-
+      `while True:` with no `break`, `return`, or `raise` in its body has no
+      stop condition — an unbounded loop. Doctrine requires a bounded stop
+      (CLAUDE.md §Error handling fail-fast; ESCALATION never-loop). Add an
+      explicit exit or make the condition real.
+    metadata:
+      doctrine: "CLAUDE.md §Error handling — loops must have a stop condition"
+      category: bounded-loop
+    patterns:
+      - pattern: |
+          while True:
+              ...
+      # Any reachable exit clears it. (A long-lived event-loop daemon that truly
+      # should run forever is the legitimate exception — a reviewed nosemgrep on
+      # that single site is the explicit, auditable allowlist, not a silenced
+      # scanner.)
+      - pattern-not: |
+          while True:
+              ...
+              break
+      - pattern-not: |
+          while True:
+              ...
+              return ...
+      - pattern-not: |
+          while True:
+              ...
+              raise ...
+
+  # ===========================================================================
+  # §Modular design — module-internal `private.ts` encapsulation boundary
+  #   A module may keep its internal capabilities (e.g. a sealed store's
+  #   governed-write capability) in a `private.ts` that only the module's own
+  #   files import. Importing ANOTHER module's `private.ts` reaches past that
+  #   boundary and turns a structural seal back into a convention. This rule
+  #   makes the prose floor structural: a cross-module `../<other>/private`
+  #   import in src/ is an ERROR. A module's OWN `./private.js` import (same
+  #   dir) and a test's own-module probe are NOT matched (the pattern requires
+  #   `../` leaving into another module, and paths are scoped to src/). Inert
+  #   in repos that do not use the private.ts convention. Origin:
+  #   deployment-core (operator decision 2026-07-03), upstreamed 2026-07-09.
+  #   Repo-SPECIFIC symbol-keyed variants (barrel-re-export laundering guards
+  #   naming a module's actual internals) belong in the repo's own
+  #   .claude/semgrep/qofi-local.yml, never in this shared file.
+  # ===========================================================================
+
+  - id: qofi-no-cross-module-private-import
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      Cross-module import of another module's `private.ts` — this reaches past
+      the module's encapsulation boundary and can obtain internal capabilities
+      (e.g. a sealed store's governed-write cap). CLAUDE.md §Modular design:
+      depend only on contract surfaces, never on internals. A module's
+      `private.ts` is internal-only; import from its public files instead.
+      (Own-module `./private.js` is fine.)
+    metadata:
+      doctrine: "CLAUDE.md §Modular design — depend only on contract surfaces"
+      category: encapsulation
+    pattern-regex: 'from\s+["'']\.\.\/[^"'']+\/private(\.js)?["'']'
+    paths:
+      include:
+        - "src/"

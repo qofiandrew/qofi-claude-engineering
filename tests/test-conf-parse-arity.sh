@@ -69,15 +69,23 @@ assert_eq "/Users/me/code/acme" "$SWARM_CONF_F_REPO"    "repo"
 assert_eq "BOT_ACME"            "$SWARM_CONF_F_TOKVAR"  "tokvar"
 assert_eq "111222333444555666" "$SWARM_CONF_F_CHANNEL" "channel is JUST the channel (the bug)"
 assert_eq "999888777666555444" "$SWARM_CONF_F_GUILD"   "guild_id"
+assert_eq ""                    "$SWARM_CONF_F_ACCOUNT" "account empty in a 5-column (no ACCOUNT) row"
 
 # ---------------------------------------------------------------------------
-# 2) THE FUTURE-COLUMN GUARANTEE — a 6th column (e.g. a future 'type') must
-#    NOT corrupt guild_id. This is what protects the next column we add.
+# 2) ACCOUNT is field 6 — a 6-column row populates SWARM_CONF_F_ACCOUNT and
+#    leaves guild_id (field 5) clean. The FUTURE-COLUMN GUARANTEE now sits at
+#    field 7: a 7th column must not corrupt ACCOUNT (it lands in _rest).
 # ---------------------------------------------------------------------------
-echo "=== 6-column row (a hypothetical future column) ==="
-swarm_conf_parse_line "acme | /p | BOT_ACME | 111222333444555666 | 999888777666555444 | engineering-cto"
-assert_eq "111222333444555666" "$SWARM_CONF_F_CHANNEL" "channel uncorrupted by a 6th column"
-assert_eq "999888777666555444" "$SWARM_CONF_F_GUILD"   "guild_id uncorrupted by a 6th column (lands in _rest)"
+echo "=== 6-column row (ACCOUNT is field 6) ==="
+swarm_conf_parse_line "acme | /p | BOT_ACME | 111222333444555666 | 999888777666555444 | max-a"
+assert_eq "111222333444555666" "$SWARM_CONF_F_CHANNEL" "channel uncorrupted by the ACCOUNT column"
+assert_eq "999888777666555444" "$SWARM_CONF_F_GUILD"   "guild_id uncorrupted by the ACCOUNT column"
+assert_eq "max-a"              "$SWARM_CONF_F_ACCOUNT" "ACCOUNT captured from field 6"
+
+echo "=== 7-column row (a hypothetical future column lands in _rest) ==="
+swarm_conf_parse_line "acme | /p | BOT_ACME | 111222333444555666 | 999888777666555444 | max-a | future"
+assert_eq "max-a"              "$SWARM_CONF_F_ACCOUNT" "ACCOUNT uncorrupted by a 7th column (future → _rest)"
+assert_eq "999888777666555444" "$SWARM_CONF_F_GUILD"   "guild_id still clean with a 7th column"
 
 # ---------------------------------------------------------------------------
 # 3) Legacy 4-column row (no guild_id yet) — back-compat: channel still clean,
@@ -87,6 +95,7 @@ echo "=== 4-column row (pre-guild_id, back-compat) ==="
 swarm_conf_parse_line "acme | /p | BOT_ACME | 111222333444555666"
 assert_eq "111222333444555666" "$SWARM_CONF_F_CHANNEL" "channel clean with no 5th column"
 assert_eq ""                   "$SWARM_CONF_F_GUILD"   "guild empty when absent"
+assert_eq ""                   "$SWARM_CONF_F_ACCOUNT" "account empty in a 4-column row"
 
 # ---------------------------------------------------------------------------
 # 4) Whitespace handling — fields are trimmed regardless of padding.
@@ -129,6 +138,11 @@ if [ -f "$CONF" ]; then
       *) clean_guild=1 ;;
     esac
     assert_eq 1 "$clean_guild" "live row '$nm': guild has no embedded '|'"
+    case "$SWARM_CONF_F_ACCOUNT" in
+      *'|'*) clean_acct=0 ;;
+      *) clean_acct=1 ;;
+    esac
+    assert_eq 1 "$clean_acct" "live row '$nm': ACCOUNT has no embedded '|'"
   done < <(grep -vE '^[[:space:]]*(#|$)' "$CONF")
 else
   echo "  (skip: $CONF not present)"
@@ -158,6 +172,35 @@ if [ "$fragile" -eq 1 ]; then
   printf '  fixed-arity conf reads still present:\n%s\n' "$fragile_hits" >&2
 fi
 assert_eq 0 "$fragile" "no bin script uses a fixed-arity 4-var conf read"
+
+echo ""
+echo "=== INJ-1: a non-identifier TOKEN_VAR_NAME (field 3) is REJECTED (blanked) ==="
+# Field 3 is later deref'd by NAME via ${!tokvar} and spliced into the pane env
+# line; a value that is not a legal shell identifier is an injection sink that
+# would defeat F1 token isolation (ADR-0018). The parser must blank it — and the
+# check itself must NOT evaluate the value. Payloads are SINGLE-quoted here so the
+# TEST shell does not expand them; only the parser sees the literal string.
+SENTINEL="${TMPDIR:-/tmp}/inj1-sentinel.$$"
+rm -f "$SENTINEL"
+swarm_conf_parse_line 'evil | /r/e | BOT_X[$(touch '"$SENTINEL"')] | 111 | 999' 2>/dev/null
+assert_eq "" "$SWARM_CONF_F_TOKVAR" "array-subscript NAME[\$(...)] token-var is blanked"
+if [ -e "$SENTINEL" ]; then sent=EXECUTED; else sent=inert; fi
+assert_eq "inert" "$sent" "validating the token-var did NOT execute the \$(...) payload"
+rm -f "$SENTINEL"
+swarm_conf_parse_line 'evil2 | /r/e | BOT_X"; touch '"$SENTINEL"'; x=" | 111 | 999' 2>/dev/null
+assert_eq "" "$SWARM_CONF_F_TOKVAR" "quote-break token-var is blanked"
+if [ -e "$SENTINEL" ]; then sent=EXECUTED; else sent=inert; fi
+assert_eq "inert" "$sent" "the quote-break payload did NOT execute"
+rm -f "$SENTINEL"
+swarm_conf_parse_line 'e3 | /r/e | 1BADVAR | 111 | 999' 2>/dev/null
+assert_eq "" "$SWARM_CONF_F_TOKVAR" "leading-digit token-var is blanked"
+swarm_conf_parse_line 'e4 | /r/e | BOT-DASH | 111 | 999' 2>/dev/null
+assert_eq "" "$SWARM_CONF_F_TOKVAR" "dash (non-identifier) token-var is blanked"
+# Legitimate identifiers are preserved unchanged (no false positives).
+swarm_conf_parse_line 'good | /r/g | BOT_QOFI_PRODUCT | 111 | 999' 2>/dev/null
+assert_eq "BOT_QOFI_PRODUCT" "$SWARM_CONF_F_TOKVAR" "a valid identifier token-var is preserved"
+swarm_conf_parse_line 'good2 | /r/g | _UNDERSCORE_OK | 111 | 999' 2>/dev/null
+assert_eq "_UNDERSCORE_OK" "$SWARM_CONF_F_TOKVAR" "leading-underscore identifier is preserved"
 
 echo ""
 echo "=== Summary ==="

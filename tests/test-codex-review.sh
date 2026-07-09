@@ -89,6 +89,7 @@ assert_eq 0 "$RC" 'full run with subscription -> exit 0'
 assert_has 'CONTRARIAN-REVIEW' "$OUT" 'full run -> emits the codex advisory output'
 assert_has 'NEVER a gate' "$OUT" 'full run -> footer reminds advisory, not a gate'
 assert_has 'ARGV: exec' "$(cat "$ARGVLOG")" 'full run -> invoked codex exec'
+assert_has 'model_reasoning_effort=xhigh' "$(cat "$ARGVLOG")" 'full run -> effort pinned to MAX (xhigh)'
 assert_absent 'with-api-key' "$(cat "$ARGVLOG")" 'full run -> NEVER passes --with-api-key (no metered fallback)'
 
 echo ""

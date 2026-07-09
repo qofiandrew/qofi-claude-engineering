@@ -30,6 +30,12 @@
 #                        (engineering-cto / cpo / company-brain). Default
 #                        is engineering-cto when omitted; no marker is
 #                        written. Threaded to swarm-init.
+#   --profile <name>     engineering-cto-only profile overlay (frontend /
+#                        backend; ADR-0013). Threaded to swarm-init, which
+#                        stamps .claude/swarm-profile and composes a
+#                        stack-specific overlay onto CLAUDE.md. v1 'backend'
+#                        is label-only. Refused with a non-engineering-cto
+#                        --type. Omit for no profile.
 #   --bot-user-id <id>   the new swarm's Discord BOT USER id (== the app's
 #                        Application ID). For engineering-cto swarms this is
 #                        written into cto-watcher/config.json so the CTO
@@ -52,7 +58,11 @@ fi
 TOKENS="$SWARM_HOME/tokens.env"
 CONF="$SWARM_HOME/swarm.conf"
 OWNER_ID="${SWARM_OWNER_DISCORD_ID:-1507069153335443608}"
-ACCESS="$HOME/.claude/channels/discord/access.json"
+# ACCESS (the new swarm's access.json) is the account-resolver's job, never a
+# hand-built $HOME/.claude path. It's resolved from the new swarm's account
+# AFTER swarm-lib.sh is sourced below — swarm-add adds the default (empty)
+# account for now, which the resolver maps byte-for-byte to today's path
+# (honoring SWARM_ACCESS_FILE). ACCESS is first USED in phase 4d, long after.
 PLUGIN_KEY="discord-b2b@qofi-swarm"
 
 # cto-watcher bus wiring. An engineering-cto swarm only rides the
@@ -71,8 +81,24 @@ SCRIPT_DIR_EARLY="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=swarm-lib.sh
 . "$SCRIPT_DIR_EARLY/swarm-lib.sh"
 
+# Resolve the access.json for the account this swarm is being added with. There
+# is no --account flag yet (Phase 2+), so the new swarm gets the DEFAULT account
+# — resolve "" → SWARM_ACCT_ACCESS_FILE, which the resolver maps to exactly
+# today's $HOME/.claude/channels/discord/access.json (honoring SWARM_ACCESS_FILE
+# if set). A labeled account would land in $HOME/.claude-accounts/<label>/...
+# instead. This is the SOLE constructor of the path — never hand-built here.
+# The rc-check is a no-op today (the literal "" always resolves) but is here so a
+# future --account flag that threads a VARIABLE label is fail-safe by default
+# (refuse rather than read a stale SWARM_ACCT_ACCESS_FILE) — same discipline as
+# the WORKING-rail consumers (ADR-0018, Phase-2 Finding 1).
+if ! swarm_account_resolve ""; then
+  echo "swarm-add: could not resolve the account's access.json path" >&2
+  exit 1
+fi
+ACCESS="$SWARM_ACCT_ACCESS_FILE"
+
 usage() {
-  sed -n '1,44p' "$0"
+  sed -n '1,50p' "$0"
   exit "${1:-0}"
 }
 
@@ -87,6 +113,7 @@ CHANNEL=""
 ROTATE_TOKEN=0
 SKIP_WALKTHROUGH=0
 TYPE=""
+PROFILE=""
 BOT_USER_ID=""
 POS_COUNT=0
 
@@ -99,6 +126,11 @@ while [ $# -gt 0 ]; do
       TYPE="$2"; shift 2 ;;
     --type=*)
       TYPE="${1#--type=}"; shift ;;
+    --profile)
+      [ $# -ge 2 ] || { echo "swarm-add: --profile requires a value" >&2; usage 1; }
+      PROFILE="$2"; shift 2 ;;
+    --profile=*)
+      PROFILE="${1#--profile=}"; shift ;;
     --bot-user-id)
       [ $# -ge 2 ] || { echo "swarm-add: --bot-user-id requires a value" >&2; usage 1; }
       BOT_USER_ID="$2"; shift 2 ;;
@@ -127,6 +159,26 @@ if [ -n "$TYPE" ]; then
       echo "swarm-add: unknown --type '$TYPE'"
       echo "  known types:"
       swarm_known_types | sed 's/^/    /'
+    } >&2
+    exit 1
+  fi
+fi
+
+# Fail-fast flag-level --profile check (ADR-0013). The AUTHORITATIVE refusal
+# (incl. an already-stamped repo of another type) lives in swarm-init, which
+# this script invokes in phase 4c; this catches the obvious cases early,
+# before the Discord walkthrough, so the operator isn't sent through the
+# portal only to be refused at stamp time.
+if [ -n "$PROFILE" ]; then
+  if [ "${TYPE:-engineering-cto}" != "engineering-cto" ]; then
+    echo "swarm-add: --profile is only valid for engineering-cto swarms (got --type '$TYPE')" >&2
+    exit 1
+  fi
+  if ! swarm_profile_is_known "$PROFILE"; then
+    {
+      echo "swarm-add: unknown --profile '$PROFILE'"
+      echo "  known profiles:"
+      swarm_known_profiles | sed 's/^/    /'
     } >&2
     exit 1
   fi
@@ -224,6 +276,7 @@ phase "Phase 0 — preflight"
 echo "  name:      $NAME"
 echo "  repo:      $REPO"
 echo "  type:      $EFFECTIVE_TYPE"
+[ -n "$PROFILE" ] && echo "  profile:   $PROFILE"
 echo "  channel:   ${CHANNEL:-(will prompt in phase 2)}"
 echo "  token var: \$$TOK_VAR (in $TOKENS)"
 if [ "$EFFECTIVE_TYPE" = "engineering-cto" ]; then
@@ -574,14 +627,14 @@ SCRIPT_DIR="$SCRIPT_DIR_EARLY"
 echo ""
 echo "  running swarm-init.sh against $REPO"
 echo "  ----------------------------------------------------------------"
-# Thread --type through to swarm-init so .claude/swarm-type gets stamped
-# before manifest_apply resolves the archetype. When TYPE is empty the
-# bare form preserves engineering-cto-default behavior.
-if [ -n "$TYPE" ]; then
-  "$SCRIPT_DIR/swarm-init.sh" "$REPO" --type "$TYPE" | sed 's/^/    /'
-else
-  "$SCRIPT_DIR/swarm-init.sh" "$REPO" | sed 's/^/    /'
-fi
+# Thread --type and --profile through to swarm-init so .claude/swarm-type and
+# .claude/swarm-profile get stamped before manifest_apply resolves the
+# archetype + profile. Build the arg list dynamically so the bare form (no
+# flags) preserves engineering-cto-default, no-profile behavior.
+INIT_ARGS=("$REPO")
+[ -n "$TYPE" ]    && INIT_ARGS+=(--type "$TYPE")
+[ -n "$PROFILE" ] && INIT_ARGS+=(--profile "$PROFILE")
+"$SCRIPT_DIR/swarm-init.sh" "${INIT_ARGS[@]}" | sed 's/^/    /'
 INIT_RC=${PIPESTATUS[0]}
 echo "  ----------------------------------------------------------------"
 if [ "$INIT_RC" -ne 0 ]; then
@@ -625,61 +678,24 @@ PY
 #       the watcher reposts CPO directives AS ITSELF, so the new CTO's
 #       bridge drops them unless the watcher id is allow-listed.
 # Both are idempotent. 4d above resets this channel's allowFrom to [owner];
-# we (re-)append the watcher id here, so a re-run is self-healing.
+# the wire script (re-)appends the watcher id here, so a re-run is
+# self-healing.
+#
+# The actual wiring is a THIN CALL into bin/swarm-bus-wire.sh (ADR-0015) — the
+# single shared, independently-runnable implementation of both halves. We pass
+# CTO_WATCHER_CONFIG / CTO_BUS_WATCHER_BOT_ID / SWARM_ACCESS_FILE through so the
+# script uses the exact same paths swarm-add resolved (and tests can override).
 if [ "$EFFECTIVE_TYPE" != "engineering-cto" ]; then
   echo ""
   echo "  4e) cto-watcher bus: SKIP (type '$EFFECTIVE_TYPE' is not a CTO; off the #cpo-cto-bus)"
 else
   echo ""
   echo "  4e) cto-watcher bus registration for CTO '$NAME'"
-
-  # Half 1 — ctoChannels entry in the watcher's config.json.
-  if [ ! -f "$CTO_WATCHER_CONFIG" ]; then
-    echo "  WARN: $CTO_WATCHER_CONFIG not found — skipping ctoChannels write."
-    echo "        Create it (cp cto-watcher/config.example.json cto-watcher/config.json),"
-    echo "        then re-run:"
-    echo "          bin/swarm-add.sh $NAME $REPO $CHANNEL --skip-walkthrough --bot-user-id ${BOT_USER_ID:-<bot-user-id>}"
-  elif [ -z "$BOT_USER_ID" ]; then
-    echo "  SKIP ctoChannels write: no bot user id on hand (bus already registered, or none supplied)."
-  else
-    python3 - "$CTO_WATCHER_CONFIG" "$NAME" "$CHANNEL" "$BOT_USER_ID" <<'PY' || { echo "swarm-add: FATAL — failed to update cto-watcher config.json" >&2; exit 2; }
-import json, os, sys
-path, name, channel, bot = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-with open(path) as f: cfg = json.load(f)
-ctos = cfg.setdefault("ctoChannels", {})
-prev = ctos.get(name)
-ctos[name] = {"channelId": channel, "botUserId": bot}
-tmp = path + ".tmp"
-with open(tmp, "w") as f:
-    json.dump(cfg, f, indent=2); f.write("\n")
-os.replace(tmp, path)
-with open(path) as f: json.load(f)  # validate
-verb = "already current" if prev == ctos[name] else "set"
-print("  ctoChannels['{}'] {} (channelId={}, botUserId={})".format(name, verb, channel, bot))
-PY
-  fi
-
-  # Half 2 — watcher bot id in this channel's access.json allowFrom (additive).
-  python3 - "$ACCESS" "$CHANNEL" "$CTO_BUS_WATCHER_BOT_ID" <<'PY' || { echo "swarm-add: FATAL — failed to add watcher id to access.json allowFrom" >&2; exit 2; }
-import json, os, sys
-path, channel, watcher = sys.argv[1], sys.argv[2], sys.argv[3]
-with open(path) as f: cfg = json.load(f)
-grp = cfg.setdefault("groups", {}).setdefault(channel, {"requireMention": False, "allowFrom": []})
-af = grp.setdefault("allowFrom", [])
-if watcher in af:
-    print("  access.json: watcher id {} already in allowFrom for channel {}".format(watcher, channel))
-else:
-    af.append(watcher)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(cfg, f, indent=2); f.write("\n")
-    os.replace(tmp, path)
-    with open(path) as f: json.load(f)  # validate
-    print("  access.json: added watcher id {} to allowFrom for channel {}".format(watcher, channel))
-PY
-
-  echo "  REMINDER: restart the cto-watcher so it loads the new ctoChannels entry"
-  echo "            (watcher-control skill / bin/cto-watch-*.sh)."
+  CTO_WATCHER_CONFIG="$CTO_WATCHER_CONFIG" \
+  CTO_BUS_WATCHER_BOT_ID="$CTO_BUS_WATCHER_BOT_ID" \
+  SWARM_ACCESS_FILE="$ACCESS" \
+    "$SCRIPT_DIR/swarm-bus-wire.sh" "$NAME" "$CHANNEL" "$BOT_USER_ID" \
+    || { echo "swarm-add: FATAL — bus wiring (swarm-bus-wire.sh) failed" >&2; exit 2; }
 fi
 
 # ---------------------------------------------------------------------------
@@ -856,6 +872,7 @@ cat <<EOF
 
   Swarm '$NAME' registered.
     repo:    $REPO
+    type:    $EFFECTIVE_TYPE${PROFILE:+  (profile: $PROFILE)}
     channel: $CHANNEL
     bot:     \$$TOK_VAR  (token in $TOKENS, chmod 600, gitignored)
     access:  $ACCESS  (group $CHANNEL -> owner $OWNER_ID, mention-gated)

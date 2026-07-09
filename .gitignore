@@ -15,3 +15,8 @@ bun.lock
 # Per-teammate git worktrees (CTO provisions before spawn;
 # never tracked in the integration tree).
 .claude/worktrees/
+
+# Failover default-split snapshot — runtime state captured by swarm-account.sh at
+# the first failover so --reset can restore the operator's intended account split.
+# Machine-local, never tracked (ADR-0018).
+.swarm-accounts-default

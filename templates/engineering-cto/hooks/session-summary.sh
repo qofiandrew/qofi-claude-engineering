@@ -41,8 +41,24 @@ __qofi_disabled() {
 __qofi_disabled && exit 0
 # --- end QOFI quality-hook runtime control ---------------------------------
 
-# Resolve the work tree (worktree-topology fix). Fail-OPEN: no git → nothing to write.
-ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+# Resolve the work tree from the hook payload's `cwd` (the STOPPING session's
+# working directory) — NOT `git rev-parse` on the process's inherited CWD, which
+# does not rebind to the stopping teammate's worktree and would write this
+# session's resume aid into the WRONG tree (a sibling worktree or the lead's main
+# tree). Extract cwd with python3 (repo idiom — permission-gate.sh does the same;
+# no jq dep). Fail-OPEN (exit 0): any unresolvable cwd → nothing to write —
+# unparseable/non-dict payload, no/null/non-string cwd, non-git cwd, or python3
+# absent all collapse to exit 0 (this is a resume aid, never a gate). See
+# tests/test-hooks-worktree-resolution.sh.
+PAYLOAD_CWD="$(printf '%s' "$EVENT" | python3 -c '
+import sys, json
+try:
+    print(json.load(sys.stdin).get("cwd") or "")
+except Exception:
+    print("")
+' 2>/dev/null)"
+[ -n "$PAYLOAD_CWD" ] || exit 0
+ROOT="$(git -C "$PAYLOAD_CWD" rev-parse --show-toplevel 2>/dev/null)" || exit 0
 cd "$ROOT" 2>/dev/null || exit 0
 [ -d .claude ] || exit 0           # not a stamped swarm repo — leave it alone
 

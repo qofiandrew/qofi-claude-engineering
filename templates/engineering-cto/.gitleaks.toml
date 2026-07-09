@@ -1,0 +1,46 @@
+# .gitleaks.toml — reviewed allowlist for VERIFIED test-fixture placeholders.
+# A REVIEWED ALLOWLIST OF VERIFIED TEST PLACEHOLDERS, not a suppression.
+#
+#  1. `[extend] useDefault = true` keeps the entire built-in gitleaks ruleset
+#     active — every default rule (generic-api-key, aws-access-token, stripe,
+#     etc.) still fires on non-allowlisted content.
+#  2. The allowlist is CONTENT-BOUND: a finding is allowed ONLY when the detected
+#     secret value announces itself as a throwaway placeholder by matching the
+#     `test-secret-*` shape. A real credential never matches it, so a real-looking
+#     secret committed anywhere — including under tests/ — STILL trips.
+#
+# WHY CONTENT-ONLY (no path bound) — version dependency, READ BEFORE EDITING:
+# an earlier revision bounded this by path AND content via
+#     [[allowlists]]
+#     condition = "AND"
+#     paths   = ['''tests/.*''']
+#     regexes = ['''test-secret-[A-Za-z0-9_-]+''']
+# That `[[allowlists]] condition = "AND"` (path + content) construct is honored
+# by gitleaks 8.30.x but NOT by the version CI pins — gitleaks 8.24.3 via
+# gitleaks-action@v2. There the AND allowlist did NOT suppress the fixtures and
+# the `verify` check stayed red. The primitive `[allowlist] regexes` form below
+# is honored by 8.24.3 (and is stable across versions), so the canonical template
+# uses the content-only primitive. Trade-off: a `test-secret-*` literal outside
+# tests/ would also be allowed — acceptable, because real credentials never match
+# the placeholder shape. If/when CI's pinned gitleaks moves to >= 8.30.x, the
+# tighter path+content AND form becomes available; until then, do NOT switch to it.
+
+[extend]
+useDefault = true
+
+[allowlist]
+# regexTarget = "line": match against the full source line, not just the
+# captured secret. Needed because the lockfile SRI allowlist (below) keys on
+# the `"integrity":` field context, which is outside the captured secret; the
+# test-secret rule is unaffected (the line always contains the placeholder).
+regexTarget = "line"
+regexes = [
+  '''test-secret-[A-Za-z0-9_-]+''',
+  # npm lockfile SRI integrity hashes ("integrity": "sha512-<base64>") are
+  # PUBLIC content checksums, not credentials — but their entropy trips the
+  # generic rules on every dep-adding commit, forcing a manual bypass+audit.
+  # CONTENT-BOUND: requires the literal integrity field context AND the SRI
+  # shape, so a real secret never matches; the CI referee scan still runs the
+  # full default ruleset on everything else as the backstop.
+  '''"integrity":\s*"sha(256|384|512)-[A-Za-z0-9+/=]+"''',
+]

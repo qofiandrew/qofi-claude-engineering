@@ -3,6 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "scripts": {
-    "test": "node --test"
+    "_comment_test": "Bun is the canonical runner (matches .claude/test-cmd): it runs BOTH the bun:test files (bridge/) and the node:test files (cto-watcher/) green. `node --test` cannot load bun:test and produced perennial false-reds on bridge/*.test.ts — do not reintroduce it.",
+    "test": "bun test"
   }
 }

@@ -98,11 +98,14 @@ is **effectively lost.**
   shell output, working notes. Never the thing you need the operator to read.
 - **Intra-swarm agent-to-agent communication is out of scope** here; this rule
   governs human I/O. Coordination inside the swarm uses the archetype's playbook.
-- **A Stop nudge backs this up (engineering-cto leads).** When a lead's response
-  cycle produces a substantive operator-facing reply but posts nothing to Discord,
-  a non-blocking nudge reminds it that the terminal is unmonitored — deliver via
-  the Discord reply tool (or a `.md` file per §*Message length*). The CPO is
-  exempt: its deliberate silence-by-default is correct, not a missed post.
+- **A Stop nudge backs this up.** When a response cycle produces a substantive
+  operator-facing reply but posts nothing to Discord, a non-blocking nudge reminds
+  the lead that the terminal is unmonitored — deliver via the Discord reply tool
+  (or a `.md` file per §*Message length*). The engineering-cto lead is nudged on
+  any such turn; the CPO is nudged **only on an operator-origin turn** (a prompt
+  from #qofi-product), never on a bus/CTO turn — its silence-by-default toward CTOs
+  is correct and stays unnudged. The nudge changes WHERE operator-facing output
+  goes, never WHEN the CPO speaks to a CTO.
 
 ## Message length — never truncate to fit (foundational)
 
@@ -144,7 +147,8 @@ correct move is always the file (where a limit exists) or the full inline messag
   branch-delete push (`--delete`), bulk push (`--all`), or any variant that
   rewrites or destroys shared history. **Force-push (`--force`/`-f`/
   `--force-with-lease`) of your own non-protected feature/worktree branch is
-  routine (rebase/squash) and auto-approved; to a protected branch it is
+  routine (rebase/squash) and auto-approved; to a protected branch OR to the
+  integration branch `dev` (shared history even where unprotected) it is
   destruction and denied** (ADR-0012). Routine push is archetype-shaped (see the
   archetype's own push rules); destruction of a protected branch or shared
   history is not.
@@ -204,12 +208,41 @@ the approach isn't working, and you don't see the next step.
   condition, not a backlog item, and the heavier mechanism isn't built until it
   fires.
 
-## Source of truth
-- `PROJECT_SPEC.md` and the ADRs in `docs/adr/` are authoritative **once they
-  exist**. On a new project the spec may be empty or absent — the CTO authors it
-  from the design conversation as the first build step (see `TEAM_LEAD.md`).
-  Docs are an output of the build, not a prerequisite. Once authored, a request
-  that contradicts the spec is an escalation, not a silent reinterpretation.
+## Source-of-truth mode
+
+Every repo runs in exactly **one** source-of-truth mode, declared by the
+`.claude/canon-mode` marker: absent or `local` → **local-canon** (the default,
+and the only mode ordinary self-contained repos ever need); `external` →
+**external-canon**, for products whose normative product canon lives in a
+sibling/external product repo. The rules below (§*Source of truth
+(local-canon)*) are the local-canon rules and remain unchanged for ordinary
+repos. In an external-canon repo, this manual additionally carries the
+**external-canon sections** (§*External canon sync*, §*Scoped module
+documentation*, and the repo's canon binding) — composed in at stamp time —
+and those sections **qualify** the local rules: in-repo living docs stay the
+best statement of *implementation* behavior, but they are scoped projections
+of external canon, not canon itself. If this manual contains no external-canon
+sections, this repo is local-canon and this paragraph is inert.
+
+## Source of truth (local-canon)
+- **Living docs are the current "how," stated directly.** `PROJECT_SPEC.md` and
+  the module docs (`modules/<module>.md`) are the single source of truth for how
+  the system behaves *now* — read them for current behavior, and they state it
+  outright. They are authoritative **once they exist**. On a new project the spec
+  may be empty or absent — the CTO authors it from the design conversation as the
+  first build step (see `TEAM_LEAD.md`). Docs are an output of the build, not a
+  prerequisite. Once authored, a request that contradicts the spec is an
+  escalation, not a silent reinterpretation.
+- **ADRs are the dated "why" archive, never read for current behavior.** The ADRs
+  in `docs/adr/` are an immutable record of *why* a one-way-door decision was
+  made on a given date — consulted for rationale, **not** for what the system
+  does today. A superseded ADR still stands as written; the living docs, not the
+  ADR, carry the current truth.
+- **No-defer rule.** A living doc never defers to an ADR for current behavior —
+  no "per ADR-N we do X." State X directly; at most footnote "(rationale:
+  ADR-N)." If you reach for an ADR to learn how the system behaves now, the
+  living doc is incomplete — surface it (build log) so the behavior is stated
+  where it belongs.
 
 ## Decisions
 - Follow `ESCALATION.md`. Default to action. Decide two-way doors yourself with
@@ -247,10 +280,13 @@ the approach isn't working, and you don't see the next step.
   (code, markdown links, citations). The rule is *only*: do not **lead** a message
   with your own channel name as an identifying prefix.
 
-## Verification (non-negotiable)
+## Test gate (non-negotiable)
 - Tests are part of the feature, not a follow-up. Write them as you build.
 - CI must be green before merge. Never merge red. Never weaken or delete a test
-  to make a build pass — that's a regression, escalate instead.
+  to make a build pass — that's a regression, escalate instead. (Blanket
+  error-suppression added to go green is the same regression — now flagged by R4
+  semgrep rules `qofi-no-blanket-ts-suppression`, `qofi-no-blanket-eslint-disable`,
+  and `qofi-no-blanket-noqa-py`.)
 - Before declaring done or escalating, self-review against the spec's scope (§3)
   and acceptance criteria (§4).
 
@@ -338,7 +374,7 @@ gravest behavioral violation in this manual.
 - **Deviating is a conscious call, logged.** If you skip TDD for a piece of work,
   that's a deliberate CTO-level decision noted in the build log (or your task
   notes), not a silent omission. "I'll add tests after" is the pattern that
-  produces untested code — the test is part of the feature (§*Verification*), not
+  produces untested code — the test is part of the feature (§*Test gate*), not
   a follow-up.
 - Pairs with §*Testing strategy*: TDD says *when* you write the test; the
   four-case mocking policy says *what you test against* (real vs boundary mock).
@@ -431,7 +467,9 @@ gravest behavioral violation in this manual.
 - **Default: shared database, single-owner tables.** Each table/schema is owned
   by exactly one module; only the owner writes it. Others read via the owner's
   contract surface — never by touching its tables. A `SELECT` against a peer's
-  table is the data-layer equivalent of reaching into its internals.
+  table is the data-layer equivalent of reaching into its internals. (`SELECT *`
+  now flagged by R4 semgrep rule `qofi-no-select-star-sql`; the timestamptz floor
+  by `qofi-prefer-timestamptz-sql`.)
 - **DB-per-service is an exception, not a default.** Use it only for a *concrete*
   operational need: independent scaling, replicas, isolation, or independent
   deploy/availability. The CTO authors an ADR per-module naming the real need;
@@ -468,25 +506,19 @@ value — don't introduce it.
 
 ## Data migrations
 
+The **safety floor** stays here; the step-by-step playbook is the
+**`data-migrations` on-demand skill** (`.claude/skills/data-migrations/SKILL.md`)
+— the expand-contract steps (expand → migrate → switch reads → contract), batched
+idempotent backfills, and at-scale online patterns (never lock a huge table,
+never load all rows into memory). The skill is model-invoked for migration work
+and inert in repos with no database. The floor rules below are **not** relaxed by
+it:
+
 - **Versioned and tested**, with a tested rollback. Migrations are files
   (numbered or timestamped) the project's migration tool runs in order — never
   ad-hoc `ALTER` typed against a live database.
-- **Expand-contract pattern** for any data-shape change:
-  1. **Expand** — add the new column / table / index. Reads stay on the old
-     shape; writes go to both.
-  2. **Migrate** — backfill the new shape from the old in batched, idempotent
-     passes.
-  3. **Switch reads** — readers move to the new shape; writes still go to both.
-  4. **Contract** — once nothing reads the old shape, remove it.
-  Each step is a separate, deployable migration; rollback is always possible
-  because no step is destructive while live consumers depend on the old shape.
 - **Test on a copy** — representative dataset, never real data. A migration that
   succeeded on 100 rows isn't proven for 100M.
-- **At scale** — never `ALTER` a huge table in a way that locks it, and never
-  load all rows into memory. Use batched / online patterns (chunked backfill
-  with checkpoints, online schema-change tools where available). The `§Error
-  handling` at-scale requirements (idempotency, resumability, per-item status,
-  streaming) apply to migrations like any batch op.
 - **Agents write and run migrations against dev/local only.** A prod migration
   is operator-only — an irreversible-action floor at the same tier as `git push`
   to `main`. **No agent process runs a migration against prod**; if you find
@@ -511,13 +543,18 @@ Distinguish two error classes; treat them differently.
 - **Fatal / systemic** — invalid config, dependency unreachable, auth failed,
   contract violated. **Fail fast, fail safe.** Default to deny/stop, never
   permissive. Surface immediately with full context (inputs, source location,
-  cause). Don't start or continue a doomed run.
+  cause). Don't start or continue a doomed run. (Unbounded loops with no stop
+  condition now flagged by R4 semgrep rules `qofi-while-true-no-stop-js` and
+  `qofi-while-true-no-stop-py`.)
 - **Per-item** — one file/record/row in a batch fails. **Isolate, log compactly
   (id + error class + one-line reason), continue the batch.** A single bad item
   never aborts the job. Aggregate failures into an end-of-run summary: counts,
   failures by category, list of failed ids for retry.
 - **Never silently swallow errors.** No empty `catch`, no ignored return codes,
-  no `try { ... } catch {}` that drops the cause.
+  no `try { ... } catch {}` that drops the cause. (Now enforced by R4 semgrep
+  rules `qofi-empty-catch-js`, `qofi-empty-except-py`,
+  `qofi-swallowed-promise-rejection-js`, and `qofi-fire-and-forget-async-js` in
+  `.claude/semgrep/qofi-doctrine.yml`.)
 - **Never silently leave corrupt or half-written state.** A failed item is
   marked failed and skipped — not partially written.
 - **Validate at contract surfaces.** Don't trust callers. Garbage in at the
@@ -532,74 +569,53 @@ Distinguish two error classes; treat them differently.
   premature-architecture trap (`§Greenfield`).
 
 **Hard requirements for at-scale data operations** (CTO verifies these are in
-the plan before approval):
-
-- **Idempotency.** Re-running is safe; reprocessing a completed item is a no-op.
-  The job survives a half-finished kill.
-- **Resumability / checkpointing.** A job that dies mid-run resumes from the last
-  checkpoint without redoing completed work.
-- **Per-item status tracking.** Retries touch only the failures; a "retry" that
-  re-runs the whole job is a defect.
-- **Stream, don't slurp.** Never load the entire dataset into memory. Batch with
-  explicit page/cursor; respect backpressure and provider rate limits.
-
-A batch operation lacking these is broken, not stylistically different. The test
-for "at scale" is "could this run against millions of items" — if yes, the four
-are non-negotiable.
+the plan before approval): **idempotency**, **resumability / checkpointing**,
+**per-item status tracking**, and **stream-don't-slurp**. A batch operation
+lacking these is broken, not stylistically different. The test for "at scale" is
+"could this run against millions of items" — if yes, the four are non-negotiable
+(and DoD-5 gates them). The detail — what each requires and how to build it — is
+the **`at-scale-ops` on-demand skill** (`.claude/skills/at-scale-ops/SKILL.md`),
+model-invoked for batch/at-scale work and inert otherwise. The two error classes
+above (fatal/systemic vs per-item) are general and stay on the floor; only the
+at-scale batch requirements live in the skill.
 
 ## Logging & observability
-- **Structured logs only** — JSON or key=value, never freeform concatenated
-  `print` / `console.log` strings. Logs at volume must be queryable and
-  aggregatable.
-- **Use levels correctly.**
-  - `ERROR` — needs attention; a human will look at this.
-  - `WARN`  — recoverable / degraded; aggregated, not flooded.
-  - `INFO`  — lifecycle milestones (job start, job end, phase change).
-  - `DEBUG` — off in normal operation; on only when diagnosing.
-- **Per-item failures are `WARN` and aggregated, not `ERROR` per item.** A
-  million-row job at 0.1% failure is 1,000 entries — `ERROR` per item is a log
-  explosion that buries the real signal.
-- **Never log secrets or PII.** Token, key, password, email, address, raw user
-  content — none of it. (See `§Secrets`.)
-- **Correlation IDs.** A batch run has a run-id; every item carries the same
-  run-id (plus its own item-id), so one job is traceable end-to-end across
-  whatever services it touches.
-- **Per-run summary** — at job end, one summary entry: counts (total / success /
-  failure), failure breakdown by category, duration, throughput. The artifact
-  ops looks at first.
 
-**Hard requirement**: structured logs + correct levels + run-IDs + per-run
-summary, on every at-scale job. Bigger observability infrastructure —
-dashboards, distributed tracing, metrics pipelines — is a CTO escalation when
-the operation warrants it, not a default. Traceability and the per-run summary
-are floor, not ceiling.
+**Hard requirement on every at-scale job**: structured logs (JSON / key=value,
+never freeform `print`) + correct levels + correlation/run-IDs + a per-run
+summary; per-item failures are `WARN` and aggregated, not `ERROR` per item; and
+**never log secrets or PII** (token, key, password, email, address, raw user
+content — see `§Secrets`). DoD-5 gates this. Bigger observability infrastructure
+(dashboards, distributed tracing, metrics pipelines) is a CTO escalation when the
+operation warrants it — traceability and the per-run summary are floor, not
+ceiling.
+
+The detail — level definitions, the run-id/item-id correlation scheme, and the
+per-run-summary shape — is the **`at-scale-ops` on-demand skill**
+(`.claude/skills/at-scale-ops/SKILL.md`), model-invoked for batch/at-scale work
+and inert otherwise. (The never-log-secrets rule is floor and applies
+everywhere, at scale or not.)
 
 ## Operability
 Every at-scale tool or module ships its **support controls as part of being
 done** — built per-module while context is fresh, not deferred to a sweep that
 never comes. The form (CLI / API / admin surface) is the CTO's call per module;
-the substrate is non-negotiable.
+the substrate is non-negotiable, and DoD-4 gates it. The required tiers:
 
 - **Operator tier**: rerun (failed items or whole job), resume from checkpoint,
-  query run/item status, manual intervention (skip a poison item, force-complete,
-  requeue, replay a range). All rides on the `§Error handling` idempotency +
-  checkpoint + per-item-status requirements — they exist *so* this tier is
-  possible.
-- **Customer-support tier**: a surface where support can look up a customer's or
-  item's current state and failure reason, and manually fix or reinstate a stuck
-  flow — so support resolves issues without paging engineering.
+  query run/item status, manual intervention. Rides on the `§Error handling`
+  idempotency + checkpoint + per-item-status requirements.
+- **Customer-support tier**: a surface where support can look up an item's current
+  state and failure reason, and manually fix or reinstate a stuck flow.
 - **Audit (hard requirement from day one)**: every support-tier manual
   intervention writes an audit entry — who acted, on whose data, when, why. Built
-  in *now*, even while access is developer-only; retrofitting it later is much
-  harder.
-- **Bulk-scope default is single-customer / single-item.** Bulk actions (replay
-  10,000 items, force-complete a range) are operator/CTO actions. Soft guideline
-  now; a hard requirement once real user or support access lands.
-- **Future-proof for an authz layer.** User access, roles, and permission
-  enforcement are a known future addition. Build admin and support surfaces so
-  an authz layer can sit in front of them later — don't hardcode wide-open
-  access. Do **not** build the permission system now unless the spec calls for
-  it.
+  in *now*, even while access is developer-only; retrofitting it is much harder.
+
+The detail — exactly what each tier surfaces, the bulk-scope default
+(single-customer / single-item), and future-proofing for a later authz layer — is
+the **`at-scale-ops` on-demand skill** (`.claude/skills/at-scale-ops/SKILL.md`),
+model-invoked for batch/at-scale work and inert otherwise.
+
 - **Promote a repeated operator move into a skill — on its second or third use,
   never first sight.** Operability ops are the canonical skill-earning class:
   deploy / rollback, health / smoke checks, log triage, env bring-up, incident
@@ -608,6 +624,23 @@ the substrate is non-negotiable.
   it has proven stable and consequential; capture it so the next operator (or
   session) runs it the proven way. Full bar: `§Skill standards`; a one-off stays
   bare.
+
+## Performance budgets (UI products)
+
+`§Operability` covers correctness at scale, not speed. For UI products a
+measurable **performance budget** guards the user experience. The floor
+requirement: **a perf-affecting UI change reports the measured before/after
+delta against the product's declared budget in its summary, and a regression
+past a ceiling is a flag the same class as a failing test — it escalates rather
+than ships silently.** This is the DoD hook; it gates the change even though the
+playbook detail lives off the floor.
+
+The how — what dimensions to budget (bundle/payload size, interaction/route
+latency, Core Web Vitals), how to measure the delta, and the on-demand (not
+always-on) invocation discipline — is the **`perf-budgets` on-demand skill**
+(`.claude/skills/perf-budgets/SKILL.md`), model-invoked for UI work that could
+move the numbers and inert in non-UI repos. Routine non-UI work doesn't pay
+this cost.
 
 ## Skill standards
 
@@ -736,7 +769,7 @@ so you never reason around it.
   Typecheck, lint, full suite + coverage floor, secret scan, and build run on
   every push to `dev` and are **required** on promotion to `main`. The Actions
   run is **ground truth** — an in-session or local green NEVER substitutes for it.
-  This mechanizes §*Verification*: evidence no agent and no tired operator can
+  This mechanizes §*Test gate*: evidence no agent and no tired operator can
   fabricate. A red `dev` run fires a Discord notification into the swarm's
   channel — failures reach the phone, not a dashboard.
 - **`main` is branch-protected; the only path in is a green release PR.** Direct
@@ -818,11 +851,15 @@ not done. Claiming done without addressing an item is an immediate flag.
 7. **CTO-reviewed.** Plan approved, summary verified against the contract, CTO
    accepted. The CTO marks done after review, not the agent on its own claim.
    **Before this passes**, the mandatory independent gates run (`TEAM_LEAD.md`
-   §*Independent review & security gates*): a fresh-context reviewer teammate
-   (≥80%-confidence findings), the security pass (gitleaks + semgrep +
-   security-reviewer), and the per-product coverage floor (default 80%). These
-   are the CTO's to run and clear; you make them passable by writing the tests
-   and keeping the diff clean.
+   §*Independent review & security gates*). The read-only review lenses fan out
+   as **parallel breadth** — a fresh-context reviewer teammate (≥80%-confidence
+   findings), the security pass (gitleaks + semgrep + security-reviewer), and the
+   edge-case lens run **concurrently**; the CTO synthesizes their findings. Then,
+   **serially**: fix → re-review, any adversarial deepening, and the merge. The
+   per-product coverage floor (default 80%) still gates. No gate is relaxed by
+   running the lenses in parallel — the security pass, coverage floor, and
+   reviewer are all still required. These are the CTO's to run and clear; you
+   make them passable by writing the tests and keeping the diff clean.
 
 Items 2 and 3 are mechanically enforced by hooks. Items 1, 4, 5, 6 cannot be
 hook-enforced and depend on the agent's honest affirmation plus the CTO's review.

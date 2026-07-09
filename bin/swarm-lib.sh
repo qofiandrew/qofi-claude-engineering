@@ -66,6 +66,7 @@ SWARM_CONF_F_REPO=""
 SWARM_CONF_F_TOKVAR=""
 SWARM_CONF_F_CHANNEL=""
 SWARM_CONF_F_GUILD=""
+SWARM_CONF_F_ACCOUNT=""
 
 # _swarm_trim STRING — strip leading/trailing whitespace (pure bash, no
 # subprocess; safe in the per-row hot loops swarm-typing/swarm-watch run).
@@ -85,17 +86,49 @@ swarm_conf_parse_line() {
   case "$_trimmed" in
     ''|'#'*) return 1 ;;
   esac
-  local _name _repo _tokvar _channel _guild _rest
+  local _name _repo _tokvar _channel _guild _account _engine _rest
   # Full known arity + `_rest` catch-all so a row with MORE columns than the
-  # current schema cannot corrupt the last named field (see header).
-  IFS='|' read -r _name _repo _tokvar _channel _guild _rest <<EOF
+  # current schema cannot corrupt the last named field (see header). ACCOUNT
+  # (field 6) is the multi-account partition label; absent in legacy 4/5-col
+  # rows → empty → the default account (today's behavior). Resolve it via
+  # swarm_account_resolve — never construct an account path by hand.
+  # ENGINE (field 7) selects the lead runtime: empty or 'claude' → the Claude
+  # Code lead (today's behavior, byte-identical launch); 'codex' → a Codex
+  # lead driven through codex-bridge/. Anything else falls back to 'claude'
+  # with a loud warning — a typo must not silently boot the wrong runtime.
+  IFS='|' read -r _name _repo _tokvar _channel _guild _account _engine _rest <<EOF
 $_line
 EOF
   SWARM_CONF_F_NAME="$(_swarm_trim "$_name")"
   SWARM_CONF_F_REPO="$(_swarm_trim "$_repo")"
   SWARM_CONF_F_TOKVAR="$(_swarm_trim "$_tokvar")"
+  # Field 3 (TOKEN_VAR_NAME) is later deref'd by NAME via ${!tokvar} (swarm-up /
+  # swarm-typing / swarm-watch) and spliced into the pane env line. A value that
+  # is not a legal shell IDENTIFIER is an injection sink: the array-subscript form
+  # NAME[$(...)] fires command substitution inside the launcher (which could
+  # re-source and exfiltrate the whole vault), and a quote-break escapes the pane
+  # env string — either defeats F1 token isolation (ADR-0018). A `case` match does
+  # NOT evaluate the value, so checking it is itself safe. Reject a malformed
+  # non-empty token-var by BLANKING it; the consumers' empty-token guards then skip
+  # the swarm (fail-safe) rather than deref a hostile name. (The OAUTH token-var is
+  # built by swarm_account_resolve from a charset-validated label, already safe.)
+  case "$SWARM_CONF_F_TOKVAR" in
+    '') : ;;                                   # empty is fine — guards skip the swarm
+    [0-9]* | *[!A-Za-z0-9_]*)                  # not ^[A-Za-z_][A-Za-z0-9_]*$ → reject
+      echo "swarm_conf_parse_line: refusing non-identifier TOKEN_VAR_NAME '$SWARM_CONF_F_TOKVAR' for swarm '$SWARM_CONF_F_NAME' (must match [A-Za-z_][A-Za-z0-9_]*); blanking it." >&2
+      SWARM_CONF_F_TOKVAR="" ;;
+  esac
   SWARM_CONF_F_CHANNEL="$(_swarm_trim "$_channel")"
   SWARM_CONF_F_GUILD="$(_swarm_trim "$_guild")"
+  SWARM_CONF_F_ACCOUNT="$(_swarm_trim "$_account")"
+  SWARM_CONF_F_ENGINE="$(_swarm_trim "$_engine")"
+  case "$SWARM_CONF_F_ENGINE" in
+    ''|claude) SWARM_CONF_F_ENGINE="claude" ;;
+    codex)     : ;;
+    *)
+      echo "swarm_conf_parse_line: unknown ENGINE '$SWARM_CONF_F_ENGINE' for swarm '$SWARM_CONF_F_NAME' (must be claude or codex); defaulting to claude." >&2
+      SWARM_CONF_F_ENGINE="claude" ;;
+  esac
   return 0
 }
 
@@ -425,6 +458,71 @@ swarm_type_of() {
   printf '%s\n' "engineering-cto"
 }
 
+# swarm_known_profiles — print the known engineering-cto profile names, one
+# per line. A profile is an ORTHOGONAL axis layered on top of the
+# engineering-cto archetype (ADR-0013): it does not replace the archetype, it
+# appends a stack-specific overlay to the composed CLAUDE.md only. A value
+# passed to swarm-init/swarm-add/swarm-new --profile is validated against this
+# list so a typo cannot silently misclassify. 'backend' is intentionally
+# present but LABEL-ONLY in v1 (today's engineering-cto IS the backend case),
+# so it ships no overlay fragment; 'frontend' is the only profile with overlay
+# content. Update this list when a new profile overlay is added under
+# templates/engineering-cto/profiles/.
+swarm_known_profiles() {
+  printf '%s\n' frontend backend
+}
+
+# swarm_profile_is_known PROFILE — return 0 iff PROFILE is in
+# swarm_known_profiles.
+swarm_profile_is_known() {
+  local p="$1"
+  swarm_known_profiles | grep -qxF "$p"
+}
+
+# swarm_profile_of REPO
+#
+# Resolve a repo's profile from the .claude/swarm-profile marker file.
+# Returns the profile name on stdout, or the EMPTY string when the marker is
+# absent or empty. Unlike swarm_type_of (which defaults to engineering-cto),
+# an absent profile resolves to NO profile — so a markerless swarm composes
+# byte-identically to a pre-profile swarm (ADR-0013: the no-op default that
+# keeps existing swarms untouched; do NOT change this to default to a value).
+# Whitespace stripped.
+swarm_profile_of() {
+  local repo="$1"
+  local marker="$repo/.claude/swarm-profile"
+  if [ -f "$marker" ]; then
+    local p
+    p="$(head -n 1 "$marker" 2>/dev/null | tr -d '[:space:]')"
+    if [ -n "$p" ]; then
+      printf '%s\n' "$p"
+      return 0
+    fi
+  fi
+  printf '%s' ""
+}
+
+# swarm_canon_mode_of REPO
+#
+# Resolve a repo's source-of-truth mode from the .claude/canon-mode marker.
+# Returns 'external' only when the marker exists and says so; ANYTHING else
+# (absent marker, empty, 'local', junk) resolves to 'local' — the no-op
+# default that keeps every existing swarm byte-identical (same posture as
+# swarm_profile_of; do NOT change the default). Whitespace stripped.
+swarm_canon_mode_of() {
+  local repo="$1"
+  local marker="$repo/.claude/canon-mode"
+  if [ -f "$marker" ]; then
+    local m
+    m="$(head -n 1 "$marker" 2>/dev/null | tr -d '[:space:]')"
+    if [ "$m" = "external" ]; then
+      printf 'external\n'
+      return 0
+    fi
+  fi
+  printf 'local\n'
+}
+
 # swarm_required_doctrine TYPE
 #
 # Emit the doctrine filenames (relative to the swarm repo root, one per
@@ -480,6 +578,145 @@ swarm_launch_brief() {
       printf '%s' "Read TEAM_LEAD.md, ESCALATION.md, CLAUDE.md and PROJECT_SPEC.md NOW, yourself, directly with the file-reading tool — read them into your OWN context. Do NOT delegate this to a workflow or to subagents: your operating doctrine must live in your context, not an ephemeral one, so read the files inline before doing anything else. You are the team lead (CTO) for this repo; operate per TEAM_LEAD.md. The human will hold a product design conversation with you over Discord and the spec may be empty for now — do NOT build during the conversation. When the human says to build, first author PROJECT_SPEC.md and the one-way-door ADRs from the conversation, confirm them with the human, then decompose and spawn the team. Keep the docs reconciled with the implementation as it proceeds, and message the human for any major spec decision."
       ;;
   esac
+}
+
+# swarm_effort_for TYPE
+#
+# Emit the `/effort` command swarm-up's launch_one() sends into the tmux pane
+# right after `claude` boots, per archetype. The CPO swarm is a single
+# conversational product agent that should NOT fan every turn out to a workflow,
+# so it launches at medium effort; every engineering CTO swarm stays on ultracode
+# (xhigh effort + automatic workflow orchestration). Effort is SESSION-ONLY
+# (ultracode has no settings.json / env / --effort form — see launch_one), which
+# is why it is a launch-time `/effort` send rather than config, and why this
+# helper is the single tuning point for per-archetype effort.
+#
+# Unknown / future types fall through to ultracode — the same fail-safe direction
+# as swarm_required_doctrine / swarm_launch_brief: a misclassified or future
+# swarm gets the engineering path, never a silent downgrade.
+swarm_effort_for() {
+  case "$1" in
+    cpo)
+      printf '%s' "/effort medium"
+      ;;
+    engineering-cto|*)
+      printf '%s' "/effort ultracode"
+      ;;
+  esac
+}
+
+# swarm_account_resolve LABEL — resolve an account label to ITS config dir,
+# projects dir, access.json, and vault token-var name. SINGLE SOURCE OF TRUTH:
+# every consumer that needs an account's paths/token derives all four from here
+# and NEVER hand-constructs a $HOME/.claude path. A missed site silently reads
+# the WRONG account's transcripts → the WORKING rail (repo_activity) disarms →
+# a live swarm is killed. A repo-wide grep-assert (tests/test-account-paths-
+# sole-constructor.sh) pins this function as the sole builder of those paths.
+#
+# Empty label = the DEFAULT account = today's behavior, byte-for-byte:
+#   CONFIG_DIR  $HOME/.claude          (keychain auth; no token var)
+#   PROJECTS    $HOME/.claude/projects
+#   ACCESS      $HOME/.claude/channels/discord/access.json
+#   TOKEN_VAR   ""   (empty → launch_one keeps keychain auth, no token export)
+# A non-empty <label> maps to an ISOLATED config dir + a vault token var:
+#   CONFIG_DIR  $HOME/.claude-accounts/<label>
+#   TOKEN_VAR   OAUTH_TOKEN_<LABEL_UPPER>   (lowercase→UPPER, '-'→'_')
+# CAVEAT (provisioning footgun, ADR-0018): the '-'→'_' fold means two labels that
+# differ ONLY by '-' vs '_' (e.g. 'max-a' and 'max_a') collapse to the SAME token
+# var (OAUTH_TOKEN_MAX_A) while keeping DISTINCT config dirs — a wrong-credential
+# risk. Operators must not create two accounts whose labels differ only by '-'/'_'.
+#
+# Sets (does not echo): SWARM_ACCT_CONFIG_DIR, SWARM_ACCT_PROJECTS_DIR,
+# SWARM_ACCT_ACCESS_FILE, SWARM_ACCT_TOKEN_VAR. Returns 0; 2 on a malformed
+# label (rejected BEFORE any path is built — a bad label must never name a dir).
+SWARM_ACCT_CONFIG_DIR=""
+SWARM_ACCT_PROJECTS_DIR=""
+SWARM_ACCT_ACCESS_FILE=""
+SWARM_ACCT_TOKEN_VAR=""
+swarm_account_resolve() {
+  local label="${1:-}"
+  if [ -z "$label" ]; then
+    # The DEFAULT account PRESERVES the env overrides the consumers honor today,
+    # so threading them through the resolver stays byte-identical:
+    #   CLAUDE_PROJECTS_DIR — the WORKING-rail projects dir (watch/restart/rotate/typing)
+    #   SWARM_ACCESS_FILE   — the access.json path (bus-wire/doctor; up/add/remove were
+    #                         bare → now uniformly honor it, identical when unset).
+    # LABELED accounts are isolated and ignore both (each lives under its own dir),
+    # so an override can never leak a labeled lane onto the default's transcripts.
+    SWARM_ACCT_CONFIG_DIR="$HOME/.claude"
+    SWARM_ACCT_PROJECTS_DIR="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
+    SWARM_ACCT_ACCESS_FILE="${SWARM_ACCESS_FILE:-$HOME/.claude/channels/discord/access.json}"
+    SWARM_ACCT_TOKEN_VAR=""
+    return 0
+  fi
+  # Validate the handle BEFORE building any path (same shape swarm-account-state
+  # trusts): leading alpha, then only [A-Za-z0-9_-].
+  case "$label" in
+    [A-Za-z]*) ;;
+    *) echo "swarm_account_resolve: invalid account label '$label' (need [A-Za-z][A-Za-z0-9_-]*)" >&2; return 2 ;;
+  esac
+  case "$label" in
+    *[!A-Za-z0-9_-]*) echo "swarm_account_resolve: invalid account label '$label' (need [A-Za-z][A-Za-z0-9_-]*)" >&2; return 2 ;;
+  esac
+  SWARM_ACCT_CONFIG_DIR="$HOME/.claude-accounts/$label"
+  SWARM_ACCT_PROJECTS_DIR="$SWARM_ACCT_CONFIG_DIR/projects"
+  SWARM_ACCT_ACCESS_FILE="$SWARM_ACCT_CONFIG_DIR/channels/discord/access.json"
+  SWARM_ACCT_TOKEN_VAR="OAUTH_TOKEN_$(printf '%s' "$label" | tr 'a-z-' 'A-Z_')"
+  return 0
+}
+
+# swarm_conf_set_account CONF NAME ACCOUNT — atomically rewrite field 6 (ACCOUNT)
+# of the swarm.conf row whose field-1 (name) trims to NAME, leaving every other
+# row, comment, and blank line BYTE-for-byte untouched. This is the per-swarm
+# persistence of a failover swap (ADR-0018): the conf rewrite IS the durable
+# "which account is this swarm on" — it sticks across restarts until the next cap.
+#
+# Reuses swarm-remove.sh's awk temp→mv idiom (comments/blanks/non-matching rows
+# pass through verbatim via the raw $0/$i fields), adapted to REWRITE field 6
+# instead of deleting the row. Arity-safe across legacy widths (tightening #2):
+#   - 4-/5-column rows are PADDED so the account always lands in field 6 (a 4-col
+#     row gains an empty guild field-5 so positions don't shift);
+#   - 6-column rows have field 6 replaced;
+#   - any field 7+ (the parser's _rest catch-all) is preserved verbatim.
+# Fields 1..5 are emitted from the RAW split ($i still carries each field's own
+# surrounding whitespace), so the operator's column spacing on this row's other
+# fields is preserved; only field 6 is (re)written.
+#
+# An EMPTY ACCOUNT restores the row to the DEFAULT account: a row that already had
+# no account (≤5 cols) is left verbatim; a row that had one (≥6 cols) has field 6
+# DROPPED (not left as a dangling empty field) so the result is a clean ≤5-col row.
+#
+# Returns 0 on a successful rewrite (atomic mv), 1 if NAME matched no data row
+# (conf left untouched), 2 on a write/mv failure. The CALLER validates the ACCOUNT
+# label (via swarm_account_resolve) — this helper is purely mechanical.
+swarm_conf_set_account() {
+  local _conf="$1" _name="$2" _acct="${3:-}"
+  local _tmp="$_conf.tmp.$$"
+  awk -F'|' -v n="$_name" -v acct="$_acct" '
+    /^[[:space:]]*(#|$)/ { print; next }
+    {
+      v=$1; gsub(/^[ \t]+|[ \t]+$/, "", v)
+      if (v != n) { print; next }
+      found=1
+      if (acct == "") {
+        if (NF <= 5) { print; next }          # already default → verbatim
+        out=$1
+        for (i=2; i<=5; i++) out = out "|" $i # drop field 6, keep 1..5 + 7+
+        for (i=7; i<=NF; i++) out = out "|" $i
+        print out; next
+      }
+      out=$1
+      for (i=2; i<=5; i++) out = out "|" (i<=NF ? $i : "")   # pad short rows to col 5
+      out = out "| " acct
+      for (i=7; i<=NF; i++) out = out "|" $i                 # preserve any 7+ verbatim
+      print out
+    }
+    END { exit (found ? 0 : 1) }
+  ' "$_conf" > "$_tmp"
+  local _rc=$?
+  if [ "$_rc" -ne 0 ]; then rm -f "$_tmp"; return 1; fi      # NAME not found → no change
+  if ! mv "$_tmp" "$_conf"; then rm -f "$_tmp"; return 2; fi
+  return 0
 }
 
 # swarm_bound_exports NAME CHANNEL — emit the shell `export` statements that
@@ -689,6 +926,51 @@ _swarm_is_hook() {
 
 manifest_apply_compose() {
   local src_list="$1" tgt_rel="$2"
+  # Profile overlay (ADR-0013) — engineering-cto only, CLAUDE.md only.
+  # When the repo's resolved profile has an overlay fragment on disk, append
+  # it as the FINAL compose source so the profile's stack-specific doctrine
+  # layers on top of the base teammate manual. THREE states fall out of one
+  # guard, by design:
+  #   - absent/empty profile        -> nothing appended; a markerless swarm
+  #     composes byte-identically to a pre-profile swarm (the no-op default)
+  #   - a profile with no fragment   -> nothing appended; v1 'backend' is
+  #     label-only (today's engineering-cto IS the backend case), so the
+  #     marker is a label and the compose is unchanged
+  #   - a profile WITH a fragment    -> appended (e.g. 'frontend')
+  # Gated on SWARM_APPLY_TYPE=engineering-cto so a non-engineering-cto compose
+  # (e.g. the cpo CLAUDE.md, same target name) is never touched even if a
+  # stray marker exists. This and the canon-mode overlay below are the ONLY
+  # dynamically-sourced compose inputs; every other source is the static
+  # '+'-joined list on the manifest line, which stays profile- and
+  # mode-agnostic (see templates/engineering-cto/manifest.tsv header +
+  # templates/_base/README.md).
+  if [ "$tgt_rel" = "CLAUDE.md" ] && \
+     [ "${SWARM_APPLY_TYPE:-}" = "engineering-cto" ] && \
+     [ -n "${SWARM_APPLY_PROFILE:-}" ]; then
+    local _overlay_rel="engineering-cto/profiles/${SWARM_APPLY_PROFILE}/CLAUDE.md"
+    if [ -f "$SWARM_HOME/templates/$_overlay_rel" ]; then
+      src_list="${src_list}+${_overlay_rel}"
+    fi
+  fi
+  # Canon-mode overlay (source-of-truth axis) — engineering-cto only,
+  # CLAUDE.md only, external mode only. Appends AFTER any profile overlay:
+  # first the shared external-canon doctrine fragment (template-sourced),
+  # then — post-compose, below — the repo-local canon binding, which names
+  # this repo's canon/spec repo and cannot live in templates/. A repo in
+  # 'local' mode (the default; absent/any-other marker) composes
+  # byte-identically to a pre-canon-mode swarm.
+  local _canon_binding=""
+  if [ "$tgt_rel" = "CLAUDE.md" ] && \
+     [ "${SWARM_APPLY_TYPE:-}" = "engineering-cto" ] && \
+     [ "${SWARM_APPLY_CANON_MODE:-local}" = "external" ]; then
+    local _canon_rel="engineering-cto/canon/CLAUDE.external-canon.md"
+    if [ -f "$SWARM_HOME/templates/$_canon_rel" ]; then
+      src_list="${src_list}+${_canon_rel}"
+    fi
+    if [ -f "$SWARM_APPLY_REPO/.claude/canon-binding.md" ]; then
+      _canon_binding="$SWARM_APPLY_REPO/.claude/canon-binding.md"
+    fi
+  fi
   local tgt="$SWARM_APPLY_REPO/$tgt_rel"
   local tmp
   tmp="$(mktemp -t swarm-compose.XXXXXX)" || {
@@ -701,6 +983,17 @@ manifest_apply_compose() {
     SWARM_RESULT_FATAL=1
     rm -f "$tmp"
     return 1
+  fi
+  # Repo-local canon binding: the ONE compose input sourced from the target
+  # repo itself (seeded by bin/swarm-canon-enable.sh, operator/CTO-owned).
+  # Appended last so the binding always terminates the composed manual.
+  if [ -n "$_canon_binding" ]; then
+    cat "$_canon_binding" >> "$tmp" || {
+      echo "  ERROR: compose failed appending canon binding for $tgt_rel" >&2
+      SWARM_RESULT_FATAL=1
+      rm -f "$tmp"
+      return 1
+    }
   fi
 
   if [ ! -e "$tgt" ]; then
@@ -1201,6 +1494,68 @@ _swarm_target_in_oo_subtree() {
   return 1
 }
 
+# _swarm_load_oo_from_list REPO — populate SWARM_OO_PREFIXES + SWARM_OO_FILES
+# from REPO's stamped .claude/operator-owned-paths (the same canonical list
+# manifest_apply writes via _swarm_stamp_operator_owned_list and the Layer-3
+# pre-commit hook reads: subtree-prefix entries end in `/`, exact-file entries
+# do not). After this, _swarm_target_in_oo_subtree classifies a repo-relative
+# path against EXACTLY the set manifest_apply will skip-and-never-commit.
+#
+# RESETS both vars first (so a stale set from an earlier call never leaks). A
+# MISSING or empty list yields EMPTY sets — so nothing classifies as operator-
+# owned and any caller's dirty-tree test fails SAFE to refuse. This is read-only
+# and independent of manifest_apply's own pre-walk (which resets and repopulates
+# these vars itself), so calling it before manifest_apply is harmless.
+_swarm_load_oo_from_list() {
+  local repo="$1" list="$1/.claude/operator-owned-paths" line
+  SWARM_OO_PREFIXES=""
+  SWARM_OO_FILES=""
+  [ -f "$list" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      ''|\#*) continue ;;
+      */)     SWARM_OO_PREFIXES="$SWARM_OO_PREFIXES $line" ;;
+      *)      SWARM_OO_FILES="$SWARM_OO_FILES $line" ;;
+    esac
+  done < "$list"
+  return 0
+}
+
+# swarm_dirty_classify_oo REPO — classify a repo's dirty working tree against
+# its operator-owned set. Reads `git status --porcelain` and prints, to stdout,
+# one line per dirty path that is NOT operator-owned (a sync-managed path:
+# doctrine / hooks / settings / gitignore / anything outside products etc.).
+# Empty stdout + a dirty tree => every dirty path is operator-owned (sync skips
+# them all and will not commit them). Renames are split so BOTH the old and new
+# path must be operator-owned. Return: 0 if the tree is dirty AND every dirty
+# path is operator-owned; 1 otherwise (clean tree, OR at least one sync-managed
+# path is dirty — printed). Unparseable/quoted paths fall through as NON-owned
+# (fail-safe to refuse). Caller must have loaded the OO set first
+# (_swarm_load_oo_from_list).
+swarm_dirty_classify_oo() {
+  local repo="$1" porcelain line path any_dirty=0 any_foreign=0
+  porcelain="$(git -C "$repo" status --porcelain 2>/dev/null)"
+  [ -n "$porcelain" ] || return 1   # clean tree: not "dirty-but-all-oo"
+  # Split each porcelain entry into its path(s): strip the 2-col status + space,
+  # and turn a rename "old -> new" into two paths so both must be operator-owned.
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    any_dirty=1
+    line="${line#???}"                 # drop the "XY " status prefix
+    case "$line" in
+      *" -> "*)
+        for path in "${line%% -> *}" "${line##* -> }"; do
+          _swarm_target_in_oo_subtree "$path" || { printf '%s\n' "$path"; any_foreign=1; }
+        done ;;
+      *)
+        _swarm_target_in_oo_subtree "$line" || { printf '%s\n' "$line"; any_foreign=1; } ;;
+    esac
+  done <<EOF
+$porcelain
+EOF
+  [ "$any_dirty" -eq 1 ] && [ "$any_foreign" -eq 0 ]
+}
+
 # _swarm_collect_oo_prefixes — manifest_walk callback that populates
 # SWARM_OO_PREFIXES (space-separated subtree prefixes, each ending in `/`)
 # and SWARM_OO_FILES (space-separated exact-file paths). Called in the
@@ -1316,6 +1671,15 @@ manifest_apply() {
   SWARM_APPLY_REPO="$repo"
   SWARM_APPLY_MODE="$mode"
   SWARM_APPLY_TYPE="$(swarm_type_of "$repo")"
+  # Orthogonal profile axis (ADR-0013): empty for markerless swarms (no-op).
+  # Consumed by manifest_apply_compose to optionally append a profile overlay
+  # to the composed CLAUDE.md (engineering-cto only).
+  SWARM_APPLY_PROFILE="$(swarm_profile_of "$repo")"
+  # Orthogonal source-of-truth axis: 'local' (default, no-op) or 'external'.
+  # Consumed by manifest_apply_compose to append the external-canon overlay
+  # + the repo-local canon binding to the composed CLAUDE.md
+  # (engineering-cto only). See docs/CANON-MODES.md.
+  SWARM_APPLY_CANON_MODE="$(swarm_canon_mode_of "$repo")"
   SWARM_RESULT_CHANGED=0
   SWARM_RESULT_DRIFT=0
   SWARM_RESULT_COLLISIONS=""
@@ -1327,7 +1691,7 @@ manifest_apply() {
   # enforced across every class, every --force flag).
   SWARM_OO_PREFIXES=""
   SWARM_OO_FILES=""
-  export SWARM_APPLY_REPO SWARM_APPLY_MODE SWARM_APPLY_TYPE
+  export SWARM_APPLY_REPO SWARM_APPLY_MODE SWARM_APPLY_TYPE SWARM_APPLY_PROFILE SWARM_APPLY_CANON_MODE
   manifest_walk _swarm_collect_oo_prefixes >/dev/null || return $?
   manifest_walk _manifest_apply_one || return $?
   [ "$SWARM_RESULT_FATAL" -eq 1 ] && return 1
@@ -1385,10 +1749,27 @@ settings_merge_swarm() {
   tmp="$(mktemp -t swarm-settings.XXXXXX)" || return 2
 
   # Run merger in python3, write result to $tmp, signal status via exit code.
-  python3 - "$target" "$template" "$tmp" "${check_only:-}" <<'PY'
+  # argv[5]: optional retired-rules file — permission rules doctrine has
+  # explicitly RETIRED; the merge REMOVES exact matches from the target's
+  # permissions.allow/deny (the merge is otherwise additive-only, so a rule
+  # doctrine walked back would persist in every stamped repo forever).
+  python3 - "$target" "$template" "$tmp" "${check_only:-}" "${SWARM_HOME:+$SWARM_HOME/templates/settings-retired.conf}" <<'PY'
 import json, sys, os
 
 target_path, template_path, out_path, check_only = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+
+retired = set()
+retired_path = sys.argv[5] if len(sys.argv) > 5 else ""
+if retired_path and os.path.exists(retired_path):
+    try:
+        with open(retired_path) as f:
+            for line in f:
+                line = line.split("#", 1)[0].strip()
+                if line:
+                    retired.add(line)
+    except Exception as e:
+        sys.stderr.write(f"settings_merge_swarm: retired-rules read failure: {e}\n")
+        sys.exit(2)
 
 def load(p):
     with open(p) as f:
@@ -1433,21 +1814,26 @@ for k, v in tpl_ep.items():
 if tpl_ep or tgt_ep:
     tgt["enabledPlugins"] = tgt_ep
 
-# --- permissions.allow: union + dedup, preserve order with new items appended ---
+# --- permissions.allow/deny: union + dedup, preserve order with new items
+# appended; then drop doctrine-RETIRED rules from both lists (the only
+# subtractive step in the merge, driven solely by settings-retired.conf) ---
 tpl_perm = tpl.get("permissions") or {}
 tgt_perm = tgt.get("permissions") or {}
-tpl_allow = list(tpl_perm.get("allow") or [])
-tgt_allow = list(tgt_perm.get("allow") or [])
-seen = set(tgt_allow)
-for item in tpl_allow:
-    if item not in seen:
-        tgt_allow.append(item)
-        seen.add(item)
+def union_rules(key):
+    tpl_list = list(tpl_perm.get(key) or [])
+    tgt_list = list(tgt_perm.get(key) or [])
+    seen = set(tgt_list)
+    for item in tpl_list:
+        if item not in seen:
+            tgt_list.append(item)
+            seen.add(item)
+    return [r for r in tgt_list if r not in retired]
 if tpl_perm or tgt_perm:
-    tgt_perm["allow"] = tgt_allow
+    tgt_perm["allow"] = union_rules("allow")
+    tgt_perm["deny"] = union_rules("deny")
     # Preserve any other fields the operator may have under permissions.
     for k, v in tpl_perm.items():
-        if k != "allow" and k not in tgt_perm:
+        if k not in ("allow", "deny") and k not in tgt_perm:
             tgt_perm[k] = copy.deepcopy(v)
     tgt["permissions"] = tgt_perm
 

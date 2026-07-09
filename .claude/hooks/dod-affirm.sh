@@ -83,7 +83,7 @@ for n in 1 2 3 4 5 6; do
     5) label="Scale" ;;
     6) label="No conflicts" ;;
   esac
-  pat="^\[DoD-${n}\] ${label}: (yes|n/a:.+)$"
+  pat="^\[DoD-${n}\] ${label}: (yes([[:space:]]*\|.*)?|n/a:.+)$"
   if ! printf '%s\n' "$CORPUS" | grep -Eq "$pat"; then
     missing="${missing}  [DoD-${n}] ${label}\n"
   fi

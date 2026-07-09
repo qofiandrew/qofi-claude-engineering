@@ -40,16 +40,24 @@ if __qofi_disabled; then
 fi
 # --- end QOFI quality-hook runtime control ---------------------------------
 
-# Extract the edited file path from the PostToolUse payload.
-FILE="$(printf '%s' "$EVENT" | python3 -c '
+# Extract the edited file path AND the session cwd from the PostToolUse payload,
+# one field per line (python3 — repo idiom, no jq dep). cwd resolves the work
+# tree the check runs in (see the worktree-topology note below).
+FILE=""; PAYLOAD_CWD=""
+{
+  IFS= read -r FILE
+  IFS= read -r PAYLOAD_CWD
+} < <(printf '%s' "$EVENT" | python3 -c '
 import json, sys
 try:
     e = json.load(sys.stdin)
 except Exception:
-    print(""); sys.exit(0)
+    print(); print(); sys.exit(0)
 ti = e.get("tool_input") or {}
-print(ti.get("file_path") or ti.get("path") or "")
-' 2>/dev/null)"
+c = lambda s: ("" if s is None else str(s)).replace("\r"," ").replace("\n"," ")
+print(c(ti.get("file_path") or ti.get("path")))
+print(c(e.get("cwd")))
+' 2>/dev/null)
 
 [ -z "$FILE" ] && exit 0          # nothing to check
 [ -f "$FILE" ] || exit 0          # file gone (e.g. a delete) — nothing to lint
@@ -61,13 +69,16 @@ case "$FILE" in
   *) exit 0 ;;
 esac
 
-# Resolve the work tree (worktree-topology fix — same as test-gate.sh).
-if ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"; then
-  cd "$ROOT" 2>/dev/null || exit 0
-else
-  ROOT="${CLAUDE_PROJECT_DIR:-$PWD}"
-  cd "$ROOT" 2>/dev/null || exit 0
-fi
+# Resolve the work tree from the payload cwd (worktree-topology — the edited file
+# lives in the invoking session's worktree, not the process's inherited CWD, so
+# the old `git rev-parse` resolution ran the per-file check against the WRONG
+# tree's toolchain/config). Extract done above with the file path. Fail-OPEN
+# (exit 0): any unresolvable cwd → skip the nudge — unparseable/non-dict payload,
+# no/null/non-string cwd, non-git cwd, or python3 absent all collapse to exit 0
+# (PostToolUse can't block anyway). See tests/test-hooks-worktree-resolution.sh.
+[ -n "$PAYLOAD_CWD" ] || exit 0
+ROOT="$(git -C "$PAYLOAD_CWD" rev-parse --show-toplevel 2>/dev/null)" || exit 0
+cd "$ROOT" 2>/dev/null || exit 0
 
 # Resolve the check command.
 CMD="${QOFI_QUALITY_CMD:-}"

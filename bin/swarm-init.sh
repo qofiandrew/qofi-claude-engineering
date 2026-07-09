@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # swarm-init.sh — scaffold a repo with the Claude swarm operating system.
-# Usage: swarm-init.sh /path/to/repo [--type <name>] [--force]
+# Usage: swarm-init.sh /path/to/repo [--type <name>] [--profile <name>] [--force]
 #
 # Source of truth is $SWARM_HOME/templates (default ~/claude-swarm/templates),
 # whose contents are enumerated in templates/<type>/manifest.tsv — the per-
@@ -16,6 +16,15 @@
 # misclassified. When --type is absent NO marker is written; swarm_type_of
 # falls back to the engineering-cto default, preserving back-compat for
 # existing swarms stamped before per-type dispatch existed.
+#
+# --profile <name> (ADR-0013) stamps .claude/swarm-profile — an ORTHOGONAL
+# axis layered on top of the engineering-cto archetype. It is valid ONLY for
+# engineering-cto swarms (refused against any other type, against the repo's
+# RESOLVED type) and validated against swarm_known_profiles (frontend /
+# backend). It composes a stack-specific overlay onto CLAUDE.md only; v1
+# 'backend' is label-only (no overlay). When absent NO marker is written and
+# the compose is byte-identical to a pre-profile swarm. Like --type, switching
+# an existing profile is refused.
 #
 # init-mode policy:
 #   - refresh-class artifacts (CLAUDE.md, TEAM_LEAD.md, ESCALATION.md,
@@ -42,6 +51,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 REPO=""
 TYPE=""
+PROFILE=""
 FORCE=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -52,8 +62,13 @@ while [ $# -gt 0 ]; do
       TYPE="$2"; shift 2 ;;
     --type=*)
       TYPE="${1#--type=}"; shift ;;
+    --profile)
+      [ $# -ge 2 ] || { echo "swarm-init: --profile requires a value" >&2; exit 1; }
+      PROFILE="$2"; shift 2 ;;
+    --profile=*)
+      PROFILE="${1#--profile=}"; shift ;;
     -h|--help)
-      sed -n '1,32p' "$0"; exit 0 ;;
+      sed -n '1,40p' "$0"; exit 0 ;;
     --*)
       echo "swarm-init: unknown flag: $1" >&2; exit 1 ;;
     *)
@@ -94,6 +109,34 @@ if [ -n "$TYPE" ]; then
   fi
 fi
 
+# Validate --profile early (ADR-0013), before any marker write — refusal
+# leaves no partial state, mirroring the --type validation above. A profile
+# is an engineering-cto-only ORTHOGONAL axis: refuse it against any other
+# archetype (checked against the repo's RESOLVED type, so an already-cpo
+# repo is caught even without --type), and refuse an unknown profile.
+# Validation is purely against swarm_known_profiles — a label-only profile
+# (v1 'backend') legitimately has NO overlay fragment on disk, so unlike
+# --type we do NOT require a templates/ path to exist.
+if [ -n "$PROFILE" ]; then
+  EFFECTIVE_TYPE="${TYPE:-$(swarm_type_of "$REPO")}"
+  if [ "$EFFECTIVE_TYPE" != "engineering-cto" ]; then
+    {
+      echo "swarm-init: --profile is only valid for engineering-cto swarms"
+      echo "            (resolved type: '$EFFECTIVE_TYPE'). A profile is an"
+      echo "            engineering-cto overlay; it does not apply to other archetypes."
+    } >&2
+    exit 1
+  fi
+  if ! swarm_profile_is_known "$PROFILE"; then
+    {
+      echo "swarm-init: unknown --profile '$PROFILE'"
+      echo "  known profiles:"
+      swarm_known_profiles | sed 's/^/    /'
+    } >&2
+    exit 1
+  fi
+fi
+
 echo "Scaffolding swarm files into $REPO"
 
 # Stamp .claude/swarm-type BEFORE manifest_apply so swarm_type_of()
@@ -116,6 +159,31 @@ if [ -n "$TYPE" ]; then
   if [ "$EXISTING_TYPE" != "$TYPE" ]; then
     printf '%s\n' "$TYPE" > "$REPO/.claude/swarm-type"
     echo "  stamped: .claude/swarm-type = $TYPE"
+  fi
+fi
+
+# Stamp .claude/swarm-profile BEFORE manifest_apply so swarm_profile_of()
+# inside the apply resolves to the requested profile (ADR-0013). Same
+# refuse-to-switch guard as the type marker: changing a swarm's profile is
+# not supported (it would mix doctrine overlays). Validated above.
+if [ -n "$PROFILE" ]; then
+  mkdir -p "$REPO/.claude"
+  EXISTING_PROFILE=""
+  if [ -f "$REPO/.claude/swarm-profile" ]; then
+    EXISTING_PROFILE="$(head -n1 "$REPO/.claude/swarm-profile" 2>/dev/null | tr -d '[:space:]')"
+  fi
+  if [ -n "$EXISTING_PROFILE" ] && [ "$EXISTING_PROFILE" != "$PROFILE" ]; then
+    {
+      echo "swarm-init: REFUSED — $REPO/.claude/swarm-profile is already '$EXISTING_PROFILE'"
+      echo "            but --profile '$PROFILE' was requested. Changing a swarm's"
+      echo "            profile is not supported. Remove the marker by hand if you"
+      echo "            really mean to switch."
+    } >&2
+    exit 1
+  fi
+  if [ "$EXISTING_PROFILE" != "$PROFILE" ]; then
+    printf '%s\n' "$PROFILE" > "$REPO/.claude/swarm-profile"
+    echo "  stamped: .claude/swarm-profile = $PROFILE"
   fi
 fi
 

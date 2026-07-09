@@ -195,3 +195,336 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   operator full-diff review → compose green → canary reserve-backend-2 →
   `swarm-update`. Per-product CI referee + branch protection + Railway staging is
   a separate operator-run per-repo checklist.
+- `2026-06-14` — frontend|backend **profile axis** added (ADR-0013), an
+  orthogonal selector layered on top of the engineering-cto archetype. New
+  per-repo `.claude/swarm-profile` marker + `swarm_known_profiles` /
+  `swarm_profile_is_known` / `swarm_profile_of` in `swarm-lib.sh` (the resolver
+  defaults to EMPTY, deliberately NOT mirroring `swarm_type_of`'s
+  default-to-a-value, so markerless swarms are untouched). The overlay is
+  injected by `manifest_apply_compose` as the final compose source for
+  `CLAUDE.md` only — the ONE dynamically-sourced compose input; the manifest
+  `CLAUDE.md` line is unchanged (header comment documents it). `--profile` is
+  threaded through `swarm-init` (authoritative validation: engineering-cto-only
+  against the repo's resolved type + refuse-to-switch) and
+  `swarm-add`/`swarm-new` (fail-fast flag check + passthrough). Scope is
+  CLAUDE.md-only: `swarm_launch_brief` / `swarm_required_doctrine` /
+  `swarm_effort_for` are untouched. Value set `{frontend, backend}`: `backend`
+  is **label-only** (today's engineering-cto IS the backend case — no overlay
+  fragment, composes byte-identically to base, proven by test); `frontend`
+  carries the only overlay — a visual-surface boundary (presentational layer
+  only; data/`lib/`/API/business logic off-limits → escalate) and a
+  preview-in-review amendment (the convergence review checks the rendered
+  preview URL, not the diff alone). Additive-only: no existing swarm
+  retro-assigned. New test `test-swarm-profile-dispatch.sh` (CLI contract +
+  real-pipeline byte-identity) and a frontend round-trip in
+  `test-doctrine-compose.sh`; new fixture
+  `CLAUDE.engineering-cto.frontend.expected.md`. Docs: README §6,
+  `_base/README.md`, manifest header.
+- `2026-06-14` — **Rotation hardening** (branch `rotation-harden`). Four safety
+  gaps in the live account-rotation chain closed; synthetic-fixture tests only,
+  nothing rotated. (1) **Auth-check hole closed.** The credswap VERIFY default was
+  `claude --version` — proves the binary runs, not that the credential
+  authenticates, hollowing out restore-on-failure. New `bin/swarm-auth-probe.sh`
+  is now the default `SWARM_CREDSWAP_AUTHCHECK_CMD`: a REAL credential-exercising
+  probe with a **3-way verdict** — (a) authenticates → exit 0; (b) auth FAILS
+  (bad/expired) → exit 1 → credswap RESTORES the backup (exit 4); (c)
+  authenticates BUT is rate-limited → exit 75 → credswap KEEPS the swap and exits
+  **7** (ring-exhaustion signal — restoring would thrash to the also-capped prior
+  account). The (b)-vs-(c) split is the crux and is proven by test. (2) **Real
+  rate-limit detector.** The authoritative on-limit signal IS observable here:
+  the watcher already reads it via `pane_state` rc=2 (paused-limit). New
+  `bin/swarm-limit-detect.sh` turns "any live swarm pane shows a known limit
+  message" into the poller's AT verdict; `--or-poll` makes the real signal the
+  hard stop and delegates to the burn-proxy poller (kept as the NEAR early
+  warning) otherwise. (3) **Observe/calibrate mode** (`swarm-rotate-tick.sh
+  --observe`): logs estimated-burn-vs-budget + the real signal each tick and
+  rotates NOTHING, so budgets can be tuned before going live. (4)
+  **Ring-exhaustion terminal state**: credswap 7 → rotate **6** (fleet NOT
+  relaunched on a capped account) → tick **6** — a LOUD, terminal stop that
+  escalates via `SWARM_ATTENTION_CMD` instead of thrash-rotating. New tests
+  `test-swarm-auth-probe.sh`, `test-swarm-limit-detect.sh`; augmented
+  `test-swarm-credswap.sh`, `test-swarm-rotate.sh`, `test-swarm-rotate-tick.sh`.
+  `swarm-usage-poll.sh` and the credswap secret-handling left untouched.
+
+  **Operator runbook delta (rotation).**
+  - **New env vars:**
+    - `SWARM_CREDSWAP_AUTHCHECK_CMD` — now defaults to `bin/swarm-auth-probe.sh`
+      (was an internal `claude --version`). Override only if you have a cheaper
+      credential-exercising auth ping; it MUST exit 0/1/75 per the 3-way contract.
+    - `SWARM_AUTH_PROBE_CMD` — the actual probe CALL `swarm-auth-probe.sh` runs
+      (default: a cheap `claude -p` round-trip). Wire to your cheapest
+      credential-touching call. `SWARM_LIMIT_PATTERNS` / `SWARM_AUTH_FAIL_PATTERNS`
+      tune the capped-vs-bad classification (limit patterns shared with
+      `pane_state`).
+    - `SWARM_POLL_CMD='…/swarm-limit-detect.sh --or-poll'` — set the tick's poll
+      seam to this to make the REAL limit signal authoritative (burn proxy stays
+      the NEAR warning). Leave unset to keep the proxy-only behavior.
+    - `SWARM_LIMIT_DETECT_CMD` — the real-limit detector the tick consults in
+      `--observe` (default `bin/swarm-limit-detect.sh`).
+    - `SWARM_ATTENTION_CMD` — escalation hook for **ring exhaustion** (every
+      account capped). Run with the reason in `$1`; wire to a notifier or to
+      `bin/swarm-attention.sh` from inside a swarm session. Unset → ring
+      exhaustion is still terminal (exit 6) and loud on stderr, just not flagged.
+  - **observe → calibrate → enable sequence (do this BEFORE live rotation):**
+    1. **Observe** — run `swarm-rotate-tick.sh --observe` on the live cadence
+       (e.g. the launchd interval), logging to a file, for a few days. Each tick
+       emits one greppable line, e.g.:
+       `swarm-rotate-tick: OBSERVE ts=2026-06-14T19:40:02Z proxy_verdict=NEAR proxy_exit=10 five_hour_pct=88 weekly_pct=41 worst_pct=88 worst_window=5h threshold_pct=85 account=max-a real_signal=OK real_exit=0 would_rotate=yes (NOT rotating: observe-mode)`.
+    2. **Calibrate** — compare `would_rotate`/`proxy_verdict` against
+       `real_signal`. Tune `SWARM_5H_TOKEN_BUDGET` / `SWARM_WEEKLY_TOKEN_BUDGET`
+       (and `SWARM_ROTATE_THRESHOLD_PCT`) so NEAR fires shortly BEFORE the real
+       limit (`real_signal=AT`), not long after or far too early.
+    3. **Enable** — only then drop `--observe` and wire `SWARM_CREDSWAP_CMD` (live
+       rotation still refuses without it). Keep `SWARM_ATTENTION_CMD` wired so a
+       fully-capped ring escalates to your phone instead of looping. On a ring
+       exhaustion alert: add a fresh account to `SWARM_ACCOUNTS` or wait for a
+       window reset, then clear the attention flag.
+- `2026-06-15` — **Hybrid multi-account: partition + cap-triggered failover**
+  ([ADR-0018](./docs/adr/ADR-0018-hybrid-account-partition-failover.md),
+  supersedes ADR-0016, amends ADR-0004). Built the substrate to pin each swarm to
+  an account (throughput) and to move only a capped account's swarms to a
+  non-capped one (resilience). **Ships INERT:** every path is gated on a non-empty
+  6th `swarm.conf` field `ACCOUNT`; the real rows ship empty, so an all-empty fleet
+  is byte-for-byte today's single-account-plus-rotation. Phases 1–3 (v1); the
+  lowest-USE telemetry selector is the Phase-4 seam (not built). Pieces:
+  (1) **Substrate** — `swarm_account_resolve` (sole constructor of every
+  `~/.claude` path; empty label = default, byte-identical) + `swarm_conf_set_account`
+  (atomic, arity-safe field-6 rewrite). All ~10 consumers thread the resolver
+  per-swarm; a malformed label fails SAFE on the WORKING rail (skip / treat-as-working
+  / refuse — Phase-2 Finding 1). (2) **`bin/swarm-account.sh`** — the per-swarm swap
+  actuator: validate → provision-check → **auth-probe the target** (reusing
+  `swarm-auth-probe.sh`'s 0/1/75 verdicts; never move onto a dead or capped token) →
+  checkpoint → atomic rewrite → restart, with **revert on a clean-boundary refusal**
+  and a `--reset` escape hatch. (3) **`swarm-limit-detect.sh --by-account`** — groups
+  live swarms by account, reports each account's cap verdict (an account is capped if
+  ANY of its swarms shows a limit pane). (4) **`bin/swarm-failover-target.sh`** — the
+  v1 FALLBACK selector (least-recently-capped round-robin among non-capped accounts;
+  never targets a capped one; ring-exhaustion terminal), behind
+  `SWARM_FAILOVER_TARGET_CMD` so Phase 4 swaps in the lowest-use selector additively.
+  Hysteresis lives behind the unwired `SWARM_ACCOUNT_HEADROOM_CMD` headroom seam and
+  **never blocks an evacuation** (the carve-out, pinned by test). (5) **Router** —
+  `swarm-rotate-tick.sh --failover`: detect → select → swap, spreading a capped
+  account's swarms across targets; the legacy global-clock whole-fleet path is
+  byte-unchanged (default mode). New tests `test-swarm-account.sh`,
+  `test-swarm-failover-target.sh`, `test-swarm-failover-tick.sh`,
+  `test-conf-rewrite-account.sh`; extended `test-swarm-limit-detect.sh`. Adversarial
+  review gate (per the dangerous WORKING-rail path) before merge.
+
+  **Operator runbook delta (multi-account — terms-gated, do NOT skip).**
+  - **Activation is a terms-cleared, operator-only act** — running more than one real
+    Max subscription in concurrent automation is what ADR-0004 flagged. The build
+    never crosses it. To go live: (a) put a `<label>` in a swarm's `ACCOUNT` field;
+    (b) create that account's isolated config dir `~/.claude-accounts/<label>`;
+    (c) add `OAUTH_TOKEN_<LABEL_UPPER>` to `tokens.env`. Until all three exist for a
+    label, that swarm stays on the default account.
+  - **F1 per-pane token isolation — CLOSED (see the 2026-06-15 F1 build-log entry).**
+    `launch_one` no longer blanket-sources the vault; each pane gets only its own
+    `DISCORD_BOT_TOKEN` (+ labeled: its `CLAUDE_CODE_OAUTH_TOKEN`) via a scoped
+    subshell source. **This is a LIVE change** — merge then RESTART the fleet to take
+    it effect before provisioning any real `OAUTH_TOKEN_*`.
+  - **New env seams:** `SWARM_FAILOVER_TARGET_CMD` (selector, default
+    `bin/swarm-failover-target.sh`), `SWARM_ACCOUNT_CMD` (swap actuator, default
+    `bin/swarm-account.sh`), `SWARM_ACCOUNT_CAPS_DIR` (per-account last-capped LRC
+    markers, default `~/.config/swarm/account-caps`), `SWARM_ACCOUNT_HEADROOM_CMD`
+    (Phase-4 headroom signal, unwired), `SWARM_HYSTERESIS_PCT` (default 15).
+  - **Drive failover from the tick:** `swarm-rotate-tick.sh --failover` (add `--force`
+    to move a working swarm, `--dry-run` to log the plan). It is additive — the
+    global-clock `swarm-rotate-tick.sh` (no flag) is unchanged.
+  - **`swarm-account.sh <name> <account>`** swaps one swarm by hand;
+    `swarm-account.sh --reset` restores the pre-failover split from the gitignored
+    `.swarm-accounts-default` snapshot (churn-free; captured at the first failover).
+  - **Co-location caveat (ADR-0018):** after an account's first cap, its swarms
+    spread to whatever targets were least-recently-capped and STAY there. Intentional
+    co-location dissolves on the first cap; `--reset` is the only way back.
+- `2026-06-15` — **F1 per-pane token isolation CLOSED** (ADR-0018 §Consequences;
+  the hard go-live prerequisite). The fleet used to `set -a; . '$TOKENS'` — auto-
+  exporting the WHOLE shared vault (every swarm's `BOT_*` and every account's
+  `OAUTH_TOKEN_*`) — so every pane could read every token. `bin/swarm-up.sh`
+  `launch_one` now isolates each pane through THREE layers: (1) the launcher no
+  longer sources the vault into its own process (a cold-start `tmux new-session`
+  starts the server as a CHILD of the launcher, so that would have leaked the vault
+  into panes by INHERITANCE — the first adversarial pass found exactly this, my
+  initial send-keys-only scoping did NOT close it); (2) the pane env line SCRUBS any
+  inherited `BOT_*`/`OAUTH_TOKEN_*` first (`unset IFS; for v in $(env|sed …); do
+  unset "$v"; done` — POSIX, IFS-robust, bash/zsh/sh); (3) each token is derived via
+  a SCOPED subshell source `export DISCORD_BOT_TOKEN="$(. '$TOKENS'; printf '%s'
+  "$<tokvar>")"` (same for a labeled account's `CLAUDE_CODE_OAUTH_TOKEN`), captured
+  by the assignment so the literal never enters the send-keys string or scrollback.
+  A companion sink was closed: `swarm_conf_parse_line` now charset-validates field-3
+  (`TOKEN_VAR_NAME`), blanking a non-identifier so a hostile `swarm.conf` (e.g.
+  `BOT_X[$(...)]`) can't execute in the launcher and re-exfiltrate the vault.
+  Blast-radius re-audited: the only in-pane vault consumers are `DISCORD_BOT_TOKEN`
+  (bridge MCP) and `CLAUDE_CODE_OAUTH_TOKEN` (claude); `cto-watcher` reads
+  `BOT_CPO_CTO_BUS` but is OUT-of-pane (own env), unaffected. Tests:
+  `tests/test-swarm-pane-token-isolation.sh` runs the REAL extracted launch line under
+  a CONTAMINATED env (vault inherited, no `env -i`, incl. a hostile-`IFS` case) and
+  asserts siblings/other-accounts scrubbed; INJ-1 block in
+  `tests/test-conf-parse-arity.sh` proves the field-3 validation blanks-without-
+  executing. Two adversarial-review passes (the second a real-`tmux` cold-start
+  repro) confirm closure; the first pass is why this entry has three layers, not one.
+  **NOT INERT — a LIVE change:** the operator must merge AND **restart the fleet** to
+  take effect, BEFORE any real `OAUTH_TOKEN_*` enters `tokens.env`. Gate green:
+  bun 142/0, shell 39/39 under bash 3.2.
+- `2026-06-15` — Activation tooling (ADR-0018, the operator's terms-gated go-live
+  path; the build still never crosses the gate). Three CC-tooled scripts + a runbook:
+  `bin/swarm-account-provision.sh <label>` idempotently builds an account's ISOLATED
+  config-dir skeleton (dir via `swarm_account_resolve` — the sole path constructor;
+  qofi-swarm marketplace + `discord-b2b` plugin record; a SYMMETRIC `access.json`, one
+  group per `swarm.conf` channel so a failover swap is a field edit + restart with no
+  access rewrite) — reads/writes NO token, never runs `setup-token`, prints the
+  operator's remaining manual steps. `bin/swarm-account-preflight.sh` is the readiness
+  gate: it REFUSES (exit 2) unless the on-disk `swarm-up.sh` IS the F1 launcher (greps
+  the scrub loop + scoped derive, rejects a live `set -a`), the substrate is present
+  (resolver / 6th field / atomic rewrite / swap actuator), and `tokens.env` holds no
+  `OAUTH_TOKEN_*` yet — checked by NAME only, the value is never read (pinned by test).
+  `bin/swarm-account-verify.sh` is the read-only independence canary: a structural
+  probe (each labeled account resolves a DISTINCT isolated dir + has a token) plus a
+  `--baseline`/`--check --moved <label>` pair that PASSes only when exercising one
+  account moves ONLY that account's usage; handles a missing token as SKIP, never a
+  crash; usage behind the `SWARM_ACCOUNT_USAGE_CMD` seam (ccusage default, degrades to
+  INCONCLUSIVE). `docs/ACTIVATION-RUNBOOK.md` is the ordered runbook (restart onto F1 →
+  preflight → provision → OPERATOR tokens → ratify+apply labels → restart → verify),
+  each step tagged CC-TOOLED or OPERATOR-ONLY, with a DRAFT label-assignment proposal
+  to ratify (not applied). FLOORS honored: built/tested against temp HOME + fixtures
+  only; no real token read/written, no live restart, no real `~/.claude-accounts`
+  touched (verified no leak). Tests: `tests/test-swarm-account-{provision,preflight,
+  verify}.sh`. Gate green: bun 142/0, shell 42/42 under bash 3.2.57. Branch merged to
+  `dev` (not main); F1 + this tooling land together. Restart is still the operator's —
+  merging does NOT make F1 live.
+- `2026-06-17` — `swarm-sync.sh` dirty-tree refusal made **operator-owned-aware**.
+  Root cause: the CPO continuously writes product specs into `products/` (operator-
+  owned), so its tree is near-always dirty; the old refusal blocked ANY non-empty
+  `git status`, so every routine sync refused it and it silently stayed on STALE
+  doctrine — yet `manifest_apply` SKIPS operator-owned in sync mode and the commit
+  set excludes it, so the refusal blocked a sync that provably wouldn't touch the
+  dirty files. Change (the dirty-tree block only): classify the dirt against the
+  repo's stamped `.claude/operator-owned-paths` via the existing canonical-prefix
+  matcher (`_swarm_target_in_oo_subtree`); ALL dirty paths operator-owned → PROCEED
+  with a note (sync skips + never commits them); ANY sync-managed path dirty →
+  REFUSE as before; `--force` still overrides; `--check` unaffected. Fail-safe: a
+  missing OO list yields an empty set, so classification errs to REFUSE. New helpers
+  `_swarm_load_oo_from_list` + `swarm_dirty_classify_oo` in `swarm-lib.sh`. Tested
+  (`tests/test-swarm-sync-operator-owned-dirty.sh`, 25 assertions: unit classifier +
+  end-to-end — products-only-dirty syncs without staging the dirt; a dirty doctrine
+  file still refuses; `--force` overrides). Gate green: bun 142/0, shell 43/43 under
+  bash 3.2.57. Branch-only (`fix/sync-operator-owned-dirty`); operator merges.
+- `2026-06-21` — CPO Stop nudge — the **mechanical backstop** behind the
+  doctrine-only "Discord is the only surface" fix (`0158441`). Symptom: the CPO
+  still intermittently answered the operator in the pane, not Discord — the
+  doctrine was correctly stamped and live, but nothing CAUGHT a missed post. The
+  engineering-cto `discord-reply-nudge.sh` exempted the CPO wholesale (its
+  silence-by-default toward CTOs made a naïve nudge nag the legitimate silence).
+  New `templates/cpo/hooks/discord-reply-nudge.sh` re-introduces the nudge
+  CPO-shaped: it anchors the turn on the LAST Discord-framed prompt (the bridge's
+  `<channel … chat_id="…">`, isMeta), and fires ONLY when that chat_id ==
+  `DISCORD_OPERATOR_CHANNEL` — an **operator-origin** turn — with a substantive
+  (≥150-char) final non-sidechain text and NO `reply` tool_use in the window. A
+  bus/CTO turn, an unknown/unset operator channel, a delivered reply (CPO or
+  teammate-sidechain), short/tool-only output, or any parse error → SILENT
+  (fail-open). It changes WHERE operator-facing output goes, never WHEN the CPO
+  speaks to a CTO; silence-by-default on the bus is untouched. Never blocks
+  (always exit 0). Wired under `hooks.Stop` in `cpo/settings.example.json` +
+  manifest `refresh` row (stamped by sync/init/onboard like every other hook).
+  Floor doctrine (`_base/CLAUDE.md` §"Reaching the operator") updated — the "CPO
+  is exempt" line was now false. Tests: `tests/test-cpo-discord-reply-nudge.sh`
+  (14 assertions: operator→nudge, bus→silent, current-turn windowing both
+  directions, delivered/short/tool-only/no-anchor/unset-channel/fail-open/
+  re-entry); compose fixtures regenerated (3). Gate green: bun 142/0, shell all
+  green. Branch-only (`feat/cpo-discord-reply-nudge`); **operator merges AND
+  restarts the qofi-product swarm** to make it live (a hook is read at launch).
+- `2026-07-02` — **Source-of-truth modes (local-canon | external-canon)** —
+  promoted the deployment-core canon-sync/module-doc pattern into the template
+  system (`docs/CANON-MODES.md`). New orthogonal `.claude/canon-mode` marker
+  (same no-op-default posture as the ADR-0013 profile axis): absent/`local` →
+  every existing swarm composes and validates byte-identically; `external` →
+  the composed CLAUDE.md appends `canon/CLAUDE.external-canon.md` (external
+  canon wins over module docs/code/tests; module docs are scoped projections;
+  read-order routing rule; classify-and-route-upstream drift rule) plus the
+  repo-local `.claude/canon-binding.md` naming the canon repo. New
+  `bin/swarm-canon-enable.sh` seeds `docs/CANON_SYNC.md`, `MODULE_INDEX`,
+  `TRACEABILITY_LEDGER`, `GAP_LEDGER`, and per-module
+  `docs/modules/<m>/{README,CANON_MAP,INTERFACES,INVARIANTS,OPEN_GAPS,TEST_MAP,
+  CODE_MAP}` packs (LIFECYCLE optional). New `canon-check.sh` TaskCompleted
+  gate (manifest + settings-merge): blocks on missing/placeholder CANON_SYNC
+  metadata, missing packs, dead CODE_MAP/TEST_MAP paths, INVARIANTS entries
+  lacking `tests:`/`gap:`, and `[adr-required]` gaps unrouted to GAP_LEDGER;
+  guaranteed no-op in local mode. Covered by `tests/test-canon-mode.sh`
+  (resolution, live compose injection, every gate failure class, enable-script
+  seeding/idempotency). First instance: `deployment-core`, bound to
+  `qofi-product/products/deployment-core` (normative canon: product ADRs,
+  requirements, live technical architecture).
+- `2026-07-08` — **Force-push per-target split + hook-fix upstreaming +
+  secret-scan lockfile allowlist** (operator-directed; deployment-core swarm
+  friction report). (1) *Permission gate / settings*: the settings deny layer
+  still blanket-denied all force-pushes, overriding ADR-0012's 2026-06-14
+  relaxation — split by target: canonical force forms to `main`/`dev` denied,
+  force to own `worktree-*` auto-allowed, everything else falls to the
+  classifier; classifier gains a NEVER-FORCE tier (`PROTECTED ∪ {dev}`) so
+  force-to-dev denies even where dev is unprotected; settings merge gains
+  `permissions.deny` union + a retired-rule removal channel
+  (`templates/settings-retired.conf`) so walked-back rules actually leave
+  stamped repos (merge was additive-only). ADR-0012 amendment logged. Tests:
+  `test-permission-gate-push-policy.sh` (116), new
+  `test-settings-merge-retired.sh` (10). (2) *dod-affirm #54*: the DoD-line
+  regex rejected `yes | <detail>` (template's `|` read as separator by agents)
+  — now accepts a trailing `| <detail>` after the mandatory leading verdict,
+  gate not weakened (new `test-dod-affirm-format.sh`, 9); and the hook now
+  resolves the affirming teammate's worktree HEAD from the payload `cwd`.
+  (3) *Payload-cwd upstreaming*: deployment-core's CTO fixes (#23/#26 —
+  test-gate/docs-check/canon-check/session-summary/quality-check/dod-affirm
+  resolve their work tree from the hook payload's `cwd`, fail-closed on the
+  two block-gates for unparseable payloads) adopted into the doctrine
+  templates verbatim, so the next sync no longer regresses them; the expanded
+  six-hook `test-hooks-worktree-resolution.sh` (35) adopted with it.
+  (4) *Secret-scan*: `.gitleaks.toml` allowlists npm lockfile SRI values
+  (`"integrity": "sha512-…"`, content-bound, `regexTarget = "line"`) — public
+  checksums, not credentials; every dep-adding commit had tripped the scan
+  into a CTO-sanctioned bypass. CI referee scan unchanged as backstop.
+- `2026-07-08` — **Session↔worktree homing — gates resolve the ASSIGNED tree,
+  fail-closed (operator ruling)** (deployment-core live incident: harness
+  re-homed teammate sessions into sibling worktrees; completion/idle gates
+  checked the wrong tree — false-blocking a clean agent against a sibling's
+  red tree (active re-fire loop) AND fail-OPEN passing a session homed in a
+  clean sibling while its assigned tree held an unverified completion). The
+  four gate hooks (test-gate, dod-affirm, canon-check, docs-check) now share
+  an assigned-tree resolver: a payload carrying `teammate_name`
+  (TaskCompleted/TeammateIdle carry it — verified against the installed CLI's
+  event schema) resolves the teammate's ASSIGNED tree — the optional
+  `.claude/worktree-assignments.tsv` override (`name<TAB>path`; `.` = main
+  tree) else the `.claude/worktrees/<name>` convention — with the main root
+  reachable from ANY sibling tree via `git rev-parse --git-common-dir`, else
+  `$CLAUDE_PROJECT_DIR`; the session's re-homeable cwd is a hint only (a
+  mismatch is surfaced as a re-homing NOTE). Solo/lead events (no
+  teammate_name) resolve from payload cwd. EVERY unresolvable case —
+  unparseable payload, no tree, no assigned worktree for the named teammate,
+  python3 absent — now BLOCKS as cannot-verify: the operator ruling
+  supersedes the earlier fail-soft-on-no-cwd posture on test-gate/dod-affirm
+  and the fail-open posture on docs-check (session-summary/quality-check stay
+  advisory fail-soft). TEAM_LEAD.md §Worktree isolation gains the homing
+  discipline (spawn/re-home into the assigned tree; assignments file is
+  CTO-owned). Tests: test-hooks-worktree-resolution.sh expanded to 47 —
+  assigned-tree kills for both live failure modes, tsv override + `.`
+  mapping, provisioning-gap block, CLAUDE_PROJECT_DIR fallback, posture
+  flips. Hooks stay bash-3.2-safe (single-quote-free python3 -c resolver).
+- `2026-07-09` — **Semgrep local-extension channel — closes the sync-clobber
+  gap** (flagged 2026-07-08; deployment-core was unsafe for full swarm-sync
+  because the manifest's semgrep `refresh` would clobber its repo-local
+  rules). Two-part fix: (1) the generic rule upstreamed —
+  `qofi-no-cross-module-private-import` (cross-module `private.ts` import in
+  src/ is an ERROR; mechanizes CLAUDE.md §Modular design "depend only on
+  contract surfaces"; inert where the convention is unused; origin
+  deployment-core, operator decision 2026-07-03) now lives in the doctrine
+  ruleset (12 rules). (2) New seed-class manifest artifact
+  `.claude/semgrep/qofi-local.yml` (from `qofi-local.template.yml`) — seeded
+  once, NEVER refreshed: the CTO's channel for repo-structural rules
+  (symbol-keyed guards etc.) that must survive doctrine stamps;
+  `bin/security-scan.sh` includes it automatically when present (bash-3.2
+  array args). deployment-core reconciled: its symbol-keyed
+  `qofi-no-cross-module-private-import-credential-vault` moved to its
+  qofi-local.yml, doctrine file reset to template, CI workflow passes both
+  configs; verified — 13 rules valid, rule-set identity vs the old combined
+  file, CI blocking gate (--severity ERROR --error) green before and after,
+  and the apparent WARN delta proven a /tmp-prefix artifact of nosemgrep
+  path-derived rule ids, not a behavior change. deployment-core is now SAFE
+  for full swarm-sync. Tests: test-security-scan.sh 14 PASS (+3: local
+  ruleset passed as extra --config iff present).

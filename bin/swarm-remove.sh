@@ -14,9 +14,16 @@ if [ -z "${SWARM_HOME:-}" ] || [ ! -d "${SWARM_HOME:-}/templates" ] || [ ! -f "$
   echo "swarm-remove: SWARM_HOME unset or wrong — export SWARM_HOME=/Users/aschettino/qofirepos/qofi-claude-engineering" >&2
   exit 1
 fi
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=swarm-lib.sh
+. "$SCRIPT_DIR/swarm-lib.sh"
+
 CONF="$SWARM_HOME/swarm.conf"
 STATE_DIR="${SWARM_STATE_DIR:-$HOME/.config/swarm}"
-ACCESS="$HOME/.claude/channels/discord/access.json"
+# ACCESS (which account's access.json holds this channel's group) is resolved
+# from the removed swarm's account — swarm.conf field 6, parsed below from the
+# matched row — never a hand-built $HOME/.claude path. An empty account (every
+# row today) resolves byte-for-byte to today's path.
 PREFIX="swarm"
 
 usage() { echo "usage: swarm-remove.sh <name>" >&2; exit 1; }
@@ -35,6 +42,16 @@ LINE="$(awk -F'|' -v n="$NAME" '
 REPO="$(echo    "$LINE" | awk -F'|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2 }')"
 TOK_VAR="$(echo "$LINE" | awk -F'|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $3); print $3 }')"
 CHANNEL="$(echo "$LINE" | awk -F'|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $4); print $4 }')"
+ACCOUNT="$(echo "$LINE" | awk -F'|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $6); print $6 }')"
+
+# Resolve the removed swarm's account → its access.json. The resolver is the
+# SOLE constructor of the path: empty account → today's $HOME/.claude/... ,
+# a label → that account's isolated dir.
+swarm_account_resolve "$ACCOUNT" || {
+  echo "swarm-remove: invalid account '$ACCOUNT' in swarm.conf row for '$NAME'" >&2
+  exit 1
+}
+ACCESS="$SWARM_ACCT_ACCESS_FILE"
 
 cat <<EOF
 About to remove swarm '$NAME':

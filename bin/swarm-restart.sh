@@ -37,7 +37,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SWARM_UP="${SWARM_UP_BIN:-$SCRIPT_DIR/swarm-up.sh}"
 PREFIX="${SWARM_TMUX_PREFIX:-swarm}"
 TMUX_BIN="${SWARM_TMUX_BIN:-tmux}"
-CLAUDE_PROJECTS="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
+# The projects dir is resolved from THIS swarm's account (field 6) below, after
+# we know NAME's conf row — not from a global. swarm_account_resolve maps the
+# account label to its projects dir; the empty (default) account resolves to
+# ${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}, byte-identical to the value
+# this script used before the multi-account partition.
 STALE_SECONDS="${SWARM_STALE_SECONDS:-300}"
 
 # shellcheck source=swarm-lib.sh
@@ -94,6 +98,38 @@ REPO="$(grep -vE '^[[:space:]]*(#|$)' "$CONF" \
         if (v == n) { r=$2; gsub(/^[ \t]+|[ \t]+$/, "", r); print r; exit } }
   ')"
 [ -z "$REPO" ] && { echo "swarm-restart: could not resolve repo path for '$NAME' in $CONF" >&2; exit 1; }
+
+# Resolve THIS swarm's projects dir from ITS account (field 6). We re-parse the
+# matching conf row through swarm_conf_parse_line (the single source of truth for
+# the column schema) to read the account label, then swarm_account_resolve — the
+# SOLE constructor of account paths — maps it to the projects dir. Empty account
+# → ${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects} (default, byte-identical to
+# the pre-partition global); labeled → $HOME/.claude-accounts/<label>/projects.
+# Resolving from NAME's OWN account is what keeps the WORKING safety rail
+# (repo_activity below) from reading another account's transcripts — which would
+# make a working swarm look idle and let restart tear it down.
+ACCOUNT=""
+while IFS= read -r _line; do
+  swarm_conf_parse_line "$_line" || continue
+  if [ "$SWARM_CONF_F_NAME" = "$NAME" ]; then
+    ACCOUNT="$SWARM_CONF_F_ACCOUNT"
+    break
+  fi
+done < <(grep -vE '^[[:space:]]*(#|$)' "$CONF")
+if swarm_account_resolve "$ACCOUNT"; then
+  CLAUDE_PROJECTS="$SWARM_ACCT_PROJECTS_DIR"
+else
+  # Invalid account label in this swarm's conf row → we cannot determine its
+  # projects dir, so the WORKING-rail check below would read a stale/foreign dir
+  # and could tear down a working swarm. Fail SAFE: refuse unless --force.
+  if [ "$FORCE" -eq 1 ]; then
+    echo "swarm-restart: WARNING — '$NAME' has an invalid account '$ACCOUNT'; cannot probe activity. Proceeding because --force (any in-process work may be lost)." >&2
+    CLAUDE_PROJECTS=""   # no safe probe; the rail will note 'dir not found' and proceed
+  else
+    echo "swarm-restart: REFUSED — '$NAME' has an invalid account '$ACCOUNT' in swarm.conf; cannot safely probe its activity before restarting. Fix the ACCOUNT field, or pass --force to restart anyway (risking in-process work)." >&2
+    exit 2
+  fi
+fi
 
 SESS="${PREFIX}-${NAME}"
 

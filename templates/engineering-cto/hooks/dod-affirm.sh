@@ -22,8 +22,16 @@
 # answer is no — that is a §Honesty violation that the CTO must catch at
 # review. This hook is the mechanical floor; honesty + review is the ceiling.
 #
-# Fail-safe: on any parse failure or read error, BLOCK (exit 2) and surface
-# "couldn't verify affirmation, rerun". Never fail open on a done-gate.
+# Posture (decided at the tree-resolution point; operator ruling 2026-07-08):
+#   1. Payload unparseable / no tree resolvable / no assigned worktree for the
+#      named teammate / python3 absent → BLOCK (exit 2, cannot-verify). A
+#      done-gate never passes or silently skips on wrong-tree ambiguity — the
+#      fail-open corner (passing against a sibling's clean tree while the real
+#      assigned tree holds an unverified completion) is exactly the live
+#      failure this closes. Supersedes the earlier fail-soft-on-no-cwd posture.
+#   2. Tree resolves (teammate events: the ASSIGNED tree, never the session's
+#      possibly re-homed cwd) → a missing/malformed affirmation BLOCKS (exit 2)
+#      as always; never fail open on a resolvable done-gate.
 
 set -uo pipefail
 
@@ -48,24 +56,148 @@ if __qofi_disabled; then
 fi
 # --- end QOFI quality-hook runtime control ---------------------------------
 
-# Same worktree-topology fix as test-gate.sh — the teammate's HEAD commit
-# (where the [DoD-*] block should live) is on the worktree-<name> branch
-# in the teammate's worktree, NOT on whatever branch the lead's main tree
-# happens to have checked out. Trusting $CLAUDE_PROJECT_DIR read the lead's
-# HEAD from every teammate invocation, false-BLOCKING the teammate whose
-# own commit had the affirmation. See tests/test-hooks-worktree-resolution.sh.
-if ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"; then
-  :
-else
-  ROOT="${CLAUDE_PROJECT_DIR:-$PWD}"
+# --- Work-tree resolution: ASSIGNED tree, fail-closed -----------------------
+# Resolve the tree this gate must act on. In worktree topology (TEAM_LEAD.md
+# section *Worktree isolation*) each teammate is ASSIGNED
+# .claude/worktrees/<name>/ on branch worktree-<name>. The harness can RE-HOME
+# a session into a tree that is NOT its assignment (seen live 2026-07-08:
+# gates checked a sibling tree — false-blocking clean agents against a
+# sibling red tree AND fail-OPEN passing while the real assigned tree held an
+# unverified completion). So for a teammate event the payload cwd is a hint,
+# never the authority:
+#   * teammate_name present (TaskCompleted payloads carry it) -> act on the
+#     teammate ASSIGNED tree: the optional .claude/worktree-assignments.tsv
+#     override (name<TAB>path, relative to the main root; "." = main tree)
+#     else the .claude/worktrees/<name> convention. The main root is reachable
+#     from ANY sibling tree via git rev-parse --git-common-dir, else
+#     $CLAUDE_PROJECT_DIR.
+#   * no teammate_name (solo/lead event) -> the payload cwd toplevel.
+#   * anything unresolvable -> BLOCK (cannot-verify), NEVER pass or skip: a
+#     gate that cannot locate the assigned tree must not pass on a sibling
+#     clean tree. Operator ruling 2026-07-08 — supersedes the earlier
+#     fail-soft posture for unresolvable topology on this hook.
+# One python3 pass (repo idiom, no jq; single-quote-free for the bash 3.2 -c
+# form). Emits STATUS|ROOT|MISMATCH|NAME with STATUS one of
+# OK|PARSE_FAILED|NO_TREE|NO_ASSIGNMENT; empty output = python3 absent.
+RES="$(printf '%s' "$EVENT" | python3 -c 'import sys, json, os, subprocess
+
+def toplevel(p):
+    if not p or not os.path.isdir(p):
+        return ""
+    try:
+        r = subprocess.run(["git", "-C", p, "rev-parse", "--show-toplevel"],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+    except Exception:
+        return ""
+    return r.stdout.decode("utf-8", "replace").strip() if r.returncode == 0 else ""
+
+def emit(status, root="", mismatch="0", name=""):
+    print("%s|%s|%s|%s" % (status, root, mismatch, name))
+    sys.exit(0)
+
+try:
+    e = json.loads(sys.stdin.read())
+except Exception:
+    emit("PARSE_FAILED")
+if not isinstance(e, dict):
+    emit("PARSE_FAILED")
+cwd = e.get("cwd") if isinstance(e.get("cwd"), str) else ""
+name = (e.get("teammate_name") if isinstance(e.get("teammate_name"), str) else "").strip()
+cwd_root = toplevel(cwd)
+
+if not name:                     # solo/lead event: no assignment to enforce
+    if cwd_root:
+        emit("OK", cwd_root)
+    emit("NO_TREE")
+
+# Teammate event: resolve the ASSIGNED tree; never trust cwd (the harness can
+# re-home a session into a sibling tree, and gating there is wrong-tree). Any
+# sibling tree still shares the main repo, so the main root is reachable via
+# --git-common-dir even from a wrongly-homed cwd; CLAUDE_PROJECT_DIR (set at
+# launch to the lead project dir) is the fallback.
+main_root = ""
+if cwd_root:
+    try:
+        r = subprocess.run(["git", "-C", cwd, "rev-parse", "--git-common-dir"],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+        if r.returncode == 0:
+            gd = r.stdout.decode("utf-8", "replace").strip()
+            if gd:
+                if not os.path.isabs(gd):
+                    gd = os.path.join(cwd, gd)
+                main_root = os.path.dirname(os.path.realpath(gd))
+    except Exception:
+        pass
+if not main_root:
+    main_root = os.environ.get("CLAUDE_PROJECT_DIR", "")
+
+assigned = ""
+if main_root:
+    # Optional override table .claude/worktree-assignments.tsv: one row per
+    # teammate, name<TAB>path (path relative to the main root; "." maps a
+    # named agent to the main tree, a conscious visible exception). An
+    # unreadable table means cannot-verify; never guess past a corrupt record.
+    tsv = os.path.join(main_root, ".claude", "worktree-assignments.tsv")
+    if os.path.exists(tsv):
+        try:
+            with open(tsv, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.split("#", 1)[0].rstrip("\n")
+                    if not line.strip():
+                        continue
+                    parts = line.split("\t", 1) if "\t" in line else line.split(None, 1)
+                    if len(parts) == 2 and parts[0].strip() == name:
+                        p = parts[1].strip()
+                        assigned = p if os.path.isabs(p) else os.path.normpath(os.path.join(main_root, p))
+                        break
+        except Exception:
+            emit("NO_ASSIGNMENT", name=name)
+    if not assigned:
+        conv = os.path.join(main_root, ".claude", "worktrees", name)
+        if os.path.isdir(conv):
+            assigned = conv
+if not assigned:
+    emit("NO_ASSIGNMENT", name=name)
+aroot = toplevel(assigned)
+if not aroot:
+    emit("NO_ASSIGNMENT", name=name)
+mismatch = "1" if (cwd_root and os.path.realpath(cwd_root) != os.path.realpath(aroot)) else "0"
+emit("OK", aroot, mismatch, name)' 2>/dev/null)"
+STATUS="${RES%%|*}"; _r1="${RES#*|}"; ROOT="${_r1%%|*}"
+_r2="${_r1#*|}"; TREE_MISMATCH="${_r2%%|*}"; TM_NAME="${_r2#*|}"
+case "$STATUS" in
+  OK) : ;;
+  PARSE_FAILED)
+    {
+      echo "dod-affirm: BLOCKED — could not parse the TaskCompleted payload, so the work"
+      echo "tree this gate must verify could not be resolved. Re-run the task."
+    } >&2
+    exit 2 ;;
+  NO_ASSIGNMENT)
+    {
+      echo "dod-affirm: BLOCKED — cannot verify: no assigned worktree resolvable for teammate [$TM_NAME]."
+      echo "Provisioning gap (TEAM_LEAD.md section *Worktree isolation*): expected .claude/worktrees/$TM_NAME/,"
+      echo "or a .claude/worktree-assignments.tsv row [$TM_NAME<TAB><path>] (path [.] maps to the main tree)."
+      echo "A gate never passes on wrong-tree ambiguity — provision/record the worktree, then re-run."
+    } >&2
+    exit 2 ;;
+  *)
+    {
+      echo "dod-affirm: BLOCKED — cannot verify: no work tree resolvable from the payload."
+      echo "A gate never passes on a tree it cannot locate. Re-run from the assigned tree."
+    } >&2
+    exit 2 ;;
+esac
+if [ "$TREE_MISMATCH" = "1" ]; then
+  echo "dod-affirm: NOTE — session cwd is not the assigned tree of teammate [$TM_NAME] (harness re-homing); acting on the ASSIGNED tree: $ROOT" >&2
 fi
 
 # Collect candidate text to search in: every string-valued field of the stdin
-# JSON event, joined with newlines. A parse failure (non-JSON stdin or empty
-# stdin) emits the sentinel "__PARSE_FAILED__" so the bash side can distinguish
-# "agent didn't write the affirmation" from "we couldn't read what the agent
-# said" — those need different surfaced messages, even though both block.
-CANDIDATES_RAW="$(printf '%s' "$EVENT" | python3 -c '
+# JSON event, joined with newlines. We only reach this point once the payload
+# has parsed as JSON (the tree resolution above succeeded on the same $EVENT),
+# so a parse-failure sentinel is unnecessary — an unparseable payload BLOCKED
+# out already.
+CANDIDATES="$(printf '%s' "$EVENT" | python3 -c '
 import sys, json
 try:
     e = json.loads(sys.stdin.read())
@@ -79,16 +211,8 @@ try:
     walk(e)
     print("\n".join(out))
 except Exception:
-    print("__PARSE_FAILED__")
-' 2>/dev/null || echo "__PARSE_FAILED__")"
-
-PARSE_FAILED=0
-CANDIDATES=""
-if [ "$CANDIDATES_RAW" = "__PARSE_FAILED__" ]; then
-  PARSE_FAILED=1
-else
-  CANDIDATES="$CANDIDATES_RAW"
-fi
+    pass
+' 2>/dev/null || true)"
 
 # Also pull the most recent commit message on HEAD (if this is a git repo and
 # there is at least one commit). Tasks routinely end in a commit, so the
@@ -100,8 +224,12 @@ fi
 
 CORPUS="$(printf '%s\n%s\n' "$CANDIDATES" "$HEAD_MSG")"
 
-# Every item must be present on its own line with either "yes" or "n/a:<reason>".
+# Every item must be present on its own line, affirmed as "yes" or "n/a:<reason>".
 # The match is anchored to the exact tag so "almost-DoD" prose doesn't pass.
+# "yes" may be followed by " | <detail>" — the commit-summary template renders
+# the choice as "yes | n/a:<reason>", and agents legitimately read the "|" as a
+# separator and append detail after "yes". An affirmative with trailing detail
+# is still an affirmative; only the leading verdict token is load-bearing.
 missing=""
 for n in 1 2 3 4 5 6; do
   case "$n" in
@@ -112,28 +240,13 @@ for n in 1 2 3 4 5 6; do
     5) label="Scale" ;;
     6) label="No conflicts" ;;
   esac
-  pat="^\[DoD-${n}\] ${label}: (yes|n/a:.+)$"
+  pat="^\[DoD-${n}\] ${label}: (yes([[:space:]]*\|.*)?|n/a:.+)$"
   if ! printf '%s\n' "$CORPUS" | grep -Eq "$pat"; then
     missing="${missing}  [DoD-${n}] ${label}\n"
   fi
 done
 
 if [ -n "$missing" ]; then
-  if [ "$PARSE_FAILED" -eq 1 ]; then
-    # Stdin wasn't parseable AND the HEAD commit also lacks affirmation — we
-    # genuinely couldn't verify. Distinct from "agent forgot lines" so the
-    # surfaced guidance points at the right fix.
-    {
-      echo "dod-affirm: BLOCKED — couldn't verify affirmation, rerun."
-      echo ""
-      echo "Could not parse the TaskCompleted event payload, and the HEAD"
-      echo "commit message does not contain the Definition-of-Done affirmation"
-      echo "either. Re-run the task; include the six [DoD-1]..[DoD-6] lines"
-      echo "in your task summary or your commit message before marking complete."
-      echo "See CLAUDE.md §Definition of done for the exact format."
-    } >&2
-    exit 2
-  fi
   {
     echo "dod-affirm: BLOCKED — Definition-of-Done affirmation incomplete."
     echo ""
@@ -142,8 +255,10 @@ if [ -n "$missing" ]; then
     echo ""
     printf '%b' "$missing"
     echo ""
-    echo "Each line must end with either 'yes' or 'n/a:<reason>' — for example:"
+    echo "Each line must affirm either 'yes' (optionally 'yes | <detail>') or"
+    echo "'n/a:<reason>' — for example:"
     echo "  [DoD-1] Contract: yes"
+    echo "  [DoD-2] Tests: yes | 42 passing, suite green"
     echo "  [DoD-4] Operability: n/a:doc-only task, no module surface"
     echo ""
     echo "See CLAUDE.md §Definition of done for what each item means. Item 7"

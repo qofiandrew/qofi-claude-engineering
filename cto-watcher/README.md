@@ -164,10 +164,13 @@ Optional **non-snowflake** tuning knobs (liveness thresholds, usage-limit feed, 
 the attachment caps `maxAttachmentBytes` / `attachmentDownloadTimeoutSeconds`) all have
 sane defaults and may be omitted — each is documented inline in `config.example.json`.
 
-The `ctoChannels` keys are the names the CPO must use in its `[name]` tags. The
-example is pre-filled with the three current CTO swarms from `../swarm.conf`
-(`reserve-backend-2`, `qofi-ios-app`, `press-backend`) — channel ids filled,
-**bot user ids left to fill in**. **Edit this map whenever a CTO is added or
+The `ctoChannels` keys are the names the CPO uses in its `[name]` tags — one per
+**CTO swarm registered in `../swarm.conf`** (its engineering-cto rows are the
+routing authority; `qofi-product` is the CPO, not a CTO channel, so it is not a
+key here). The example seeds one entry per current CTO swarm with channel ids
+filled and **bot user ids left to fill in** — it intentionally carries no
+hardcoded count or roster of its own, so it never goes stale as the fleet grows.
+`swarm.conf` is the source of truth for which CTOs exist. **Edit this map whenever a CTO is added or
 removed**, then restart the watcher. Config is validated at startup — a malformed
 map (non-numeric id, a bus id reused as a CTO channel, the watcher sharing the CPO
 identity) aborts with a clear error rather than relaying wrongly.

@@ -105,17 +105,19 @@ for __t in "$@"; do
 done
 
 if [ "$CHECK" -eq 1 ]; then
-  echo "codex-review: auth OK (subscription); would review range '$RANGE' ($(printf '%s' "$DIFF" | grep -c '' | tr -d ' ') diff lines) via '$CODEX_BIN ${CODEX_EXEC_ARGS:-exec} --ignore-user-config'."
+  echo "codex-review: auth OK (subscription); would review range '$RANGE' ($(printf '%s' "$DIFF" | grep -c '' | tr -d ' ') diff lines) via '$CODEX_BIN ${CODEX_EXEC_ARGS:-exec} --ignore-user-config -c model_reasoning_effort=xhigh'."
   exit 0
 fi
 
 # Invoke codex non-interactively on a subscription (verified above). The diff +
 # prompt go in on stdin; we NEVER pass --with-api-key, and --ignore-user-config
 # neutralizes a config.toml / CODEX_HOME model_provider redirect to a metered
-# endpoint (auth still uses the subscription). This is the one line the CTO
-# validates on first real run (see header note).
+# endpoint (auth still uses the subscription). Because --ignore-user-config also
+# skips the user's effort pin, reasoning effort is pinned to MAX (xhigh)
+# explicitly here — the review lane always runs at full depth. This is the one
+# line the CTO validates on first real run (see header note).
 printf '%s\n\n--- DIFF (%s) ---\n%s\n' "$PROMPT" "$RANGE" "$DIFF" \
-  | "$CODEX_BIN" ${CODEX_EXEC_ARGS:-exec} --ignore-user-config 2>&1
+  | "$CODEX_BIN" ${CODEX_EXEC_ARGS:-exec} --ignore-user-config -c model_reasoning_effort=xhigh 2>&1
 echo ""
 echo "codex-review: advisory output above — input to your judgment, NEVER a gate (TEAM_LEAD.md §Codex contrarian review lane). Disagreement escalates to the operator; it never loops."
 exit 0

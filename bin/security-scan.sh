@@ -58,7 +58,13 @@ else
   "$GITLEAKS" detect --no-banner --redact || rc=1
 fi
 echo "== semgrep (vulnerability patterns) =="
-"$SEMGREP" scan --error --quiet --config "${SEMGREP_CONFIG:-auto}" || rc=1
+# The repo-LOCAL ruleset (.claude/semgrep/qofi-local.yml, seeded once and never
+# refreshed by sync) rides alongside whatever the primary config is — the CTO's
+# channel for repo-structural rules that must survive doctrine stamps. Included
+# automatically when present; its findings gate exactly like doctrine rules.
+SG_ARGS=(--config "${SEMGREP_CONFIG:-auto}")
+[ -f .claude/semgrep/qofi-local.yml ] && SG_ARGS=("${SG_ARGS[@]}" --config .claude/semgrep/qofi-local.yml)
+"$SEMGREP" scan --error --quiet "${SG_ARGS[@]}" || rc=1
 
 if [ "$rc" -ne 0 ]; then
   echo "security-scan: FINDINGS — review and resolve before the DoD gate." >&2
