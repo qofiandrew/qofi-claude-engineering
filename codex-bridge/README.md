@@ -99,6 +99,7 @@ boundary is the Codex sandbox mode, not per-call approval. Default is
 | `CODEX_PROFILE` | unset | `-p` config profile |
 | `CODEX_TURN_TIMEOUT_MS` | `1800000` | hard kill for a stuck turn (30 min) |
 | `CODEX_BIN` | `codex` | binary path override |
+| `CODEX_BRIDGE_PREAMBLE_EXTRA` | unset | extra brief appended to the first-turn preamble (swarm-up.sh injects the doctrine directive here) |
 
 Multiple agents on one machine: give each its own `DISCORD_STATE_DIR` (own
 token, own sessions) — exactly like running multiple Claude bridge identities

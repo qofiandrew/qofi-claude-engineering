@@ -317,8 +317,84 @@ PY
   return 0
 }
 
-launch_one() {  # name repo tokvar [channel] [account]
-  local name="$1" repo="$2" tokvar="$3" channel="${4:-}" account="${5:-}"
+# Launch a CODEX-engine lead: the pane runs codex-bridge/daemon.ts. Called
+# from launch_one after the engine-neutral pane env line has been sent.
+#
+# Per-swarm state dir (~/.codex/channels/discord-<name>): unlike the Claude
+# bridge plugin (shared access.json, per-message re-read), each codex daemon
+# also WRITES sessions.json — sharing one dir across daemons would let their
+# atomic renames clobber each other. Isolation per swarm removes the race.
+# On first launch the shared Claude-side access.json is copied in when
+# present, so allowFrom (operator + watcher/CPO ids) and channel groups carry
+# over without re-pairing; the swarm's own channel group is then ensured.
+#
+# Doctrine: CODEX_BRIDGE_PREAMBLE_EXTRA carries the launch brief (Codex has no
+# SessionStart hooks; AGENTS.md -> CLAUDE.md auto-load is the belt, this is
+# the suspenders). The adversarial review lane flips for this engine: Claude
+# (Fable) reviews Codex work via bin/adversarial-review.sh.
+_launch_codex_lead() {  # name repo sess channel
+  local name="$1" repo="$2" sess="$3" channel="$4"
+  local state_dir="$HOME/.codex/channels/discord-$name"
+
+  if ! command -v bun >/dev/null 2>&1; then
+    echo "  ERROR: $sess: engine=codex needs bun on PATH (codex-bridge daemon runtime)" >&2
+    return 1
+  fi
+  if ! command -v codex >/dev/null 2>&1; then
+    echo "  ERROR: $sess: engine=codex but codex CLI not found — install it and run 'codex login'" >&2
+    return 1
+  fi
+  # node_modules is gitignored — install deps on first launch from a fresh clone.
+  if [ ! -d "$SWARM_HOME/codex-bridge/node_modules" ]; then
+    echo "  installing codex-bridge deps (first launch)"
+    (cd "$SWARM_HOME/codex-bridge" && bun install --no-summary) || {
+      echo "  ERROR: $sess: bun install failed in codex-bridge/" >&2
+      return 1
+    }
+  fi
+
+  # Seed the per-swarm state dir (idempotent). Copy the shared Claude-side
+  # access.json on first launch; always ensure this swarm's channel group.
+  mkdir -p "$state_dir"
+  chmod 700 "$state_dir"
+  if [ ! -f "$state_dir/access.json" ] && [ -f "$HOME/.claude/channels/discord/access.json" ]; then
+    cp "$HOME/.claude/channels/discord/access.json" "$state_dir/access.json"
+    echo "  seeded $state_dir/access.json from the shared Claude-side access.json"
+  fi
+  if [ -n "$channel" ]; then
+    python3 - "$state_dir/access.json" "$channel" <<'PY' || echo "  WARN: could not ensure channel group in $state_dir/access.json" >&2
+import json, sys, os
+path, chan = sys.argv[1], sys.argv[2]
+try:
+    a = json.load(open(path))
+except Exception:
+    a = {"dmPolicy": "pairing", "allowFrom": [], "groups": {}, "pending": {}}
+a.setdefault("groups", {})
+if chan not in a["groups"]:
+    a["groups"][chan] = {"requireMention": False, "allowFrom": []}
+tmp = path + ".tmp"
+with open(tmp, "w") as f:
+    json.dump(a, f, indent=2); f.write("\n")
+os.replace(tmp, path)
+PY
+  fi
+
+  # Doctrine brief, injected into the first turn of every Codex thread by the
+  # daemon. NO apostrophes/single quotes in this text — it rides inside a
+  # single-quoted send-keys export below.
+  local doctrine="SWARM DOCTRINE: You are the engineering lead for this repo. Before any other work in a new conversation, read CLAUDE.md, ESCALATION.md, and PROJECT_SPEC.md at the repo root and operate per them. Tests are part of every feature; never merge red; never push main (operator-only). Before merging substantive work to dev, run the adversarial review lane: \$SWARM_HOME/bin/adversarial-review.sh (a Claude reviewer from a different model family; advisory, never gating)."
+
+  tmux send-keys -t "$sess" "export DISCORD_STATE_DIR='$state_dir'; export CODEX_BRIDGE_CWD='$repo'; export CODEX_BRIDGE_PREAMBLE_EXTRA='$doctrine'; bun '$SWARM_HOME/codex-bridge/daemon.ts'" C-m
+
+  if _wait_for "$sess" "gateway connected" 30; then
+    echo "  codex lead up: $sess (state: $state_dir)"
+  else
+    echo "  WARN: $sess: codex-bridge did not report 'gateway connected' in 30s — check the pane (token? bun install?)" >&2
+  fi
+}
+
+launch_one() {  # name repo tokvar [channel] [account] [engine]
+  local name="$1" repo="$2" tokvar="$3" channel="${4:-}" account="${5:-}" engine="${6:-claude}"
   local sess="${PREFIX}-${name}"
   if tmux has-session -t "$sess" 2>/dev/null; then
     echo "  running: $sess"; return 0
@@ -383,6 +459,13 @@ launch_one() {  # name repo tokvar [channel] [account]
   # send-keys strings below reproduce exactly. The whole labeled delta is
   # gated on [ -n "$account" ]; the inert all-empty fleet is unchanged.
   local acct_env="" acct_rc=" --remote-control $name"
+  # A labeled account is a CLAUDE auth partition (CLAUDE_CODE_OAUTH_TOKEN /
+  # CLAUDE_CONFIG_DIR). Codex auth is its own `codex login` on the host — a
+  # label is meaningless there, so ignore it loudly rather than half-apply it.
+  if [ "$engine" = "codex" ] && [ -n "$account" ]; then
+    echo "  WARN: $sess: ACCOUNT '$account' ignored — engine=codex uses the host's codex login, not a Claude account partition" >&2
+    account=""
+  fi
   if [ -n "$account" ]; then
     # A non-empty label that the resolver REJECTS is malformed (bad chars / not
     # starting with a letter). Fail loud and refuse to launch this swarm rather
@@ -434,6 +517,17 @@ launch_one() {  # name repo tokvar [channel] [account]
   #     tokvar is a validated identifier (swarm_conf_parse_line), so the deref is
   #     injection-safe. Default (empty account): the pane gets DISCORD_BOT_TOKEN only.
   tmux send-keys -t "$sess" "unset ANTHROPIC_API_KEY; export SWARM_HOME='$SWARM_HOME'; $bound_exports; unset IFS; for v in \$(env | sed -n 's/^\(BOT_[A-Za-z0-9_]*\)=.*/\1/p;s/^\(OAUTH_TOKEN_[A-Za-z0-9_]*\)=.*/\1/p'); do unset \"\$v\"; done; export DISCORD_BOT_TOKEN=\"\$(. '$TOKENS' >/dev/null 2>&1; printf '%s' \"\$$tokvar\")\"$acct_env" C-m
+
+  # ---- engine dispatch ----------------------------------------------------
+  # engine=codex: the pane runs the codex-bridge DAEMON instead of the Claude
+  # Code TUI. Codex CLI has no channels capability, so Discord I/O goes
+  # through codex-bridge/daemon.ts (gateway -> gate -> codex exec per message,
+  # one resumed Codex thread per chat). Everything above — pane env, token
+  # isolation, DISCORD_BOUND_CHANNEL — is engine-neutral and already set.
+  if [ "$engine" = "codex" ]; then
+    _launch_codex_lead "$name" "$repo" "$sess" "$channel"
+    return $?
+  fi
   # CRITICAL: --dangerously-load-development-channels (not --channels) because the
   # qofi-swarm marketplace is self-published, not on Anthropic's approved allowlist.
   # --permission-mode auto: guarantees auto mode on every launch regardless of any
@@ -542,7 +636,8 @@ cmd_up() {  # [name]
     tokvar="$SWARM_CONF_F_TOKVAR"
     channel="$SWARM_CONF_F_CHANNEL"
     account="$SWARM_CONF_F_ACCOUNT"
-    launch_one "$name" "$repo" "$tokvar" "$channel" "$account" || true
+    engine="$SWARM_CONF_F_ENGINE"
+    launch_one "$name" "$repo" "$tokvar" "$channel" "$account" "$engine" || true
   done < <(grep -vE '^[[:space:]]*(#|$)' "$CONF")
 }
 

@@ -86,13 +86,17 @@ swarm_conf_parse_line() {
   case "$_trimmed" in
     ''|'#'*) return 1 ;;
   esac
-  local _name _repo _tokvar _channel _guild _account _rest
+  local _name _repo _tokvar _channel _guild _account _engine _rest
   # Full known arity + `_rest` catch-all so a row with MORE columns than the
   # current schema cannot corrupt the last named field (see header). ACCOUNT
   # (field 6) is the multi-account partition label; absent in legacy 4/5-col
   # rows → empty → the default account (today's behavior). Resolve it via
   # swarm_account_resolve — never construct an account path by hand.
-  IFS='|' read -r _name _repo _tokvar _channel _guild _account _rest <<EOF
+  # ENGINE (field 7) selects the lead runtime: empty or 'claude' → the Claude
+  # Code lead (today's behavior, byte-identical launch); 'codex' → a Codex
+  # lead driven through codex-bridge/. Anything else falls back to 'claude'
+  # with a loud warning — a typo must not silently boot the wrong runtime.
+  IFS='|' read -r _name _repo _tokvar _channel _guild _account _engine _rest <<EOF
 $_line
 EOF
   SWARM_CONF_F_NAME="$(_swarm_trim "$_name")"
@@ -117,6 +121,14 @@ EOF
   SWARM_CONF_F_CHANNEL="$(_swarm_trim "$_channel")"
   SWARM_CONF_F_GUILD="$(_swarm_trim "$_guild")"
   SWARM_CONF_F_ACCOUNT="$(_swarm_trim "$_account")"
+  SWARM_CONF_F_ENGINE="$(_swarm_trim "$_engine")"
+  case "$SWARM_CONF_F_ENGINE" in
+    ''|claude) SWARM_CONF_F_ENGINE="claude" ;;
+    codex)     : ;;
+    *)
+      echo "swarm_conf_parse_line: unknown ENGINE '$SWARM_CONF_F_ENGINE' for swarm '$SWARM_CONF_F_NAME' (must be claude or codex); defaulting to claude." >&2
+      SWARM_CONF_F_ENGINE="claude" ;;
+  esac
   return 0
 }
 

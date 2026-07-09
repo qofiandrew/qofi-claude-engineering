@@ -64,6 +64,10 @@ if (!TOKEN) {
 }
 
 const BOUND_CHANNELS = parseBoundChannels(process.env.DISCORD_BOUND_CHANNEL)
+// Optional deployment-specific brief appended to the built-in preamble on the
+// first turn of every chat's thread — e.g. swarm doctrine from swarm-up.sh.
+const PREAMBLE_EXTRA = process.env.CODEX_BRIDGE_PREAMBLE_EXTRA
+const FULL_PREAMBLE = PREAMBLE_EXTRA ? `${PREAMBLE}${PREAMBLE_EXTRA}\n\n` : PREAMBLE
 const store = new AccessStore(STATE_DIR, process.env.DISCORD_ACCESS_MODE === 'static')
 const sessions = new SessionStore(STATE_DIR)
 
@@ -223,7 +227,7 @@ async function runTurn(msg: Message, content: string, attachmentPaths: string[],
     })
 
     let threadId = sessions.get(chatId)
-    const prompt = threadId ? envelope : PREAMBLE + envelope
+    const prompt = threadId ? envelope : FULL_PREAMBLE + envelope
     let result = await runCodexTurn(threadId, prompt, codexCfg)
 
     // A vanished thread (rotated/deleted session files) shouldn't strand the
@@ -234,7 +238,7 @@ async function runTurn(msg: Message, content: string, attachmentPaths: string[],
       )
       sessions.delete(chatId)
       threadId = null
-      result = await runCodexTurn(null, PREAMBLE + envelope, codexCfg)
+      result = await runCodexTurn(null, FULL_PREAMBLE + envelope, codexCfg)
     }
 
     if (result.threadId) sessions.set(chatId, result.threadId)
