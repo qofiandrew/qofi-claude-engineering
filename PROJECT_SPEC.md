@@ -630,3 +630,38 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   is the operator's call after calibration** (compare `proxy_verdict` vs
   `real_signal` in `~/.config/swarm/rotate-tick.log`; tune budgets so NEAR
   precedes real AT).
+- `2026-07-09` — **Authoritative usage detector — `/usage` TUI scraper replaces
+  the ccusage burn proxy** (branch `feat/usage-tui-adapter`). The operator's
+  falsifier landed: token counting CAN'T measure the Max cap because CACHE
+  READS don't count against it, so the ccusage proxy over-reported wildly
+  (proxy said weekly 97.5% while `/usage` said 6%). New
+  **`bin/swarm-usage-adapter-tui.sh`** scrapes Anthropic's own percentages from
+  the `/usage` panel of an IDLE swarm pane and emits the unchanged
+  swarm-usage-poll schema — the exact "real cap-% source appears → swap the
+  adapter, nothing else changes" seam the ccusage adapter's header predicted.
+  Pane discipline: idle-only (working panes skipped → UNKNOWN, fail-safe),
+  freshness-gated against a pre-`/usage` baseline, stale-dialog self-heal, and
+  a restore that NEVER interrupts a turn (Escape only when no turn is running;
+  C-u otherwise). **The height problem:** the panel is taller than a headless
+  80×24 pane so the "% used" bars render above the fold and the dialog doesn't
+  scroll — the adapter temporarily grows the idle pane to
+  `SWARM_USAGE_TUI_ROWS` (60), scrapes, and restores the exact prior geometry
+  via a trap on every exit path (safe because panes are headless — the operator
+  surface is Discord, not tmux attach). Weekly = MAX across all weekly sections
+  (all-models + per-model). Tests: `test-swarm-usage-adapter-tui.sh` (37 PASS)
+  drive a REAL captured `/usage` frame through a mock tmux (records send-keys +
+  resize, serves scripted frames); cover parse, distractor-safety, never-touch-
+  a-working-pane, resize/restore, self-heal, auto-select, config. Fixed en
+  route: a `printf | python3 - <<'PY'` heredoc-vs-pipe bug that fed the parser
+  an empty frame. **This machine rewired** (env file): `SWARM_USAGE_PROBE`
+  points at the TUI adapter, **pinned `SWARM_USAGE_TUI_SWARM=qofi-product`**
+  (the fleet spans >1 account — differing weekly reset dates — so auto-select
+  would read a non-deterministic account; qofi-product is the rotation
+  reference, the pane login-relay re-auths); ccusage probe + token budgets
+  dropped. Verified live end-to-end: the launchd observe tick reads
+  `five_hour_pct=33 weekly_pct=7 account=default proxy_verdict=OK`, consistent
+  across ticks, pane restored + clean. **Note for the operator:** the
+  `real_signal=AT` column is a PRE-EXISTING false positive in
+  `swarm-limit-detect.sh` (present on the original ccusage ticks too, while
+  `/usage` shows 7% weekly) — harmless in observe mode, but do NOT wire
+  `SWARM_POLL_CMD=…limit-detect --or-poll` until that detector is fixed.

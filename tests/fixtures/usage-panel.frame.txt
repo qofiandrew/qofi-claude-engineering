@@ -1,0 +1,80 @@
+╭─── Claude Code v2.1.205 ─────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                    │ Tips for getting started                                        │
+│                Welcome back Andrew!                │ Ask Claude to create a new app or clone a repository            │
+│                                                    │ ─────────────────────────────────────────────────────────────── │
+│                       ▐▛███▜▌                      │ What's new                                                      │
+│                      ▝▜█████▛▘                     │ Added an auto mode rule that blocks tampering with session tra… │
+│                        ▘▘ ▝▝                       │ Fixed `--json-schema` silently producing unstructured output w… │
+│     Fable 5 with medium effort · Claude Max ·      │ Fixed a message sent while Claude was working being silently l… │
+│     arschettino@gmail.com's Organization           │ /release-notes for more                                         │
+│             /…/scratchpad/usage-recon              │                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+ ⚠ 1 MCP server needs authentication · run /mcp
+
+❯ /usage                                                                                                                
+  ⎿  Settings dialog dismissed
+
+❯ /usage                                                                                                                
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Settings  Status   Config   Usage   Stats                                                                           
+
+  Session
+
+  Total cost:            $0.0000
+  Total duration (API):  0s
+  Total duration (wall): 44s
+  Total code changes:    0 lines added, 0 lines removed
+  Usage:                 0 input, 0 output, 0 cache read, 0 cache write
+
+  Current session
+  █████████████                                      26% used
+  Resets 8pm (America/Buenos_Aires)
+
+  Current week (all models)
+  ███                                                6% used
+  Resets Jul 10 at 5am (America/Buenos_Aires)
+
+  Current week (Fable)                     
+  █▌                                                 3% used                                        
+  Resets Jul 10 at 5am (America/Buenos_Aires)
+                          
+  What's contributing to your limits usage?
+  Approximate, based on local sessions on this machine — does not include other devices or claude.ai
+
+  Last 24h · these are independent characteristics of your usage, not a breakdown
+
+  93% of your usage came from subagent-heavy sessions
+   Each subagent runs its own requests. Be deliberate about spawning them — and 
+   consider configuring a cheaper model for simpler subagents.
+               
+  84% of your usage was at >150k context
+   Longer sessions are more expensive even when cached. /compact mid-task, /clear
+   when switching to new tasks.
+
+  78% of your usage came from sessions active for 8+ hours
+   These are often background/loop sessions. Continuous usage can add up quickly
+   so make sure it is intentional.
+
+  12% of your usage came from subagents under "workflow-subagent"
+   If this runs frequently, consider configuring its subagents with a cheaper
+   model or tightening their prompts.
+
+  Subagents               % of usage
+  workflow-subagent              12%
+  general-purpose                 8%
+  fork                            1%
+
+  MCP servers             % of usage
+  plugin:discord-b2b:discord      8%
+
+  d to day · w to week
+
+  Usage credits
+  Usage credits are off · /usage-credits to turn them on
+
+  Esc to cancel
+
+
+
