@@ -45,7 +45,12 @@ FAKE_HOME="/Users/somebodyelse"
 FAKE_TMUX="/some/other/prefix/bin/tmux"
 
 echo "=== render templates with fake HOME + tmux (proves host-agnostic) ==="
+# SWARM_ROTATE_TICK_ENV pinned to /dev/null (not a regular file -> seam inert)
+# so an operator's real rotate-tick.env.local on this machine can never leak
+# into this test's assertions. The seam itself is covered by
+# test-launchd-rotate-tick-env.sh.
 HOME="$FAKE_HOME" SWARM_TMUX_BIN="$FAKE_TMUX" SWARM_HOME="$ROOT" \
+  SWARM_ROTATE_TICK_ENV=/dev/null \
   bash "$ROOT/bin/swarm-launchd-install.sh" --render-only "$TMP" >/dev/null 2>"$TMP/err"
 rc=$?
 assert_eq 0 "$rc" "swarm-launchd-install --render-only exits 0"

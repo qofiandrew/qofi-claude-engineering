@@ -587,3 +587,46 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   leaving the suite red. Now resolves the DEFAULT account's access file via
   the resolver (codex ignores account labels, so the default is the right
   source) — which also makes the seed honor `SWARM_ACCESS_FILE` uniformly.
+- `2026-07-09` — **Rotation ARMED (observe mode) — rotate-tick operator env
+  seam + login-relay wiring** (branch `feat/rotate-tick-arming`; arming
+  ratified by operator directive). The rendered plist can't be hand-edited
+  (`swarm-launchd-install.sh` re-renders would clobber it), so the installer
+  gained the out-of-band channel its template comment promised:
+  **`SWARM_ROTATE_TICK_ENV`** (default `$SWARM_HOME/launchd/rotate-tick.env.local`,
+  GITIGNORED; committed `.example` documents every knob) — `KEY=value` lines
+  merged into `com.qofi.swarm-rotate-tick`'s EnvironmentVariables at render
+  time. Values are literal + XML-escaped (`& < >` — structure can never be
+  injected; round-trip proven via plistlib); render FAILS loud, before any
+  file is written, on bad key / missing `=` / empty value / duplicate /
+  collision with a template-owned key. Absent/empty file → byte-identical
+  render (ADR-0018 inertness, pinned against an independent sed render).
+  Reserved key **`SWARM_TICK_OBSERVE=1`** renders `--observe` into
+  ProgramArguments (calibration gate; process env overrides file).
+  **Adversarial-review hardening** (5 confirmed findings fixed): XML escaping
+  moved into sed — `${var//}` replacement semantics differ by bash version
+  (5.2 patsub_replacement corrupts values with `>`; 3.2 keeps quoted
+  replacements literally); **atomic install** — every plist renders +
+  validates in a temp file and only replaces `~/Library/LaunchAgents` after
+  ALL checks pass (a failed re-render can no longer leave a bad copy that
+  launchd auto-loads at next login); duplicate `SWARM_TICK_OBSERVE` fails
+  loud (silent last-wins could flip calibration→live); populated env file
+  with no rotate-tick template refuses ("nowhere to land"); control chars in
+  values rejected. Tests: `test-launchd-rotate-tick-env.sh` (73 PASS — incl.
+  first-`=` split, arming+observe combo, default-path resolution, atomic
+  survive-failed-rerender); existing launchd test pinned hermetic
+  (`SWARM_ROTATE_TICK_ENV=/dev/null`). **This machine armed** (env
+  file, not committed): relay as `SWARM_CREDSWAP_CMD` (no `"$1"`), threshold
+  95, nominal ring `max-a max-b`, checkpoint hook with `"$1"`, ccusage probe
+  via `SWARM_CCUSAGE_CMD=…/.bun/bin/bunx ccusage` (launchd PATH has no
+  ccusage/npx; bunx verified from a minimal PATH), budget SEEDS from observed
+  maxima (5h 900M — max block 912.6M; weekly 8B — heaviest week 7.77B),
+  `SWARM_TICK_OBSERVE=1`. Verified: adapter emits pct JSON end-to-end; poll
+  → NEAR (weekly 97.5% ≥ 95); tick `--dry-run` routes correctly; rotate
+  `--dry-run` plans checkpoint → relay → relaunch (and its WORKING guard
+  refused un-forced mid-turn, live proof of the rail); rendered plist lints,
+  8 keys merged, agent loaded, first observe tick logged
+  `proxy_verdict=NEAR … real_signal=AT … would_rotate=yes (NOT rotating:
+  observe-mode)`. **Still in OBSERVE mode — going live (SWARM_TICK_OBSERVE=0)
+  is the operator's call after calibration** (compare `proxy_verdict` vs
+  `real_signal` in `~/.config/swarm/rotate-tick.log`; tune budgets so NEAR
+  precedes real AT).

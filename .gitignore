@@ -1,6 +1,10 @@
 # Secrets — never commit
 tokens.env
 
+# Operator arming env for the rotate-tick launchd agent — machine-local paths
+# and arming decisions (see launchd/rotate-tick.env.local.example).
+launchd/rotate-tick.env.local
+
 # Bridge (bun/node) build artifacts
 node_modules
 bun.lock
