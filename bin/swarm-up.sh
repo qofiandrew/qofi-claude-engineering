@@ -357,9 +357,17 @@ _launch_codex_lead() {  # name repo sess channel
   # access.json on first launch; always ensure this swarm's channel group.
   mkdir -p "$state_dir"
   chmod 700 "$state_dir"
-  if [ ! -f "$state_dir/access.json" ] && [ -f "$HOME/.claude/channels/discord/access.json" ]; then
-    cp "$HOME/.claude/channels/discord/access.json" "$state_dir/access.json"
-    echo "  seeded $state_dir/access.json from the shared Claude-side access.json"
+  if [ ! -f "$state_dir/access.json" ]; then
+    # The shared Claude-side access.json lives under the DEFAULT account —
+    # resolve its path through swarm_account_resolve (the SOLE constructor of
+    # .claude paths; hand-building one is a WORKING-rail landmine, see
+    # tests/test-account-paths-sole-constructor.sh). Codex ignores account
+    # labels (forced empty above), so the default account is the right source.
+    swarm_account_resolve ""
+    if [ -f "$SWARM_ACCT_ACCESS_FILE" ]; then
+      cp "$SWARM_ACCT_ACCESS_FILE" "$state_dir/access.json"
+      echo "  seeded $state_dir/access.json from the shared Claude-side access.json"
+    fi
   fi
   if [ -n "$channel" ]; then
     python3 - "$state_dir/access.json" "$channel" <<'PY' || echo "  WARN: could not ensure channel group in $state_dir/access.json" >&2
