@@ -665,3 +665,37 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   `swarm-limit-detect.sh` (present on the original ccusage ticks too, while
   `/usage` shows 7% weekly) — harmless in observe mode, but do NOT wire
   `SWARM_POLL_CMD=…limit-detect --or-poll` until that detector is fixed.
+- `2026-07-09` — **`/usage` detector reworked to a DEDICATED, ISOLATED probe
+  session — never touches a CTO pane** (branch `feat/usage-probe-session`,
+  operator-directed). The prior version drove `/usage` in an idle SWARM lead
+  pane; the operator flagged the risk of interfering with that lead's Discord
+  coordination. Investigation confirmed Discord I/O travels over the MCP channel
+  (`bridge/server.ts` — `notifications/claude/channel`), NOT the keyboard, so a
+  message can never be lost — but "never interrupt a CTO" must be PROVABLE. So
+  `swarm-usage-adapter-tui.sh` now drives `/usage` in its OWN throwaway session
+  **`swarm-usage-probe`**: a plain `claude` on the DEFAULT account (the fleet's
+  shared credential → identical `/usage` to any default-account lead), never
+  bound to a Discord channel, never taking a turn. It's created once and reused
+  (~1s/probe), recreated if unhealthy (crash / stale post-rotation credential),
+  and is not in `swarm.conf` so a fleet relaunch never kills it. Zero contact
+  with any CTO pane — verified live (qofi-product shows no probe residue).
+  Removed: idle-pane auto-select, the `SWARM_USAGE_TUI_SWARM` pin, and the
+  grow/restore-a-live-pane resize (the probe session is created tall). Launch is
+  robust to a detached session capturing BLANK until a redraw (Ctrl-L nudge) and
+  to a first-run trust prompt (accepted once; default cwd `$SWARM_HOME` is
+  already trusted). **Two consistency-audit fixes folded in** (a 4-lens ×
+  2-verifier adversarial audit): (major/UNSAFE) the freshness gate now requires
+  BOTH the session AND a weekly header before accepting a panel — a
+  half-rendered capture (session drawn, weekly not yet) previously yielded a
+  weekly-missing payload that the poll read as weekly=0% → a genuinely-NEAR
+  weekly reported OK, no rotation; now it waits or fail-safes UNKNOWN; (minor) a
+  MAX weekly window whose own "Resets" line is off-screen no longer inherits a
+  following section's reset time. Consistency evidence: parser deterministic
+  (10× identical), suite non-flaky (10× 37→31 PASS), 5 launchd-env probes
+  identical (75/15), and the live observe log shows a smooth real usage curve
+  with `account=default` every tick. Tests: `test-swarm-usage-adapter-tui.sh`
+  (31 PASS) rewritten for the dedicated-session lifecycle (create / reuse /
+  recreate-and-retry), the partial-panel gate, the reset-hint fix, and an
+  isolation assertion (keys only ever target the probe session). Env rewired:
+  the `qofi-product` pin dropped (the probe is self-contained). ccusage adapter
+  retained as documented legacy.
