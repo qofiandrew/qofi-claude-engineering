@@ -699,3 +699,29 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   isolation assertion (keys only ever target the probe session). Env rewired:
   the `qofi-product` pin dropped (the probe is self-contained). ccusage adapter
   retained as documented legacy.
+- `2026-07-09` — **Limit detector hardened + made authoritative (`--or-poll`
+  wired live)** (branch `feat/limit-detect-robust`). Root-caused the standing
+  `real_signal=AT` false positive: `pane_state()` (swarm-lib.sh) grep'd the whole
+  pane for bare "usage limit", which matches Claude Code's GLOBAL informational
+  banner "▎ Through <date>, you can use up to 50% of your weekly usage limit on
+  Fable 5" (present in every pane) and the leads' own rate-limit conversation —
+  so every pane read as paused-limit. Fix: the default patterns are narrowed to
+  cap-HIT phrasing ("...limit reached", "reached your usage limit", "rate limit
+  exceeded", "you have hit your", "run out of"), and a benign-notice EXCLUSION
+  layer (`_swarm_default_limit_exclude_patterns`, default "you can use up to",
+  overridable via `SWARM_LIMIT_EXCLUDE_PATTERNS`) drops allowance notices — a
+  genuine cap line still WINS when a benign notice is also on screen (all
+  matching lines scanned, not `-m1`). Blast radius is only `swarm-limit-detect`
+  and the disabled `swarm-watch` (both on the shared default). New
+  `tests/test-pane-state-limit.sh` (12 PASS) pins the robustness matrix: real
+  cap-hit → rc=2, the Fable notice → not a cap, conversation "usage limit"/"rate
+  limit" → not a cap, real-wins-over-benign, plus override coverage —
+  `pane_state`'s grep had zero prior test coverage. Live: the fleet scan and
+  `swarm-limit-detect` now return OK; the observe tick logs `real_signal=OK`
+  (was permanently AT). **Swapped live:** the gitignored env now wires
+  `SWARM_POLL_CMD=…/swarm-limit-detect.sh --or-poll`, making the real cap signal
+  the authoritative hard stop with the `/usage` percentages as the delegate —
+  verified end-to-end (a genuine 95% 5h state this session drove
+  `proxy_verdict=NEAR`, `real_signal=OK`, `would_rotate=yes`, still NOT rotating
+  under observe mode). Going fully live (`SWARM_TICK_OBSERVE=0`) remains the
+  operator's call.
