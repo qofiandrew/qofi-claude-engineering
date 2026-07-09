@@ -31,14 +31,16 @@
 #                                        runners) and canon consistency is this
 #                                        repo's spine → no fail-open corner: ANY
 #                                        unresolvable cwd BLOCKS (exit 2).
-#   dod-affirm.sh /       fail-CLOSED on a PRESENT-but-unparseable payload (a
-#   test-gate.sh           couldn't-verify done-gate BLOCK), fail-SOFT (exit 0) on
-#                          genuine cwd-absence / non-git cwd / python3-absent —
-#                          these two ARE CI-referee-backstopped, so a degenerate
-#                          topology miss must not false-block.
-#   docs-check.sh /       fail-OPEN — advisory nudges / resume aid, never gate:
-#   session-summary.sh /   every unresolvable case → exit 0.
-#   quality-check.sh
+#   dod-affirm.sh /       fail-CLOSED on EVERY unresolvable case — unparseable
+#   test-gate.sh /         payload, no/non-git cwd, no assigned worktree for the
+#   docs-check.sh          payload's teammate_name, python3 absent — all BLOCK
+#                          (operator ruling 2026-07-08: a gate never passes on
+#                          wrong-tree ambiguity; supersedes the earlier
+#                          fail-soft posture). teammate_name present → the gate
+#                          acts on the ASSIGNED tree (tsv override or
+#                          .claude/worktrees/<name>), never the re-homeable cwd.
+#   session-summary.sh /  fail-OPEN — advisory resume aid / per-file nudge,
+#   quality-check.sh       never gates: every unresolvable case → exit 0.
 #
 # This test builds a throwaway main repo (tree A, the "lead/sibling") plus a
 # linked worktree (tree B, the "teammate's own"), invokes each hook with the
@@ -158,6 +160,8 @@ pl_cwd()        { printf '{"session_id":"s","hook_event_name":"%s","cwd":"%s"}' 
 pl_no_cwd()     { printf '{"session_id":"s","hook_event_name":"%s"}' "$1"; }
 pl_cwd_file()   { printf '{"session_id":"s","hook_event_name":"PostToolUse","cwd":"%s","tool_input":{"file_path":"%s"}}' "$1" "$2"; }
 pl_nocwd_file() { printf '{"session_id":"s","hook_event_name":"PostToolUse","tool_input":{"file_path":"%s"}}' "$1"; }
+pl_tm()         { printf '{"session_id":"s","hook_event_name":"%s","cwd":"%s","teammate_name":"%s"}' "$1" "$2" "$3"; }
+pl_tm_nocwd()   { printf '{"session_id":"s","hook_event_name":"%s","teammate_name":"%s"}' "$1" "$2"; }
 
 # =============================================================================
 echo "dod-affirm.sh (TaskCompleted — scans HEAD of the payload's tree):"
@@ -170,11 +174,12 @@ check "reads teammate worktree HEAD, not inherited-CWD tree" "$ec" 0
 # the affirmation (HEAD and stdin both) -> still BLOCKS.
 invoke "$HOOK_DOD" "$WT" "$(pl_cwd TaskCompleted "$MAIN")"; ec=$?
 check "still BLOCKS when the payload's tree lacks the affirmation" "$ec" 2
-# dod-3 (fail-soft): no cwd, and cwd -> non-git dir, both exit 0.
+# dod-3 (fail-CLOSED — operator ruling 2026-07-08): no cwd, and cwd -> non-git
+# dir, both BLOCK: a done-gate never passes on a tree it cannot locate.
 invoke "$HOOK_DOD" "$MAIN" "$(pl_no_cwd TaskCompleted)"; ec=$?
-check "fail-soft (exit 0) when payload has no cwd" "$ec" 0
+check "BLOCKS (exit 2) when payload has no cwd (cannot-verify)" "$ec" 2
 invoke "$HOOK_DOD" "$MAIN" "$(pl_cwd TaskCompleted "$WORK")"; ec=$?
-check "fail-soft (exit 0) when cwd is not a git tree" "$ec" 0
+check "BLOCKS (exit 2) when cwd is not a git tree" "$ec" 2
 
 # =============================================================================
 echo "docs-check.sh (TeammateIdle — scans git status of the payload's tree):"
@@ -196,9 +201,10 @@ printf '# note\n' >"$WT/notes.md"
 invoke "$HOOK_DOCS" "$MAIN" "$(pl_cwd TeammateIdle "$WT")"; ec=$?
 check "does NOT block when the payload's tree touched a doc" "$ec" 0
 rm -f "$WT/notes.md"
-# docs-4 (fail-soft): no cwd -> exit 0.
+# docs-4 (fail-CLOSED — operator ruling 2026-07-08): no cwd -> BLOCK; the idle
+# gate never passes on wrong-tree ambiguity.
 invoke "$HOOK_DOCS" "$MAIN" "$(pl_no_cwd TeammateIdle)"; ec=$?
-check "fail-soft (exit 0) when payload has no cwd" "$ec" 0
+check "BLOCKS (exit 2) when payload has no cwd (cannot-verify)" "$ec" 2
 
 # =============================================================================
 echo "test-gate.sh (TaskCompleted — runs the test command in the payload's tree):"
@@ -214,9 +220,10 @@ check "runs the test command in the payload's tree (marker found)" "$ec" 0
 # fails there -> BLOCK. Proves a genuinely-failing command still blocks.
 invoke "$HOOK_TEST" "$WT" "$(pl_cwd TaskCompleted "$MAIN")" CLAUDE_TEST_CMD='test -f PASS_MARKER'; ec=$?
 check "still BLOCKS when the command fails in the payload's tree" "$ec" 2
-# tg-3 (fail-soft): no cwd -> exit 0 BEFORE the (failing) command is even resolved.
+# tg-3 (fail-CLOSED — operator ruling 2026-07-08): no cwd -> BLOCK before the
+# command is even resolved; never pass on a tree the gate cannot locate.
 invoke "$HOOK_TEST" "$MAIN" "$(pl_no_cwd TaskCompleted)" CLAUDE_TEST_CMD='false'; ec=$?
-check "fail-soft (exit 0) when payload has no cwd, before running the command" "$ec" 0
+check "BLOCKS (exit 2) when payload has no cwd, before running the command" "$ec" 2
 
 # =============================================================================
 echo "canon-check.sh (TaskCompleted — validates the payload's tree, external-canon mode):"
@@ -295,18 +302,92 @@ check "dod-affirm BLOCKS (exit 2) on an unparseable payload (couldn't-verify)" "
 invoke "$HOOK_TEST" "$MAIN" "$BADJSON" CLAUDE_TEST_CMD='true'; ec=$?
 check "test-gate BLOCKS (exit 2) on an unparseable payload" "$ec" 2
 invoke "$HOOK_DOCS" "$MAIN" "$BADJSON"; ec=$?
-check "docs-check stays fail-OPEN (exit 0) on an unparseable payload" "$ec" 0
-# The other side of the branch: a parseable dict with NO usable cwd is fail-soft
-# (never a block), and it emits the SKIP note on stderr.
+check "docs-check BLOCKS (exit 2) on an unparseable payload (gate, not a nudge)" "$ec" 2
+# A parseable dict with NO usable cwd also BLOCKS on the gates (operator ruling
+# 2026-07-08 — cannot-verify never passes), with the cannot-verify note on stderr.
 invoke "$HOOK_DOD" "$MAIN" '{"hook_event_name":"TaskCompleted"}'; ec=$?
-check "dod-affirm fail-soft (exit 0) on a parseable dict with no cwd" "$ec" 0
-check_contains "dod-affirm fail-soft emits the SKIP note on stderr" "$LAST_STDERR" "SKIPPED"
+check "dod-affirm BLOCKS (exit 2) on a parseable dict with no cwd" "$ec" 2
+check_contains "dod-affirm names cannot-verify on stderr" "$LAST_STDERR" "cannot verify"
 invoke "$HOOK_TEST" "$MAIN" '{"hook_event_name":"TaskCompleted"}' CLAUDE_TEST_CMD='true'; ec=$?
-check "test-gate fail-soft (exit 0) on a parseable dict with no cwd" "$ec" 0
-check_contains "test-gate fail-soft emits the SKIP note on stderr" "$LAST_STDERR" "SKIPPED"
-# A null (non-string) cwd is "no usable cwd" -> fail-soft, not a block.
+check "test-gate BLOCKS (exit 2) on a parseable dict with no cwd" "$ec" 2
+check_contains "test-gate names cannot-verify on stderr" "$LAST_STDERR" "cannot verify"
+# A null (non-string) cwd is "no usable cwd" -> BLOCK on a gate.
 invoke "$HOOK_DOD" "$MAIN" '{"hook_event_name":"TaskCompleted","cwd":null}'; ec=$?
-check "dod-affirm fail-soft (exit 0) on a null cwd" "$ec" 0
+check "dod-affirm BLOCKS (exit 2) on a null cwd" "$ec" 2
+
+# =============================================================================
+echo "assigned-tree resolution (teammate_name in payload; harness re-homing):"
+# The harness can re-home a session into a tree that is NOT its assignment.
+# When the payload carries teammate_name, gates must act on the ASSIGNED tree
+# (.claude/worktrees/<name> convention, or the worktree-assignments.tsv
+# override) and treat cwd purely as a hint — closing BOTH live failure modes:
+# false-block against a sibling red tree, and fail-open against a sibling
+# clean tree while the assigned tree holds an unverified completion.
+ASG="$MAIN/.claude/worktrees/tbot"
+mkdir -p "$MAIN/.claude/worktrees"
+git -C "$MAIN" worktree add -q -b worktree-tbot "$ASG" >/dev/null 2>&1
+mkdir -p "$ASG/.claude"
+
+# at-1 (fail-open KILLED): cwd points at sibling tree B whose HEAD HAS the DoD
+# affirmation; assigned tree tbot does NOT. Old cwd-resolution would PASS on the
+# sibling; assigned-tree resolution BLOCKS.
+invoke "$HOOK_DOD" "$MAIN" "$(pl_tm TaskCompleted "$WT" tbot)"; ec=$?
+check "dod-affirm BLOCKS when the ASSIGNED tree lacks the affirmation (cwd=clean sibling)" "$ec" 2
+check_contains "dod-affirm surfaces the re-homing mismatch note" "$LAST_STDERR" "re-homing"
+# test-gate flavor of the same kill: marker exists ONLY in sibling tree B.
+invoke "$HOOK_TEST" "$MAIN" "$(pl_tm TaskCompleted "$WT" tbot)" CLAUDE_TEST_CMD='test -f PASS_MARKER'; ec=$?
+check "test-gate BLOCKS when the command fails in the ASSIGNED tree (cwd=passing sibling)" "$ec" 2
+
+# at-2 (false-block KILLED): assigned tree tbot now carries the affirmation /
+# passes the command; cwd points at sibling tree A which would fail both.
+printf 'tbot work\n' >"$ASG/tbotfile.txt"
+printf '' >"$ASG/PASS_MARKER"
+git -C "$ASG" add tbotfile.txt PASS_MARKER
+git -C "$ASG" commit -q -F - <<'MSG'
+feat: tbot work
+
+[DoD-1] Contract: yes
+[DoD-2] Tests: yes | suite green
+[DoD-3] Docs: yes
+[DoD-4] Operability: n/a:test fixture
+[DoD-5] Scale: n/a:test fixture
+[DoD-6] No conflicts: yes
+MSG
+invoke "$HOOK_DOD" "$MAIN" "$(pl_tm TaskCompleted "$MAIN" tbot)"; ec=$?
+check "dod-affirm PASSES on the ASSIGNED tree affirmation (cwd=lead main tree)" "$ec" 0
+invoke "$HOOK_TEST" "$MAIN" "$(pl_tm TaskCompleted "$MAIN" tbot)" CLAUDE_TEST_CMD='test -f PASS_MARKER'; ec=$?
+check "test-gate PASSES when the command passes in the ASSIGNED tree (cwd=failing sibling)" "$ec" 0
+
+# at-3: docs-check gates the ASSIGNED tree, both directions.
+printf 'src only\n' >"$ASG/undocumented.ts"
+invoke "$HOOK_DOCS" "$MAIN" "$(pl_tm TeammateIdle "$MAIN" tbot)"; ec=$?
+check "docs-check BLOCKS on the ASSIGNED tree's undocumented source (cwd=clean sibling)" "$ec" 2
+rm -f "$ASG/undocumented.ts"
+printf 'sibling churn\n' >"$MAIN/churn.ts"
+invoke "$HOOK_DOCS" "$MAIN" "$(pl_tm TeammateIdle "$MAIN" tbot)"; ec=$?
+check "docs-check does NOT block a clean ASSIGNED tree for a dirty sibling cwd" "$ec" 0
+rm -f "$MAIN/churn.ts"
+
+# at-4: no assigned worktree for the named teammate -> BLOCK (provisioning gap),
+# never a fallback to the (possibly wrong) cwd tree.
+invoke "$HOOK_DOD" "$MAIN" "$(pl_tm TaskCompleted "$WT" ghost)"; ec=$?
+check "BLOCKS when the named teammate has no assigned worktree" "$ec" 2
+check_contains "names the provisioning gap on stderr" "$LAST_STDERR" "no assigned worktree"
+
+# at-5: worktree-assignments.tsv override wins over the convention; "." maps a
+# named agent to the main tree (conscious, visible exception).
+printf 'tbot2\t.claude/worktrees/tbot\nleadish\t.\n' >"$MAIN/.claude/worktree-assignments.tsv"
+invoke "$HOOK_DOD" "$MAIN" "$(pl_tm TaskCompleted "$MAIN" tbot2)"; ec=$?
+check "tsv override routes tbot2 to tbot's tree (affirmation found)" "$ec" 0
+printf '' >"$MAIN/PASS_MARKER"
+invoke "$HOOK_TEST" "$MAIN" "$(pl_tm TaskCompleted "$WT" leadish)" CLAUDE_TEST_CMD='test -f PASS_MARKER'; ec=$?
+check "tsv '.' row maps a named agent to the main tree" "$ec" 0
+rm -f "$MAIN/PASS_MARKER" "$MAIN/.claude/worktree-assignments.tsv"
+
+# at-6: main root reachable via CLAUDE_PROJECT_DIR when the payload has no cwd
+# at all (identity still resolves the assigned tree).
+invoke "$HOOK_TEST" "$MAIN" "$(pl_tm_nocwd TaskCompleted tbot)" CLAUDE_PROJECT_DIR="$MAIN" CLAUDE_TEST_CMD='test -f PASS_MARKER'; ec=$?
+check "assigned tree resolves via CLAUDE_PROJECT_DIR when payload lacks cwd" "$ec" 0
 
 # =============================================================================
 echo ""

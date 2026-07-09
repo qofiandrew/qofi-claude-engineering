@@ -453,6 +453,34 @@ shared working tree. The CTO creates `.claude/worktrees/<name>/` on branch
 only there. The CTO owns merges into the integration branch — see
 §*Integration branch & merge ownership* below.
 
+**Session↔worktree homing (gate integrity).** The harness can RE-HOME a
+teammate session into a tree that is not its assignment (seen live
+2026-07-08: completion/idle gates checked a sibling's tree — false-blocking a
+clean agent against a sibling's red tree, and worse, fail-OPEN passing a
+session homed in a clean sibling while its real assigned tree held an
+unverified completion). Three rules close this:
+
+- **Assignment is the identity, cwd is a hint.** A teammate's assignment IS
+  the `.claude/worktrees/<name>/` ↔ `worktree-<name>` convention above. For a
+  non-standard layout, record the exception in
+  `.claude/worktree-assignments.tsv` in the main tree (one row per teammate,
+  `name<TAB>path` relative to the main root; `.` maps a named agent to the
+  main tree — a conscious, visible exception, e.g. a named lead). You own
+  this file; teammates never edit it.
+- **Spawn and re-home into the assigned tree.** Provision the worktree BEFORE
+  spawn (above), spawn the teammate with its working directory in its
+  assigned worktree, and treat any observed re-homing as a defect to surface
+  — never as a reason to let work land in the wrong tree.
+- **Gates resolve the ASSIGNED tree and fail closed.** The TaskCompleted /
+  TeammateIdle hooks (test-gate, dod-affirm, canon-check, docs-check) resolve
+  the tree to verify from the payload's `teammate_name` → assignment, never
+  from the session's (re-homeable) cwd; a solo/lead event (no teammate_name)
+  resolves from cwd. Anything unresolvable — no assigned worktree for the
+  named teammate, unparseable payload, no tree at all — BLOCKS as
+  cannot-verify rather than passing or skipping (operator ruling 2026-07-08).
+  A "no assigned worktree" block is a provisioning gap: provision the
+  worktree (or add the assignments row), then re-run.
+
 This is the structural defense against the **sibling-staging race**:
 two teammates committing in overlapping windows in a shared tree produce
 commit-attribution swaps (the commit titled "X" actually contains Y's

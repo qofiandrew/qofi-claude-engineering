@@ -480,3 +480,29 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   (`"integrity": "sha512-…"`, content-bound, `regexTarget = "line"`) — public
   checksums, not credentials; every dep-adding commit had tripped the scan
   into a CTO-sanctioned bypass. CI referee scan unchanged as backstop.
+- `2026-07-08` — **Session↔worktree homing — gates resolve the ASSIGNED tree,
+  fail-closed (operator ruling)** (deployment-core live incident: harness
+  re-homed teammate sessions into sibling worktrees; completion/idle gates
+  checked the wrong tree — false-blocking a clean agent against a sibling's
+  red tree (active re-fire loop) AND fail-OPEN passing a session homed in a
+  clean sibling while its assigned tree held an unverified completion). The
+  four gate hooks (test-gate, dod-affirm, canon-check, docs-check) now share
+  an assigned-tree resolver: a payload carrying `teammate_name`
+  (TaskCompleted/TeammateIdle carry it — verified against the installed CLI's
+  event schema) resolves the teammate's ASSIGNED tree — the optional
+  `.claude/worktree-assignments.tsv` override (`name<TAB>path`; `.` = main
+  tree) else the `.claude/worktrees/<name>` convention — with the main root
+  reachable from ANY sibling tree via `git rev-parse --git-common-dir`, else
+  `$CLAUDE_PROJECT_DIR`; the session's re-homeable cwd is a hint only (a
+  mismatch is surfaced as a re-homing NOTE). Solo/lead events (no
+  teammate_name) resolve from payload cwd. EVERY unresolvable case —
+  unparseable payload, no tree, no assigned worktree for the named teammate,
+  python3 absent — now BLOCKS as cannot-verify: the operator ruling
+  supersedes the earlier fail-soft-on-no-cwd posture on test-gate/dod-affirm
+  and the fail-open posture on docs-check (session-summary/quality-check stay
+  advisory fail-soft). TEAM_LEAD.md §Worktree isolation gains the homing
+  discipline (spawn/re-home into the assigned tree; assignments file is
+  CTO-owned). Tests: test-hooks-worktree-resolution.sh expanded to 47 —
+  assigned-tree kills for both live failure modes, tsv override + `.`
+  mapping, provisioning-gap block, CLAUDE_PROJECT_DIR fallback, posture
+  flips. Hooks stay bash-3.2-safe (single-quote-free python3 -c resolver).
