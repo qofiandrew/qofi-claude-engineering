@@ -7,7 +7,9 @@
     "discord-b2b@qofi-swarm": true
   },
   "permissions": {
-    "allow": ["mcp__plugin_discord-b2b_discord__reply"]
+    "allow": [
+      "mcp__plugin_discord-b2b_discord__reply"
+    ]
   },
   "hooks": {
     "PermissionRequest": [
@@ -27,6 +29,17 @@
           {
             "type": "command",
             "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/discord-reply-nudge.sh\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-doctrine.sh\"",
             "timeout": 15
           }
         ]

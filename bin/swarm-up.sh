@@ -47,6 +47,42 @@ _wait_for() {  # session pattern timeout
   return 1
 }
 
+# Press Enter until `pattern` DISAPPEARS from the pane (or timeout). The inverse
+# of _wait_for: used to clear a prompt where a single blind Enter can race the
+# TUI (observed: the dev-channels prompt swallowing the first Enter, which then
+# desynced everything typed after it — effort + brief landed into the wrong UI
+# state and the lead never received its doctrine brief). Re-sending Enter while
+# the prompt is still visible is idempotent; returns 0 once the prompt is gone.
+_enter_until_gone() {  # session pattern timeout
+  local sess="$1" pat="$2" tmo="${3:-15}" i=0
+  while [ "$i" -lt "$tmo" ]; do
+    if ! tmux capture-pane -t "$sess" -p 2>/dev/null | grep -qF -- "$pat"; then
+      return 0
+    fi
+    tmux send-keys -t "$sess" Enter
+    sleep 1; i=$((i+1))
+  done
+  return 1
+}
+
+# Submit already-typed input and verify Claude actually started processing it:
+# after a real submission the running footer ("esc to interrupt") appears. A
+# lost Enter leaves the text sitting in the input box — in that case re-press
+# Enter and re-check, up to `tries`. This is the submission guarantee for the
+# effort command and the launch brief; without it a swallowed Enter meant the
+# lead silently never read its doctrine.
+_submit_verified() {  # session tries
+  local sess="$1" tries="${2:-3}" t=0
+  while [ "$t" -lt "$tries" ]; do
+    tmux send-keys -t "$sess" Enter
+    if _wait_for "$sess" "esc to interrupt" 10; then
+      return 0
+    fi
+    t=$((t+1))
+  done
+  return 1
+}
+
 [ -f "$CONF" ] || { echo "swarm-up: missing $CONF" >&2; exit 1; }
 # F1 token isolation (ADR-0018): the launcher must NOT source the shared vault into
 # its OWN process. tokens.env uses `export`, so `. '$TOKENS'` would export every
@@ -429,7 +465,12 @@ launch_one() {  # name repo tokvar [channel] [account]
   if ! _wait_for "$sess" "I am using this for local development" 20; then
     echo "  WARN: dev-channels prompt didn't appear in 20s — lead may not start" >&2
   fi
-  tmux send-keys -t "$sess" Enter
+  # Press Enter until the prompt actually clears — a single blind Enter here
+  # raced the TUI and, when swallowed, desynced everything sent after it (the
+  # effort command and the doctrine brief landed into the wrong UI state).
+  if ! _enter_until_gone "$sess" "I am using this for local development" 15; then
+    echo "  WARN: dev-channels prompt did not clear after repeated Enter — launch sequence may be desynced" >&2
+  fi
 
   # After accepting, claude needs a moment to load plugins and render the main
   # input prompt. The "auto mode" hint in the footer is a reliable readiness marker.
@@ -456,6 +497,12 @@ launch_one() {  # name repo tokvar [channel] [account]
   tmux send-keys -t "$sess" "$(swarm_effort_for "$repo_type")"
   sleep 1
   tmux send-keys -t "$sess" Enter
+  # Belt for a swallowed Enter: a slash command gives no "esc to interrupt"
+  # footer to verify against, so send a second Enter after a beat — if the
+  # first submitted, this lands on an empty input box and is a no-op; if the
+  # first was swallowed, this is the submit.
+  sleep 1
+  tmux send-keys -t "$sess" Enter
 
   # Send the brief, then submit. A trailing C-m on the same send-keys call gets
   # absorbed into the input (treated as part of the paste) and does NOT fire
@@ -468,7 +515,17 @@ launch_one() {  # name repo tokvar [channel] [account]
   brief="$(swarm_launch_brief "$repo_type")"
   tmux send-keys -t "$sess" "$brief"
   sleep 1
-  tmux send-keys -t "$sess" Enter
+  # VERIFIED submit: the brief is the doctrine-read instruction — a swallowed
+  # Enter here is exactly the "swarm never read its doctrine" failure. After a
+  # real submission Claude starts processing and the running footer ("esc to
+  # interrupt") appears; retry Enter until it does. The stamped SessionStart
+  # hook (session-doctrine.sh) is the harness-level backstop if even this
+  # fails, but the brief carries the full orientation so its delivery is
+  # verified, not assumed.
+  if ! _submit_verified "$sess" 3; then
+    echo "  WARN: $sess: launch brief may not have submitted — check the pane" >&2
+    echo "        (tmux attach -t $sess; press Enter if the brief sits in the input box)" >&2
+  fi
 }
 
 cmd_up() {  # [name]
