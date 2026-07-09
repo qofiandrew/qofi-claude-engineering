@@ -327,3 +327,38 @@ rules:
           while True:
               ...
               raise ...
+
+  # ===========================================================================
+  # §Modular design — module-internal `private.ts` encapsulation boundary
+  #   A module may keep its internal capabilities (e.g. a sealed store's
+  #   governed-write capability) in a `private.ts` that only the module's own
+  #   files import. Importing ANOTHER module's `private.ts` reaches past that
+  #   boundary and turns a structural seal back into a convention. This rule
+  #   makes the prose floor structural: a cross-module `../<other>/private`
+  #   import in src/ is an ERROR. A module's OWN `./private.js` import (same
+  #   dir) and a test's own-module probe are NOT matched (the pattern requires
+  #   `../` leaving into another module, and paths are scoped to src/). Inert
+  #   in repos that do not use the private.ts convention. Origin:
+  #   deployment-core (operator decision 2026-07-03), upstreamed 2026-07-09.
+  #   Repo-SPECIFIC symbol-keyed variants (barrel-re-export laundering guards
+  #   naming a module's actual internals) belong in the repo's own
+  #   .claude/semgrep/qofi-local.yml, never in this shared file.
+  # ===========================================================================
+
+  - id: qofi-no-cross-module-private-import
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      Cross-module import of another module's `private.ts` — this reaches past
+      the module's encapsulation boundary and can obtain internal capabilities
+      (e.g. a sealed store's governed-write cap). CLAUDE.md §Modular design:
+      depend only on contract surfaces, never on internals. A module's
+      `private.ts` is internal-only; import from its public files instead.
+      (Own-module `./private.js` is fine.)
+    metadata:
+      doctrine: "CLAUDE.md §Modular design — depend only on contract surfaces"
+      category: encapsulation
+    pattern-regex: 'from\s+["'']\.\.\/[^"'']+\/private(\.js)?["'']'
+    paths:
+      include:
+        - "src/"

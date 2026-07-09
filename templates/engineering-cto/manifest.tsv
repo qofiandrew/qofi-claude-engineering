@@ -118,4 +118,8 @@ refresh      | engineering-cto/skills/perf-budgets/SKILL.md                     
 refresh      | engineering-cto/skills/at-scale-ops/SKILL.md                                                              | .claude/skills/at-scale-ops/SKILL.md | on-demand at-scale batch-op playbook (logging/observability + operability detail: structured logs, levels, run-ids, per-run summary, operator/support/audit controls); floor DoD hooks stay in CLAUDE.md §Error handling/§Logging/§Operability
 refresh      | engineering-cto/skills/data-migrations/SKILL.md                                                          | .claude/skills/data-migrations/SKILL.md | on-demand data-migration playbook (expand-contract steps, batched idempotent backfill, at-scale online patterns, test-on-a-copy); floor safety + DoD hooks stay in CLAUDE.md §Data migrations
 # R4 local semgrep ruleset (consumed by security-scan.sh via SEMGREP_CONFIG; not a skill).
-refresh      | engineering-cto/semgrep/qofi-doctrine.yml                                                                 | .claude/semgrep/qofi-doctrine.yml | R4 semgrep rules: error-handling/DB/suppression/bounded-loop; pin via SEMGREP_CONFIG in security-scan.sh
+refresh      | engineering-cto/semgrep/qofi-doctrine.yml                                                                 | .claude/semgrep/qofi-doctrine.yml | R4 semgrep rules: error-handling/DB/suppression/bounded-loop/private-import; pin via SEMGREP_CONFIG in security-scan.sh
+# Repo-LOCAL semgrep extension: seeded once, NEVER refreshed — the CTO's channel for
+# repo-structural rules (symbol-keyed guards etc.) that must survive sync. Generic
+# rules go in qofi-doctrine.yml upstream, never here.
+seed         | engineering-cto/semgrep/qofi-local.template.yml                                                           | .claude/semgrep/qofi-local.yml | repo-local semgrep rules (CTO-owned; survives sync; security-scan.sh picks it up automatically)

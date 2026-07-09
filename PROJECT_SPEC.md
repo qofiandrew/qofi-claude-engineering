@@ -506,3 +506,25 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   assigned-tree kills for both live failure modes, tsv override + `.`
   mapping, provisioning-gap block, CLAUDE_PROJECT_DIR fallback, posture
   flips. Hooks stay bash-3.2-safe (single-quote-free python3 -c resolver).
+- `2026-07-09` — **Semgrep local-extension channel — closes the sync-clobber
+  gap** (flagged 2026-07-08; deployment-core was unsafe for full swarm-sync
+  because the manifest's semgrep `refresh` would clobber its repo-local
+  rules). Two-part fix: (1) the generic rule upstreamed —
+  `qofi-no-cross-module-private-import` (cross-module `private.ts` import in
+  src/ is an ERROR; mechanizes CLAUDE.md §Modular design "depend only on
+  contract surfaces"; inert where the convention is unused; origin
+  deployment-core, operator decision 2026-07-03) now lives in the doctrine
+  ruleset (12 rules). (2) New seed-class manifest artifact
+  `.claude/semgrep/qofi-local.yml` (from `qofi-local.template.yml`) — seeded
+  once, NEVER refreshed: the CTO's channel for repo-structural rules
+  (symbol-keyed guards etc.) that must survive doctrine stamps;
+  `bin/security-scan.sh` includes it automatically when present (bash-3.2
+  array args). deployment-core reconciled: its symbol-keyed
+  `qofi-no-cross-module-private-import-credential-vault` moved to its
+  qofi-local.yml, doctrine file reset to template, CI workflow passes both
+  configs; verified — 13 rules valid, rule-set identity vs the old combined
+  file, CI blocking gate (--severity ERROR --error) green before and after,
+  and the apparent WARN delta proven a /tmp-prefix artifact of nosemgrep
+  path-derived rule ids, not a behavior change. deployment-core is now SAFE
+  for full swarm-sync. Tests: test-security-scan.sh 14 PASS (+3: local
+  ruleset passed as extra --config iff present).

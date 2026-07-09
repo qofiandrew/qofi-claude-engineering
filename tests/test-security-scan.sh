@@ -53,6 +53,25 @@ run_ss "GITLEAKS_BIN=$TMP/bin/gitleaks SEMGREP_BIN=$TMP/bin/semgrep GL_RC=0 SG_R
 assert_eq 1 "$RC" 'semgrep finding -> exit 1'
 
 echo ""
+echo "=== repo-local semgrep extension (.claude/semgrep/qofi-local.yml) ==="
+# An argument-recording semgrep stub: proves the local ruleset is passed as a
+# second --config exactly when the file exists in the invocation cwd.
+printf '#!/usr/bin/env bash\necho "$@" > "${SG_ARGLOG:?}"\nexit 0\n' > "$TMP/bin/semgrep-rec"; chmod +x "$TMP/bin/semgrep-rec"
+LOCALREPO="$TMP/localrepo"; mkdir -p "$LOCALREPO/.claude/semgrep"
+printf 'rules: []\n' > "$LOCALREPO/.claude/semgrep/qofi-local.yml"
+( cd "$LOCALREPO" && env -i PATH="$PATH" GITLEAKS_BIN="$TMP/bin/gitleaks" SEMGREP_BIN="$TMP/bin/semgrep-rec" \
+    SG_ARGLOG="$TMP/sg_args" SEMGREP_CONFIG=".claude/semgrep/qofi-doctrine.yml" bash "$SS" >/dev/null 2>&1 )
+assert_has 'qofi-local.yml' "$(cat "$TMP/sg_args")" 'local ruleset present -> passed as an extra --config'
+assert_has 'qofi-doctrine.yml' "$(cat "$TMP/sg_args")" 'primary config still passed alongside'
+BARE="$TMP/barerepo"; mkdir -p "$BARE"
+( cd "$BARE" && env -i PATH="$PATH" GITLEAKS_BIN="$TMP/bin/gitleaks" SEMGREP_BIN="$TMP/bin/semgrep-rec" \
+    SG_ARGLOG="$TMP/sg_args2" bash "$SS" >/dev/null 2>&1 )
+case "$(cat "$TMP/sg_args2")" in
+  *qofi-local*) FAIL=$((FAIL+1)); FAILURES="$FAILURES\n  - no local ruleset -> must not pass qofi-local config" ;;
+  *) PASS=$((PASS+1)); printf '  PASS  %s\n' 'no local ruleset -> no extra --config' ;;
+esac
+
+echo ""
 echo "=== bare --range (no value) exits cleanly, never hangs (bash-3.2 shift guard) ==="
 run_ss '' --range
 assert_eq 2 "$RC" 'bare --range -> exit 2 (usage error, not an infinite loop)'

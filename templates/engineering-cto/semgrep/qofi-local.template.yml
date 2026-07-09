@@ -1,0 +1,20 @@
+# qofi-local.yml — REPO-LOCAL semgrep rules (CTO-owned; sync never touches this).
+#
+# The shared doctrine ruleset lives in .claude/semgrep/qofi-doctrine.yml and is
+# REFRESHED wholesale by swarm-sync — anything added there is clobbered on the
+# next stamp. This file is the local-extension channel: it is SEEDED once and
+# never refreshed, so repo-structural rules survive every sync.
+#
+# What belongs here: rules keyed to THIS repo's actual structure — symbol-keyed
+# encapsulation guards (e.g. a barrel-re-export laundering guard naming a
+# module's real internal accessors), path-specific boundaries, product-specific
+# invariants. What does NOT: anything generic enough for every swarm — that is
+# a doctrine change; surface it upstream (qofi-claude-engineering
+# templates/engineering-cto/semgrep/qofi-doctrine.yml) instead of forking here.
+#
+# Consumed alongside the doctrine file by bin/security-scan.sh (automatic when
+# this file exists) and by CI — keep the CI workflow's semgrep invocation
+# passing BOTH configs. An empty `rules: []` is valid; leave it empty until a
+# rule earns its place (CLAUDE.md §Working with existing code: every rule
+# traces to a real boundary, not speculation).
+rules: []
