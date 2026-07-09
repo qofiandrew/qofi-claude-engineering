@@ -528,3 +528,62 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   path-derived rule ids, not a behavior change. deployment-core is now SAFE
   for full swarm-sync. Tests: test-security-scan.sh 14 PASS (+3: local
   ruleset passed as extra --config iff present).
+- `2026-07-09` — **User-assisted `/login` relay — rotation re-auth without
+  credential blobs** (branch `feat/login-relay`). Rotation was blocked on
+  credential provisioning: `swarm-credswap-keychain.sh` needs operator-
+  provisioned blobs (`SWARM_CREDSWAP_BLOB_FETCH`/`_FILE`), which can't be
+  produced automatically — Claude Code auth requires the interactive `/login`
+  browser flow. New actuator **`bin/swarm-login-relay.sh [--force] [<swarm>]`**
+  replaces the blob-swap model with a user-assisted re-auth: send `/login` to
+  the swarm's live pane (default `qofi-product`; one pane re-auths the fleet —
+  the default account is SHARED keychain state), scrape the OAuth URL from
+  `capture-pane` (method-picker handled with exactly one Enter), post the URL
+  to that swarm's Discord channel (the swarm-watch direct-curl pattern; token
+  by var name in a scoped subshell, never echoed), wait for the operator's
+  browser auth (default 15 min), send Enter to resume, then verify via
+  `swarm-auth-probe.sh` and map to the **credswap exit contract**: probe 0 →
+  exit 0 (rotate relaunches), probe 75 → exit 7 (ring exhaustion), else exit 4
+  (verify failed). Distinct loud codes for every failure leg (3 working-pane
+  refusal, 5 URL timeout, 6 Discord post failed, 8 operator timeout); EVERY
+  failure path Escapes out of the login UI — the pane is never left wedged in
+  a modal nobody knows about, and a post failure aborts the login rather than
+  leave an unrelayed link pending. All effects behind seams (tmux, post cmd,
+  URL regex, picker/success patterns, both timeouts + poll interval, auth
+  probe, tokens file). **Wiring (zero changes to swarm-rotate/tick):**
+  `export SWARM_CREDSWAP_CMD="$SWARM_HOME/bin/swarm-login-relay.sh"` — no
+  `"$1"` suffix; the account handle is logged but the ACCOUNT CHOICE happens
+  in the operator's browser (the relay diagnoses the `"$1"` miswiring
+  explicitly). Rotation becomes: checkpoint → login-relay (operator
+  authenticates in browser) → fleet relaunch on the fresh shared-keychain
+  credential. **Adversarial-review hardening** (12 confirmed findings from a
+  5-lens × 3-verifier review, all fixed): (1) STALE-CONTENT discipline — every
+  pane detector is freshness-gated against a BASELINE frame captured before
+  `/login` (URL = bottom-most match not in the baseline; picker/success fire
+  only when matching-line count exceeds the baseline's), closing the
+  stale-URL-reposted, phishing-URL-relayed, picker-flag-burned, and
+  false-login-success failure modes; (2) narrowed default patterns
+  (`select login method`, `login successful|successfully logged in` — bare
+  "subscription"/"logged in" match ordinary prose and "NOT logged in") and a
+  URL-charset-bounded regex (box-drawing chrome never swallowed into the
+  link); (3) single-instance mkdir+PID lock (swarm-watch idiom) — a manual
+  relay can't double-drive a tick-relay's open login UI (the pane guard can't
+  see one: a login modal reads as idle); (4) step-6 clean-boundary RE-CHECK —
+  rotate's guard runs before the minutes-long operator wait and relaunches
+  blind on hook-exit-0, so the relay re-verifies the same `repo_activity`
+  signal fleet-wide and waits (bounded, `SWARM_LOGIN_IDLE_TIMEOUT`) before
+  handing back, warning loud on timeout; (5) `SWARM_LOGIN_POLL_INTERVAL`
+  validated (a bad value hot-looped capture-pane for up to 15 min).
+  Tests: `tests/test-swarm-login-relay.sh` (87 PASS) — mock tmux (records
+  send-keys, serves scripted capture frames), PATH-stubbed curl (records
+  payload, scripted HTTP code), stubbed probe; covers the nine directive
+  cases incl. picker-once, refuse-before-touching-the-pane, rotate-style
+  `sh -c` invocation, token no-leak — plus the staleness/lock/boundary
+  closes, with mutation-verified assertions (exact keystrokes, `-J` capture
+  argv, curl argv shape, resume-Enter ordering, bottom-most-fresh-URL).
+- `2026-07-09` — **Fix: `swarm-up.sh` codex-lead access.json seeding routed
+  through `swarm_account_resolve`** — `_launch_codex_lead` (61e7156)
+  hand-built `$HOME/.claude/channels/discord/access.json`, tripping the
+  sole-constructor backstop (`test-account-paths-sole-constructor.sh`) and
+  leaving the suite red. Now resolves the DEFAULT account's access file via
+  the resolver (codex ignores account labels, so the default is the right
+  source) — which also makes the seed honor `SWARM_ACCESS_FILE` uniformly.
