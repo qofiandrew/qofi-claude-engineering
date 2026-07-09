@@ -725,3 +725,29 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   `proxy_verdict=NEAR`, `real_signal=OK`, `would_rotate=yes`, still NOT rotating
   under observe mode). Going fully live (`SWARM_TICK_OBSERVE=0`) remains the
   operator's call.
+- `2026-07-09` — **Rotation LIVE — the operator dropped the calibration gate.** The
+  observe run met the enable criteria (`real_signal=OK` on a smooth 5h/weekly
+  curve, `would_rotate=no`, `account=default`), so the operator flipped
+  `SWARM_TICK_OBSERVE=0` in the gitignored `launchd/rotate-tick.env.local`. The
+  installer re-rendered `com.qofi.swarm-rotate-tick.plist` WITHOUT `--observe`
+  (6 operator env keys merged, `plutil -lint` OK, atomic install) and reloaded
+  the agent. `com.qofi.swarm-rotate-tick` now runs the full loop every 300s:
+  poll → route → on NEAR/AT invoke the actuator (`swarm-rotate.sh`) to
+  checkpoint every repo, swap credentials via `swarm-login-relay.sh` (OAuth URL
+  posted to the qofi-product Discord channel; the operator's browser picks the
+  account) and relaunch the fleet. This completes the
+  observe → calibrate → enable sequence begun earlier today.
+  **Verification.** A kickstarted live tick logged the non-observe path
+  (`verdict OK (exit 0) — headroom remains; no rotation`; 5h=9% weekly=2%), the
+  loaded launchd job shows zero `--observe` arguments, and the full suite is
+  green (55/55). The actuator path a NEAR tick *would* take was pre-flighted
+  with `swarm-rotate.sh --dry-run`: the ring resolved (`<unset>` → `max-a`) and
+  the clean-boundary guard correctly REFUSED (exit 3) because `deployment-core`
+  was mid-turn — demonstrating live that a rotation waits for an idle fleet
+  rather than restarting working leads (in-process teammates are RAM-only and do
+  not survive relaunch). The isolated `swarm-usage-probe` session remains the
+  only pane the detector touches.
+  **Disarm.** Set `SWARM_TICK_OBSERVE=1` (or delete `rotate-tick.env.local`) and
+  re-run `bin/swarm-launchd-install.sh`; deleting the file reverts to a
+  byte-identical unwired plist, which `swarm-rotate.sh` refuses to act on. Never
+  hand-edit the installed plist — the installer owns it (ADR-0018 discipline).
