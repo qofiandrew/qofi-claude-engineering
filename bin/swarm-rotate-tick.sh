@@ -343,6 +343,10 @@ fi
 # ---------------------------------------------------------------------------
 # 1) POLL — run the trigger; its exit code is the verdict we route on.
 # ---------------------------------------------------------------------------
+# Live ticks stamp a timestamp line first (observe mode carries ts= in its own
+# OBSERVE line) — without it the log is a sequence of undated readings and
+# post-hoc forensics ("when did 5h hit 94%?") are guesswork.
+[ "$OBSERVE" -eq 0 ] && log "tick ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%s)"
 # We capture the poll's own stdout for the log but route ONLY on its exit code
 # (the contract: 0/10/20/3/2). The poll is read-only — it never mutates anything.
 POLL_OUT="$(sh -c "$POLL_CMD" 2>&1)"; poll_rc=$?

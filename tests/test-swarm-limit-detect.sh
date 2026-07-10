@@ -40,7 +40,14 @@ CONF
 
 run() {  # PANE_STUB OR_POLL_FLAG... -> OUT, rc. PANE_STUB sees session in $1.
   local stub="$1"; shift
+  # SWARM_STATE_DIR pins the pane-signal latch to a per-run dir, wiped each
+  # invocation: without it the detector would read/write the REAL machine's
+  # latch (~/.config/swarm), and a live latched signature could suppress the AT
+  # cases here. (The notice TIER itself is disabled in these runs — pane-state
+  # injected without a notice cmd — but the latch guards the cap path too.)
+  rm -rf "$TMP/latch-state"
   OUT="$(SWARM_HOME="$FAKE_HOME" SWARM_PANE_STATE_CMD="$stub" \
+         SWARM_STATE_DIR="$TMP/latch-state" \
          SWARM_POLL_CMD_INNER="$PROXY" bash "$DETECT" "$@" 2>&1)"; rc=$?
 }
 
