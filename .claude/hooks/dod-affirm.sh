@@ -63,10 +63,16 @@ fi
 
 # Also pull the most recent commit message on HEAD (if this is a git repo and
 # there is at least one commit). Tasks routinely end in a commit, so the
-# affirmation lives there naturally.
+# affirmation lives there naturally. Under the repo's --no-ff discipline the
+# tip is often a MERGE commit whose message legitimately lacks the DoD lines —
+# they live on the feature commit directly beneath it — so ALSO read the newest
+# NON-merge commit. Same trust model ("the latest work commit or the summary"),
+# now blind to the merge wrapper instead of blinded by it.
 HEAD_MSG=""
 if cd "$ROOT" 2>/dev/null && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   HEAD_MSG="$(git log -1 --pretty=%B 2>/dev/null || true)"
+  HEAD_MSG="$HEAD_MSG
+$(git log --no-merges -1 --pretty=%B 2>/dev/null || true)"
 fi
 
 CORPUS="$(printf '%s\n%s\n' "$CANDIDATES" "$HEAD_MSG")"
