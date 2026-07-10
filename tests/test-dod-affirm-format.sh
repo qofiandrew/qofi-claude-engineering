@@ -66,5 +66,26 @@ run 2 "$(printf '[DoD-1] Contract: yes\n[DoD-2] Tests: yes\n')" "missing lines s
 run 2 "$(block '[DoD-2] Tests: maybe | yes')" "'maybe | yes' still BLOCKS (verdict must lead)"
 
 echo ""
+echo "=== merge-wrapper blindness: DoD lines on the feature commit under a --no-ff merge still satisfy the gate ==="
+# Repro of the live false-block (2026-07-09/10): work commits carry the DoD
+# block, the branch is merged --no-ff, so HEAD is a merge commit WITHOUT the
+# lines. The hook must read the newest NON-merge commit too — same trust model
+# ("the latest work commit or the summary"), blind to the merge wrapper.
+git -C "$WORK" -c user.email=t@t -c user.name=t checkout -q -b feat-dod
+git -C "$WORK" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "feat: thing
+
+$(block)"
+git -C "$WORK" -c user.email=t@t -c user.name=t checkout -q dev
+git -C "$WORK" -c user.email=t@t -c user.name=t merge -q --no-ff feat-dod -m "merge: thing"
+run 0 "" "empty summary + DoD-stamped feature commit under a --no-ff merge PASSES"
+# And the fix does not weaken the gate: a merge atop a feature commit that
+# LACKS the lines still blocks on an empty summary.
+git -C "$WORK" -c user.email=t@t -c user.name=t checkout -q -b feat-nodod
+git -C "$WORK" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "feat: unaffirmed thing"
+git -C "$WORK" -c user.email=t@t -c user.name=t checkout -q dev
+git -C "$WORK" -c user.email=t@t -c user.name=t merge -q --no-ff feat-nodod -m "merge: unaffirmed thing"
+run 2 "" "merge atop an UNaffirmed feature commit still BLOCKS on an empty summary"
+
+echo ""
 printf 'dod-affirm-format: %s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
