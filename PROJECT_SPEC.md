@@ -860,3 +860,19 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   seconds of firing (delivery works), and it surfaced a defect no stubbed test
   could see (the mock frames never hard-wrapped). Pinned: `-x 800` in the
   create argv; truncated-URL → exit 5 + zero Discord posts. Suite 61/61.
+- `2026-07-10` — **Drill #2: full happy path proven live — with one flow
+  discovery.** Post-fix re-run: 450-char URL captured intact (state= present),
+  posted to Discord; operator authenticated; success detected → resume Enter →
+  auth probe verified → /usage probe recycled → latch armed → exit 0. Zero CTO
+  panes touched; no restart. Credential now support@qofi.ai (operator's browser
+  choice, per the model). **Discovery:** the "just press Enter" behavior the
+  relay was built against is LOCATION-DEPENDENT. Same-machine /login uses a
+  localhost OAuth callback (code auto-delivered). A RELAYED URL opened on
+  another device uses the paste-back variant (redirect_uri=platform.claude.com/
+  oauth/code/callback): the browser shows a CODE the user must paste into the
+  pane. The relay is one-way (posts to Discord, cannot read replies), so a
+  fully remote login cannot complete unaided — this drill's code was
+  hand-carried into the pane via send-keys. Proposed v2 (operator decision
+  pending): after posting the URL, poll the channel for a code-shaped operator
+  reply and type it into the pane — closing the last gap for phone-only
+  rotation.
