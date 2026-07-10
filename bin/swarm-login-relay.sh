@@ -256,6 +256,15 @@ CURL_MAX_TIME="${SWARM_LOGIN_CURL_TIMEOUT:-10}"
 # chrome, and a permissive class would swallow an adjacent box-drawing border
 # into the posted link. Chars beyond this set end the match.
 URL_REGEX="${SWARM_LOGIN_URL_REGEX:-https://[A-Za-z0-9./?=&_%:~#+-]*oauth[A-Za-z0-9./?=&_%:~#+-]*}"
+# COMPLETENESS gate: a regex match can still be a WIDTH-TRUNCATED fragment (the
+# TUI hard-wraps long URLs into separate rows that -J cannot rejoin; a clipped
+# link 404s in the operator's browser with "Missing state parameter"). A
+# candidate URL must contain this substring — on the observed OAuth shape,
+# state= is the LAST parameter, so its presence implies the whole URL survived.
+# A truncated candidate is treated as not-yet-rendered: the relay keeps polling
+# and, if nothing complete ever renders, times out LOUD (Escape, exit 5) rather
+# than posting a broken link. Set empty to disable.
+URL_REQUIRE="${SWARM_LOGIN_URL_REQUIRE-state=}"
 # NARROW pattern defaults on purpose. Broad words ("subscription", bare
 # "logged in") appear in ordinary conversation content that is still visible in
 # the capture; the freshness gate below reduces that exposure but the defaults
@@ -285,7 +294,13 @@ PROBE_READY_PAT="${SWARM_LOGIN_PROBE_READY_PAT:-for agents|for shortcuts|auto mo
 PROBE_TRUST_PAT="${SWARM_LOGIN_PROBE_TRUST_PAT:-trust the files|Do you trust|Yes, proceed}"
 PROBE_LAUNCH_TIMEOUT="${SWARM_LOGIN_PROBE_LAUNCH_TIMEOUT:-40}"
 PROBE_ROWS="${SWARM_LOGIN_PROBE_ROWS:-60}"
-PROBE_COLS="${SWARM_LOGIN_PROBE_COLS:-200}"
+# COLS must exceed the OAuth URL's length: the TUI HARD-wraps a too-long URL
+# into separate drawn rows (not tmux soft-wraps — `-J` cannot rejoin them), and
+# a width-clipped URL is a broken link. The live drill 2026-07-10 posted a
+# 200-char fragment of a ~450-char URL ("Missing state parameter") from a
+# 200-col pane. 800 is ~2x the observed URL; the URL_REQUIRE gate below fails
+# loud if a future URL outgrows even this.
+PROBE_COLS="${SWARM_LOGIN_PROBE_COLS:-800}"
 
 # Timeouts feed $((...)) arithmetic — a non-integer would blow up mid-flow (or
 # worse, after we already opened the login UI). The poll interval feeds sleep —
@@ -609,10 +624,21 @@ fi
 
 URL=""
 PICKER_SENT=0
+TRUNC_WARNED=0
 _deadline=$((SECONDS + URL_TIMEOUT))
 while :; do
   _frame="$(pane_capture)"
   URL="$(extract_fresh_url "$_frame")"
+  # COMPLETENESS gate (see URL_REQUIRE above): a width-truncated fragment must
+  # never be posted — treat it as not-yet-rendered and keep polling; the
+  # timeout path fails loud instead of shipping a broken link.
+  if [ -n "$URL" ] && [ -n "$URL_REQUIRE" ] && ! printf '%s' "$URL" | grep -qF -- "$URL_REQUIRE"; then
+    if [ "$TRUNC_WARNED" -eq 0 ]; then
+      echo "$PROG: WARNING — candidate URL (${#URL} chars) lacks '$URL_REQUIRE'; likely WIDTH-TRUNCATED by the pane. Not posting it. Widen SWARM_LOGIN_PROBE_COLS (or the target pane) if this persists to timeout." >&2
+      TRUNC_WARNED=1
+    fi
+    URL=""
+  fi
   [ -n "$URL" ] && break
   # Method-picker (subscription vs console account): accept the default with
   # ONE Enter, once, and keep polling for the URL. Freshness-gated so stale

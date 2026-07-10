@@ -166,8 +166,27 @@ T_HAS_SESSION_RC=1
 run_dedicated --dedicated prodtest
 assert_eq 0 "$rc" "dedicated create path exits 0"
 assert_has "$(grep '^new-session' "$MOCK_TMUX_LOG" | head -n1)" "swarm-login-probe" "created the probe session (new-session)"
+assert_has "$(grep '^new-session' "$MOCK_TMUX_LOG" | head -n1)" "-x 800" "probe created 800 cols wide — the OAuth URL must render UNWRAPPED (a 200-col pane hard-clipped it to a broken link, live 2026-07-10)"
 assert_has "$(send_keys_log)" "exec claude" "launched a plain claude in the probe session"
 assert_lacks "$(send_keys_log)" "swarm-prodtest" "create path also never touches a CTO pane"
+
+echo ""
+echo "=== 2b) COMPLETENESS gate: a width-truncated URL (no state=) is NEVER posted ==="
+# The real failure: the TUI hard-wraps a ~450-char URL at pane width; the
+# captured fragment ends mid-parameter. The relay must treat it as not-yet-
+# rendered and time out LOUD — not post a broken link.
+TRUNC_URL='https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=org%3A'
+reset_frames "$FRAME_READY" "$FRAME_READY" "Browser did not open? Use the url below to sign in:
+$TRUNC_URL"
+T_HAS_SESSION_RC=0
+run_dedicated --dedicated prodtest
+assert_eq 5 "$rc" "truncated URL -> URL-timeout exit 5 (fails loud)"
+assert_has "$OUT" "WIDTH-TRUNCATED" "warns the URL looks width-truncated and names the fix"
+# (grep -c prints "0" AND exits 1 on no match — no || fallback, it would
+# append a second 0)
+_posts="$(grep -c . "$MOCK_CURL_LOG" 2>/dev/null || true)"
+assert_eq "0" "${_posts:-0}" "NO Discord post carried the broken link"
+assert_has "$(send_keys_log)" "Escape" "backed out of the login UI"
 
 echo ""
 echo "=== 3) DEDICATED honored via env (SWARM_LOGIN_RELAY_DEDICATED=1), no flag ==="

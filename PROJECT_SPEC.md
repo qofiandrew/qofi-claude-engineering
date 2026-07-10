@@ -843,3 +843,20 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   real; the stuck-pane alerter remains its net. Tests: 15 new (top-level vs
   nested, window, latch bucket, re-prompt, tail knob both directions,
   hermeticity). Suite 61/61.
+- `2026-07-10` — **Live drill caught a URL-truncation defect; fixed + gated.**
+  First end-to-end drill of the notification pipeline (operator-approved): the
+  relay created the isolated session, captured "the URL", posted to Discord —
+  and the operator's browser rejected it ("Missing state parameter"). The real
+  OAuth URL is ~450 chars; the TUI HARD-wraps it at pane width into separate
+  drawn rows (`capture-pane -J` cannot rejoin hard wraps), and the relay posted
+  the first 200-col row. Fix: (1) the dedicated probe session is created 800
+  cols wide (`SWARM_LOGIN_PROBE_COLS`, ~2× the observed URL) so the URL renders
+  unwrapped; (2) a COMPLETENESS gate (`SWARM_LOGIN_URL_REQUIRE`, default
+  `state=` — the URL's last parameter) — a candidate lacking it is treated as
+  not-yet-rendered, and the relay times out LOUD (Escape, exit 5, truncation
+  warning naming the fix) rather than ever posting a broken link again. Gate
+  protects the legacy CTO-pane mode too, where the width is not ours to set.
+  Drill value proven twice over: the pipeline delivered a Discord post within
+  seconds of firing (delivery works), and it surfaced a defect no stubbed test
+  could see (the mock frames never hard-wrapped). Pinned: `-x 800` in the
+  create argv; truncated-URL → exit 5 + zero Discord posts. Suite 61/61.
