@@ -83,6 +83,13 @@ _USAGE_PROBE="${SWARM_USAGE_PROBE_SESSION:-swarm-usage-probe}"
 # NEW account (see SWARM_REAUTH_POSTSWAP_CMD in the header). The variable may be
 # UNSET (use the default), empty (skip), or "true" (skip).
 POSTSWAP_CMD="${SWARM_REAUTH_POSTSWAP_CMD-$_TMUX_BIN kill-session -t $_USAGE_PROBE}"
+# The pane-signal latch (swarm-limit-detect.sh's anti-loop): the detector wrote
+# the triggering pane signature to PENDING when it fired; a SUCCESSFUL re-auth
+# promotes it to LATCHED so the same window's notice/cap never re-fires a login
+# prompt. A failed re-auth leaves PENDING alone — the next tick retries.
+_STATE_DIR="${SWARM_STATE_DIR:-$HOME/.config/swarm}"
+_LATCH_PENDING="$_STATE_DIR/swarm-pane-signal.pending"
+_LATCH_LATCHED="$_STATE_DIR/swarm-pane-signal.latched"
 
 usage() { sed -n '2,60p' "$0"; exit "${1:-0}"; }
 
@@ -139,6 +146,28 @@ case "$rc" in
       else
         echo "$PROG: NOTE — post-swap probe recycle returned non-zero (probe may not have been running); harmless."
       fi
+    fi
+    # Promote the pane-signal latch: this window's notice/cap has now been
+    # answered by a successful re-auth — the detector must not re-fire on it.
+    # APPEND (epoch-stamped, deduped) rather than overwrite: the latched file is
+    # a SET, so an alternating notice/cap pair or a shrinking multi-pane union
+    # never evicts an already-answered signature. The detector prunes entries
+    # older than SWARM_PANE_LATCH_TTL. Touch the file even with no pending —
+    # a poll-triggered success must still arm the "any pane signal within the
+    # cooldown is the un-adopted old account" gate.
+    mkdir -p "$_STATE_DIR" 2>/dev/null || true
+    if [ -f "$_LATCH_PENDING" ]; then
+      _now="$(date +%s 2>/dev/null || echo 0)"
+      if awk -v now="$_now" 'NF { print now "\t" $0 }' "$_LATCH_PENDING" >> "$_LATCH_LATCHED" 2>/dev/null; then
+        sort -u -t'	' -k2 "$_LATCH_LATCHED" -o "$_LATCH_LATCHED" 2>/dev/null || true
+        rm -f "$_LATCH_PENDING" 2>/dev/null || true
+        touch "$_LATCH_LATCHED" 2>/dev/null || true
+        echo "$PROG: latched the triggering pane signature — this window's signals will not re-fire a login prompt."
+      else
+        echo "$PROG: WARNING — could not promote the pane-signal latch; the pane tier may re-prompt for this window (bounded by its re-prompt cooldown)." >&2
+      fi
+    else
+      touch "$_LATCH_LATCHED" 2>/dev/null || true
     fi
     echo "$PROG: DONE — re-auth complete; credential verified. No lead was restarted."
     exit 0

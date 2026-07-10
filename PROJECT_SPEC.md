@@ -788,3 +788,33 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   `SWARM_LOGIN_RELAY_DEDICATED=false` footgun now normalizes OFF-spellings; probe
   header comments no longer claim `swarm-up down` can't kill the probes — it can,
   harmlessly: they're stateless throwaways).
+- `2026-07-10` — **Pane-notice trigger (the operator's fallback ask) + signature
+  latch.** Root cause of the missed 95% trigger: the fleet's shared keychain item
+  is last-writer-wins across processes' token refreshes, so with mixed-account
+  processes running, the /usage probe read a DIFFERENT account than the leads
+  were burning (weekly % non-monotonic across ticks; keychain mdat rewritten with
+  nobody logging in) — and the one account near its cap was invisible to the
+  percentage poll. Fix: `swarm-limit-detect --or-poll` gains a PANE-NOTICE tier —
+  the yellow "You've used N% of your <t> limit · resets O" / "Approaching <t> ·
+  resets O" warning is PER-LEAD ground truth, immune to the probe split-brain. At
+  N ≥ threshold it fires NEAR ahead of the delegated poll; a cap banner still
+  outranks (AT). Matching is ERE and shaped against quoted text (digits+%
+  required; Approaching form requires "· resets"; labels matched generically —
+  v2.1.206 emits session/weekly/Opus/Sonnet/"Fable 5" variants, verified in the
+  binary). BOTH pane tiers go through a SIGNATURE LATCH (anti-loop, the reason
+  pane text was previously alert-only): fire once per window signature
+  (percent-stripped matched lines), pending → latched only when swarm-reauth
+  SUCCEEDS; latched is an epoch-stamped SET (subset-suppression, 7d TTL) so
+  shrinking unions/notice-cap alternation never re-prompt an answered window; an
+  unanswered prompt re-prompts hourly (SWARM_PANE_REPROMPT_COOLDOWN), not every
+  tick; an unwritable latch dir fails toward the poll, never spams. Live ticks
+  now log a `tick ts=` line.
+  **Review:** adversarial workflow (operator-stopped mid-verify; all 5 lenses +
+  52/93 refuter votes harvested from the journal): 31 raw findings, 2 refuted,
+  14 survived full panels — all survived findings fixed, incl. two the tests
+  themselves caught: the reauth suite was mutating the REAL ~/.config/swarm
+  latch, and `${VAR:-default}` silently truncated the regex default at its first
+  `}` (hoisted). Cap-tier "near-dead on v2.1.206" was disproven in the binary
+  ("limit reached" matches both current banners). Tests: notice tier 41 asserts
+  incl. a REAL-grep-path case via a fake tmux (patterns+exclusions exercised, not
+  seam-bypassed); reauth 41. Suite 60/60.

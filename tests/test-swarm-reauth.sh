@@ -49,11 +49,15 @@ EOF
 RECYCLE_MARK="$TMP/recycled"
 
 # run REAUTH-ARGS -- LOGIN_EXIT [POSTSWAP_ON] : sets $OUT/$rc, records recycle.
+# SWARM_STATE_DIR is pinned to a throwaway: without it a success path would
+# promote/consume the REAL machine's pane-signal latch (~/.config/swarm) —
+# running the suite would mutate live rotation state.
 run_reauth() {
   local login_exit="$1"; shift
-  rm -f "$RECYCLE_MARK"
+  rm -f "$RECYCLE_MARK"; rm -rf "$TMP/reauth-state"
   OUT="$(
     export SWARM_HOME="$FAKE_SH"
+    export SWARM_STATE_DIR="$TMP/reauth-state"
     export SWARM_REAUTH_LOGIN_CMD="exit $login_exit"
     export SWARM_REAUTH_POSTSWAP_CMD="sh -c 'echo yes > $RECYCLE_MARK'"
     bash "$REAUTH" "$@" 2>&1
@@ -105,6 +109,47 @@ assert_eq 0 "$rc" "skipped recycle still exits 0"
 echo "=== config: bad SWARM_HOME -> exit 2 ==="
 OUT="$(SWARM_HOME="$TMP/nope" bash "$REAUTH" 2>&1)"; rc=$?
 assert_eq 2 "$rc" "bad SWARM_HOME -> config error 2"
+
+echo "=== pane-signal latch promotion (the detector's anti-loop contract) ==="
+LSTATE="$TMP/latch-state"
+run_latch() {  # LOGIN_EXIT — run with a pending signature present
+  rm -rf "$LSTATE"; mkdir -p "$LSTATE"
+  printf '%s\n' "% of your session limit · resets 8:39am" > "$LSTATE/swarm-pane-signal.pending"
+  OUT="$(SWARM_HOME="$FAKE_SH" SWARM_STATE_DIR="$LSTATE" \
+         SWARM_REAUTH_LOGIN_CMD="exit $1" SWARM_REAUTH_POSTSWAP_CMD='true' \
+         bash "$REAUTH" 2>&1)"; rc=$?
+}
+run_latch 0
+assert_eq 0 "$rc" "success with pending -> exit 0"
+[ -f "$LSTATE/swarm-pane-signal.pending" ] && bad "success consumes the pending file" || ok "success consumes the pending file"
+_lat="$(cat "$LSTATE/swarm-pane-signal.latched" 2>/dev/null)"
+assert_has "$_lat" "% of your session limit · resets 8:39am" "success promotes pending -> latched (signature present)"
+printf '%s' "$_lat" | grep -qE '^[0-9]+	' && ok "latched entry is epoch-stamped (TTL substrate)" || bad "latched entry is epoch-stamped (TTL substrate) (got [$_lat])"
+_now=$(date +%s); _mt=$(stat -f %m "$LSTATE/swarm-pane-signal.latched" 2>/dev/null || stat -c %Y "$LSTATE/swarm-pane-signal.latched")
+[ $((_now - _mt)) -le 5 ] && ok "latched mtime is NOW (arms the cooldown)" || bad "latched mtime is NOW (arms the cooldown) (age=$((_now-_mt))s)"
+assert_has "$OUT" "latched the triggering pane signature" "reports the promotion"
+
+echo "--- promotion APPENDS (a second window's signature never evicts the first) ---"
+printf '%s\n' "usage limit reached · resets 3pm" > "$LSTATE/swarm-pane-signal.pending"
+OUT="$(SWARM_HOME="$FAKE_SH" SWARM_STATE_DIR="$LSTATE" \
+       SWARM_REAUTH_LOGIN_CMD='exit 0' SWARM_REAUTH_POSTSWAP_CMD='true' \
+       bash "$REAUTH" 2>&1)"; rc=$?
+_lat="$(cat "$LSTATE/swarm-pane-signal.latched" 2>/dev/null)"
+assert_has "$_lat" "% of your session limit · resets 8:39am" "first signature still latched after a second promotion"
+assert_has "$_lat" "usage limit reached · resets 3pm" "second signature latched too (set, not slot)"
+
+run_latch 5
+assert_eq 5 "$rc" "failed re-auth -> exit 5"
+[ -f "$LSTATE/swarm-pane-signal.pending" ] && ok "failure leaves pending (next tick retries)" || bad "failure leaves pending (next tick retries)"
+[ -f "$LSTATE/swarm-pane-signal.latched" ] && bad "failure must NOT latch" || ok "failure must NOT latch"
+
+rm -rf "$LSTATE"; mkdir -p "$LSTATE"
+OUT="$(SWARM_HOME="$FAKE_SH" SWARM_STATE_DIR="$LSTATE" \
+       SWARM_REAUTH_LOGIN_CMD='exit 0' SWARM_REAUTH_POSTSWAP_CMD='true' \
+       bash "$REAUTH" 2>&1)"; rc=$?
+assert_eq 0 "$rc" "success with NO pending -> exit 0 (poll-triggered re-auth)"
+[ -f "$LSTATE/swarm-pane-signal.latched" ] && ok "poll-triggered success still touches latched (arms the cooldown for pane signals)" || bad "poll-triggered success still touches latched (arms the cooldown)"
+[ -s "$LSTATE/swarm-pane-signal.latched" ] && bad "no pending -> latched stays EMPTY (only the mtime arms)" || ok "no pending -> latched stays EMPTY (only the mtime arms)"
 
 echo ""
 echo "=== Summary ==="
