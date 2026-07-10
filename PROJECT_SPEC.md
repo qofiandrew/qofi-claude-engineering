@@ -751,3 +751,40 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   re-run `bin/swarm-launchd-install.sh`; deleting the file reverts to a
   byte-identical unwired plist, which `swarm-rotate.sh` refuses to act on. Never
   hand-edit the installed plist — the installer owns it (ADR-0018 discipline).
+- `2026-07-10` — **No-restart in-place re-auth (the operator's redesign of rotation).**
+  The operator ruled: one `/login` covers the fleet (shared keychain), so rotation
+  must not restart any lead, must not guard for inactivity, and must fire from a
+  dedicated session the moment the 95% threshold trips. Built as four pieces:
+  (1) `swarm-login-relay.sh --dedicated` — `/login` runs in an ISOLATED throwaway
+  session (`swarm-login-probe`, the usage-probe pattern: plain claude, default
+  account, created/reused/recreated), never a CTO pane; the step-1 clean-boundary
+  guard and step-6 fleet-idle re-check are SKIPPED in this mode (they existed to
+  protect a CTO pane and a relaunch that no longer happen). Default mode unchanged.
+  (2) NEW `bin/swarm-reauth.sh` — the no-restart actuator in the tick's
+  `SWARM_ROTATE_CMD` seam (tick unchanged): runs the relay `--dedicated`, remaps
+  relay 7→6 (ring exhaustion) while collapsing the relay's own 6 (Discord-post
+  fail) to 5 so it can never masquerade as exhaustion; `--next` prints nothing
+  (the browser picks the account — no ring); on success recycles the /usage probe
+  so the next poll reads the NEW account (a long-lived claude may not adopt a
+  rotated credential in place — an unrecycled probe would re-trigger re-auth
+  forever). No checkpoint (nothing restarts → nothing to save).
+  (3) NEW `bin/swarm-reauth-verify.sh` — the fail-loud net the operator chose over
+  guards: every live tick it scans CTO panes; one PARKED on a cap banner while the
+  account has headroom (verdict OK/NEAR) = a lead that missed the in-place re-auth
+  → ONE deduped Discord alert naming it; suppressed on AT/UNKNOWN; read-only.
+  (4) `swarm-rotate-tick.sh` — a `SWARM_TICK_ALERT_CMD` standing step, before
+  routing (so it fires on OK — the stuck-pane case), dry-run-skipped, best-effort,
+  default-unset no-op.
+  **Trigger reversal (operator-confirmed):** the percentage poll is the sole
+  re-auth trigger; the cap banner is demoted from authoritative (`--or-poll`) to
+  ALERT-ONLY — under no-restart a stuck pane's banner would otherwise loop the
+  re-auth every tick. `.example` documents Model A (no-restart) vs Model B
+  (legacy restart) and the do-not-wire-`--or-poll`-under-A rule.
+  **Verification:** 4 new test files (83 assertions: dedicated isolation invariant
+  — no key ever reaches a CTO pane; exit-code remap incl. the 6/5 collision; alert
+  dedup/headroom-gate/non-interference; tick alert ordering incl. fires-on-OK);
+  full suite 59/59. Adversarial review (5 lenses → 17 findings → 3 refuters each):
+  ZERO survived; two truthful-but-harmless notes fixed anyway (the
+  `SWARM_LOGIN_RELAY_DEDICATED=false` footgun now normalizes OFF-spellings; probe
+  header comments no longer claim `swarm-up down` can't kill the probes — it can,
+  harmlessly: they're stateless throwaways).
