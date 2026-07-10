@@ -406,6 +406,21 @@ print("five_hour_pct=%s weekly_pct=%s worst_pct=%s worst_window=%s threshold_pct
 fi
 
 # ---------------------------------------------------------------------------
+# 1c) STANDING ALERT — best-effort, runs EVERY live tick regardless of verdict.
+# ---------------------------------------------------------------------------
+# SWARM_TICK_ALERT_CMD is a read-only-ish alerter (default unset = no-op). It runs
+# BEFORE routing so it fires on an OK verdict too — that is the whole point: under
+# no-restart rotation a lead can be PARKED on a cap banner while the account has
+# HEADROOM (verdict OK/NEAR), and only a standing check catches it (see
+# swarm-reauth-verify.sh). We pass the verdict word so the alerter can apply its
+# headroom gate. Skipped in --dry-run (mutate/notify nothing). It NEVER affects
+# routing or the tick's exit code — a failure here is logged and ignored.
+if [ "$DRY_RUN" -eq 0 ] && [ -n "${SWARM_TICK_ALERT_CMD:-}" ]; then
+  _alert_out="$(SWARM_TICK_POLL_VERDICT="$(verdict_word "$poll_rc")" sh -c "$SWARM_TICK_ALERT_CMD" 2>&1)" || true
+  [ -n "$_alert_out" ] && log "alert: $_alert_out"
+fi
+
+# ---------------------------------------------------------------------------
 # 2) ROUTE — branch on the verdict. Only NEAR(10)/AT(20) reach a rotation.
 # ---------------------------------------------------------------------------
 ROTATE_REASON=""     # non-empty => we intend to rotate; holds the reason word

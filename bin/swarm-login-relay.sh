@@ -179,10 +179,25 @@
 # a secret on argv beyond what the existing swarm-watch.sh curl pattern already
 # does (the Authorization header of the in-process curl call).
 #
+# ── DEDICATED MODE (--dedicated) — the no-restart re-auth model ──────────────
+# --dedicated (or SWARM_LOGIN_RELAY_DEDICATED=1) runs /login in an ISOLATED
+# throwaway session (SWARM_LOGIN_PROBE_SESSION, default "swarm-login-probe"): a
+# plain `claude` on the DEFAULT account, in a trusted cwd, created tall, reused
+# across rotations. Because that session does NO CTO work and NO fleet relaunch
+# follows a re-auth, the two CTO-pane guards are SKIPPED: the step-1 clean-
+# boundary guard (nothing to interrupt) and the step-6 fleet-idle re-check
+# (nothing to relaunch). The URL still posts to the swarm's channel (the row's
+# field-3 token + field-4 channel). This is how swarm-reauth.sh drives us: a
+# re-auth that re-authes the shared keychain WITHOUT restarting a single lead.
+# The stuck-pane safety net (a lead that didn't adopt the fresh credential) is
+# swarm-reauth-verify.sh, run standing by the tick — not this script's concern.
+#
 # Usage:
-#   swarm-login-relay.sh                    # re-auth via the default swarm's pane
-#   swarm-login-relay.sh <swarm>            # re-auth via a specific swarm's pane
+#   swarm-login-relay.sh                    # re-auth via the default swarm's CTO pane
+#   swarm-login-relay.sh <swarm>            # re-auth via a specific swarm's CTO pane
 #   swarm-login-relay.sh --force [<swarm>]  # proceed even if the pane is mid-turn
+#   swarm-login-relay.sh --dedicated        # re-auth via the ISOLATED login-probe
+#                                           #   session (no CTO pane, no guards)
 #   swarm-login-relay.sh -h | --help
 #
 # Bash 3.2-safe (macOS default). CWD-independent. python3 (JSON + repo_activity)
@@ -202,22 +217,34 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=swarm-lib.sh
 . "$SCRIPT_DIR/swarm-lib.sh"   # swarm_conf_parse_line, pane_working, repo_activity, swarm_account_resolve
 
-usage() { sed -n '1,195p' "$0"; exit "${1:-0}"; }
+usage() { sed -n '2,204p' "$0"; exit "${1:-0}"; }
 
 # ---------------------------------------------------------------------------
 # Args.
 # ---------------------------------------------------------------------------
 FORCE=0
 SWARM=""
+# --dedicated (or SWARM_LOGIN_RELAY_DEDICATED=1): run /login in an ISOLATED
+# throwaway session instead of the swarm's CTO pane. See the DEDICATED-MODE
+# block below. The flag wins over the env either way (explicit intent).
+DEDICATED="${SWARM_LOGIN_RELAY_DEDICATED:-0}"
 while [ $# -gt 0 ]; do
   case "$1" in
-    --force)   FORCE=1; shift ;;
-    -h|--help) usage 0 ;;
-    --*)       echo "$PROG: unknown flag: $1" >&2; usage 2 ;;
-    *)         if [ -z "$SWARM" ]; then SWARM="$1"; shift; else echo "$PROG: unexpected arg: $1" >&2; usage 2; fi ;;
+    --force)     FORCE=1; shift ;;
+    --dedicated) DEDICATED=1; shift ;;
+    -h|--help)   usage 0 ;;
+    --*)         echo "$PROG: unknown flag: $1" >&2; usage 2 ;;
+    *)           if [ -z "$SWARM" ]; then SWARM="$1"; shift; else echo "$PROG: unexpected arg: $1" >&2; usage 2; fi ;;
   esac
 done
 [ -z "$SWARM" ] && SWARM="${SWARM_LOGIN_RELAY_SWARM:-qofi-product}"
+# Normalize the env toggle: the OFF spellings an operator would plausibly write
+# (empty/0/false/no/off, any case) mean OFF; anything else means ON. Without
+# this, SWARM_LOGIN_RELAY_DEDICATED=false would silently ENABLE dedicated mode.
+case "$(printf '%s' "$DEDICATED" | tr '[:upper:]' '[:lower:]')" in
+  ''|0|false|no|off) DEDICATED=0 ;;
+  *)                 DEDICATED=1 ;;
+esac
 
 TMUX_BIN="${SWARM_TMUX_BIN:-tmux}"
 PREFIX="${SWARM_TMUX_PREFIX:-swarm}"
@@ -242,6 +269,24 @@ POLL_INTERVAL="${SWARM_LOGIN_POLL_INTERVAL:-2}"
 STALE_SECONDS="${SWARM_STALE_SECONDS:-300}"
 AUTHCHECK="${SWARM_LOGIN_AUTHCHECK_CMD:-$SCRIPT_DIR/swarm-auth-probe.sh}"
 
+# ── DEDICATED-MODE knobs (only consulted when DEDICATED=1) ────────────────────
+# The isolated login session mirrors swarm-usage-adapter-tui.sh's probe: a plain
+# `claude` on the DEFAULT account (shared keychain), in a claude-TRUSTED cwd,
+# created tall, reused across rotations, recreated if unhealthy. It is NEVER in
+# swarm.conf, so watchers/guards ignore it. (A no-arg `swarm-up down` DOES
+# glob-kill every `swarm-*` session including this probe — harmless: it is a
+# stateless throwaway, recreated on demand.) Because it does no CTO work and no
+# relaunch follows a re-auth, the CTO-pane clean-boundary guard (step 1) and
+# the fleet-idle re-check (step 6) are SKIPPED in this mode.
+PROBE_SESSION="${SWARM_LOGIN_PROBE_SESSION:-swarm-login-probe}"
+PROBE_CWD="${SWARM_LOGIN_PROBE_CWD:-$SWARM_HOME}"
+PROBE_LAUNCH="${SWARM_LOGIN_PROBE_LAUNCH:-claude}"
+PROBE_READY_PAT="${SWARM_LOGIN_PROBE_READY_PAT:-for agents|for shortcuts|auto mode}"
+PROBE_TRUST_PAT="${SWARM_LOGIN_PROBE_TRUST_PAT:-trust the files|Do you trust|Yes, proceed}"
+PROBE_LAUNCH_TIMEOUT="${SWARM_LOGIN_PROBE_LAUNCH_TIMEOUT:-40}"
+PROBE_ROWS="${SWARM_LOGIN_PROBE_ROWS:-60}"
+PROBE_COLS="${SWARM_LOGIN_PROBE_COLS:-200}"
+
 # Timeouts feed $((...)) arithmetic — a non-integer would blow up mid-flow (or
 # worse, after we already opened the login UI). The poll interval feeds sleep —
 # a bad value makes sleep fail instantly and turns both poll loops into hot
@@ -255,6 +300,15 @@ done
 case "$POLL_INTERVAL" in
   ''|.|*[!0-9.]*|*.*.*) echo "$PROG: SWARM_LOGIN_POLL_INTERVAL must be a number in seconds (got '$POLL_INTERVAL')" >&2; exit 2 ;;
 esac
+# The dedicated-session knobs feed $((...)) / tmux geometry only in --dedicated
+# mode; validate them there so a bad value fails loud BEFORE we create anything.
+if [ "$DEDICATED" = "1" ]; then
+  for _dv in "$PROBE_LAUNCH_TIMEOUT" "$PROBE_ROWS" "$PROBE_COLS"; do
+    case "$_dv" in
+      ''|*[!0-9]*) echo "$PROG: dedicated-mode geometry/timeout values must be plain integers (got '$_dv') — check SWARM_LOGIN_PROBE_LAUNCH_TIMEOUT / SWARM_LOGIN_PROBE_ROWS / SWARM_LOGIN_PROBE_COLS" >&2; exit 2 ;;
+    esac
+  done
+fi
 
 # The rotate handle is informational ONLY — the operator's browser login decides
 # the actual account (see header). Logged so the rotate flow is traceable.
@@ -293,7 +347,14 @@ if [ -z "$CHANNEL" ]; then
   exit 2
 fi
 
-SESS="${PREFIX}-${SWARM}"
+# In dedicated mode the target is the ISOLATED login-probe session, NOT the
+# swarm's CTO pane — but CHANNEL/TOKVAR still come from the swarm row above, so
+# the login URL lands in that swarm's Discord channel (default qofi-product).
+if [ "$DEDICATED" = "1" ]; then
+  SESS="$PROBE_SESSION"
+else
+  SESS="${PREFIX}-${SWARM}"
+fi
 
 # ---------------------------------------------------------------------------
 # Discord post (the swarm-watch.sh pattern). Token resolved by VAR NAME inside
@@ -401,44 +462,115 @@ count_pattern_lines() {
 }
 
 # ---------------------------------------------------------------------------
+# Dedicated-session lifecycle (mirrors swarm-usage-adapter-tui.sh). Only used
+# when DEDICATED=1. A plain `claude` on the DEFAULT account in a trusted cwd —
+# isolated from every CTO pane, so /login here interrupts nothing.
+# ---------------------------------------------------------------------------
+probe_match_pat() { printf '%s' "$1" | grep -q -i -E "$2" 2>/dev/null; }
+
+# probe_session_ready — the dedicated session exists AND shows an idle claude
+# prompt (ready marker present, not mid-turn). A crashed/exited claude (bare
+# shell) fails this, triggering recreation.
+probe_session_ready() {
+  "$TMUX_BIN" has-session -t "$SESS" 2>/dev/null || return 1
+  local frame; frame="$(pane_capture)"
+  [ -z "$frame" ] && return 1
+  probe_match_pat "$frame" "$PROBE_READY_PAT" || return 1
+  printf '%s' "$frame" | grep -qF 'esc to interrupt' && return 1   # mid-turn: not ready
+  return 0
+}
+
+# create_probe_session — (re)create the dedicated login-probe session: a plain
+# claude on the default account, in a trusted cwd, at PROBE_ROWS height. Returns
+# 0 when the TUI is idle-ready, 1 otherwise (and kills the half-built session).
+create_probe_session() {
+  "$TMUX_BIN" kill-session -t "$SESS" 2>/dev/null || true
+  "$TMUX_BIN" new-session -d -s "$SESS" -x "$PROBE_COLS" -y "$PROBE_ROWS" 2>/dev/null \
+    || { echo "$PROG: could not create login-probe session '$SESS'" >&2; return 1; }
+  # API keys unset so the probe uses the Max keychain (default account) — the
+  # fleet's shared credential, which is exactly what /login here re-auths. exec
+  # so the claude process replaces the shell.
+  "$TMUX_BIN" send-keys -t "$SESS" "cd $(printf '%q' "$PROBE_CWD") && unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN && exec $PROBE_LAUNCH" Enter 2>/dev/null || true
+
+  local _deadline=$((SECONDS + PROBE_LAUNCH_TIMEOUT)) _trusted=0 _frame
+  while :; do
+    _frame="$(pane_capture)"
+    if probe_match_pat "$_frame" "$PROBE_READY_PAT" && ! printf '%s' "$_frame" | grep -qF 'esc to interrupt'; then
+      return 0
+    fi
+    if [ "$_trusted" -eq 0 ] && probe_match_pat "$_frame" "$PROBE_TRUST_PAT"; then
+      # Accept a one-time trust/confirm prompt (default option is "Yes, proceed").
+      "$TMUX_BIN" send-keys -t "$SESS" Enter 2>/dev/null || true
+      _trusted=1
+    else
+      # A freshly-created DETACHED session often captures BLANK until a redraw;
+      # Ctrl-L at the prompt is a harmless repaint nudge (never submits input).
+      "$TMUX_BIN" send-keys -t "$SESS" C-l 2>/dev/null || true
+    fi
+    if [ "$SECONDS" -ge "$_deadline" ]; then
+      echo "$PROG: login-probe session '$SESS' did not become idle-ready within ${PROBE_LAUNCH_TIMEOUT}s." >&2
+      "$TMUX_BIN" kill-session -t "$SESS" 2>/dev/null || true
+      return 1
+    fi
+    sleep "$POLL_INTERVAL"
+  done
+}
+
+# ensure_probe_session — reuse a healthy login-probe session, else (re)create it.
+ensure_probe_session() {
+  probe_session_ready && return 0
+  create_probe_session
+}
+
+# ---------------------------------------------------------------------------
 # Step 1/6 — session + clean-boundary guard.
 # ---------------------------------------------------------------------------
-echo "$PROG: step 1/6 — target swarm '$SWARM' (session '$SESS', channel $CHANNEL)"
-
 if ! command -v "$TMUX_BIN" >/dev/null 2>&1; then
   echo "$PROG: REFUSED — tmux binary '$TMUX_BIN' not found." >&2
   exit 2
 fi
-if ! "$TMUX_BIN" has-session -t "$SESS" 2>/dev/null; then
-  echo "$PROG: REFUSED — tmux session '$SESS' does not exist. Bring the swarm up first (swarm-up.sh up $SWARM)." >&2
-  exit 2
-fi
 
-# `/login` interrupts the TUI, so it must fire at a clean boundary — the same
-# discipline swarm-rotate.sh enforces. pane_working: 0=working, 1=idle,
-# 2=uncertain. Working refuses; UNCERTAIN also refuses (fail closed — we will
-# not interrupt a pane we cannot read). --force overrides both.
-pane_working "$SESS" "$TMUX_BIN"; pw_rc=$?
-case "$pw_rc" in
-  1) : ;;  # idle at the prompt — the clean boundary we want
-  0)
-    if [ "$FORCE" -eq 1 ]; then
-      echo "$PROG: WARNING — pane is mid-turn; proceeding because --force (/login interrupts the turn)." >&2
-    else
-      echo "$PROG: REFUSED — pane '$SESS' is WORKING (mid-turn). /login would interrupt it." >&2
-      echo "$PROG: wait for the turn to finish or pass --force." >&2
-      exit 3
-    fi
-    ;;
-  *)
-    if [ "$FORCE" -eq 1 ]; then
-      echo "$PROG: WARNING — pane state UNVERIFIABLE (capture failed/empty); proceeding because --force." >&2
-    else
-      echo "$PROG: REFUSED — cannot verify pane state for '$SESS' (capture failed or empty). Fail closed: not sending /login blind. Pass --force to override." >&2
-      exit 3
-    fi
-    ;;
-esac
+if [ "$DEDICATED" = "1" ]; then
+  # DEDICATED: drive an ISOLATED throwaway session — never a CTO pane. There is
+  # NO clean-boundary guard here: the probe session does no CTO work, so /login
+  # interrupts nothing, and no fleet relaunch follows a re-auth (see step 6).
+  echo "$PROG: step 1/6 — DEDICATED mode: isolated login session '$SESS' (URL → swarm '$SWARM' channel $CHANNEL)"
+  if ! ensure_probe_session; then
+    echo "$PROG: REFUSED — could not stand up a healthy isolated login session '$SESS'. Nothing sent." >&2
+    exit 2
+  fi
+else
+  echo "$PROG: step 1/6 — target swarm '$SWARM' (session '$SESS', channel $CHANNEL)"
+  if ! "$TMUX_BIN" has-session -t "$SESS" 2>/dev/null; then
+    echo "$PROG: REFUSED — tmux session '$SESS' does not exist. Bring the swarm up first (swarm-up.sh up $SWARM)." >&2
+    exit 2
+  fi
+  # `/login` interrupts the TUI, so it must fire at a clean boundary — the same
+  # discipline swarm-rotate.sh enforces. pane_working: 0=working, 1=idle,
+  # 2=uncertain. Working refuses; UNCERTAIN also refuses (fail closed — we will
+  # not interrupt a pane we cannot read). --force overrides both.
+  pane_working "$SESS" "$TMUX_BIN"; pw_rc=$?
+  case "$pw_rc" in
+    1) : ;;  # idle at the prompt — the clean boundary we want
+    0)
+      if [ "$FORCE" -eq 1 ]; then
+        echo "$PROG: WARNING — pane is mid-turn; proceeding because --force (/login interrupts the turn)." >&2
+      else
+        echo "$PROG: REFUSED — pane '$SESS' is WORKING (mid-turn). /login would interrupt it." >&2
+        echo "$PROG: wait for the turn to finish or pass --force." >&2
+        exit 3
+      fi
+      ;;
+    *)
+      if [ "$FORCE" -eq 1 ]; then
+        echo "$PROG: WARNING — pane state UNVERIFIABLE (capture failed/empty); proceeding because --force." >&2
+      else
+        echo "$PROG: REFUSED — cannot verify pane state for '$SESS' (capture failed or empty). Fail closed: not sending /login blind. Pass --force to override." >&2
+        exit 3
+      fi
+      ;;
+  esac
+fi
 
 # ---------------------------------------------------------------------------
 # Step 2/6 — baseline, send /login, scrape a FRESH URL.
@@ -446,6 +578,13 @@ esac
 # BASELINE: everything visible in the pane BEFORE /login is stale by
 # definition. Detectors below fire only on content that goes BEYOND it —
 # see "STALE-CONTENT DISCIPLINE" in the header.
+if [ "$DEDICATED" = "1" ]; then
+  # A freshly-created detached probe session can capture BLANK until a redraw,
+  # which would make the baseline miss pre-existing content. Ctrl-L is a harmless
+  # repaint at the idle prompt (never submits input).
+  pane_send C-l >/dev/null 2>&1 || true
+  sleep "$POLL_INTERVAL"
+fi
 BASELINE_FRAME="$(pane_capture)"
 BASE_URLS="$(printf '%s\n' "$BASELINE_FRAME" | grep -oE "$URL_REGEX" 2>/dev/null || true)"
 PICKER_BASE_N="$(count_pattern_lines "$BASELINE_FRAME" "$PICKER_PATTERNS")"
@@ -601,7 +740,12 @@ fleet_working() {  # -> prints " name(ages)" for each WORKING swarm; empty = idl
   printf '%s' "$out"
 }
 
-if [ "$IDLE_TIMEOUT" -gt 0 ]; then
+if [ "$DEDICATED" = "1" ]; then
+  # No fleet re-check: nothing restarts after a dedicated-session re-auth, so
+  # there is no relaunch to protect a mid-turn lead from. The panes keep running
+  # untouched; the stuck-pane safety net lives in swarm-reauth-verify.sh.
+  echo "$PROG: step 6/6 — DEDICATED mode: no fleet re-check (no relaunch follows a re-auth)."
+elif [ "$IDLE_TIMEOUT" -gt 0 ]; then
   echo "$PROG: step 6/6 — re-checking the clean boundary before handing back to rotate (timeout ${IDLE_TIMEOUT}s)"
   _deadline=$((SECONDS + IDLE_TIMEOUT))
   _working="$(fleet_working)"
@@ -620,7 +764,13 @@ else
   echo "$PROG: step 6/6 — boundary re-check disabled (SWARM_LOGIN_IDLE_TIMEOUT=0)"
 fi
 
-echo "$PROG: DONE — re-auth complete; credential verified. (swarm-rotate proceeds to relaunch.)"
-post_discord "✅ **Re-auth complete** (swarm '$SWARM') — credential verified; session resumed. Rotation proceeds." \
-  || echo "$PROG: WARNING — success confirmation failed to post (re-auth itself is DONE)." >&2
+if [ "$DEDICATED" = "1" ]; then
+  echo "$PROG: DONE — re-auth complete; credential verified (isolated session; no fleet restart)."
+  post_discord "✅ **Re-auth complete** (swarm '$SWARM') — credential verified via the isolated login session. Running leads keep their state; no restart." \
+    || echo "$PROG: WARNING — success confirmation failed to post (re-auth itself is DONE)." >&2
+else
+  echo "$PROG: DONE — re-auth complete; credential verified. (swarm-rotate proceeds to relaunch.)"
+  post_discord "✅ **Re-auth complete** (swarm '$SWARM') — credential verified; session resumed. Rotation proceeds." \
+    || echo "$PROG: WARNING — success confirmation failed to post (re-auth itself is DONE)." >&2
+fi
 exit 0

@@ -29,10 +29,12 @@
 #
 # The session is LONG-LIVED (created once, reused every tick) and created at
 # SWARM_USAGE_TUI_ROWS height so the panel top always fits — no pane resizing.
-# It is NOT in swarm.conf, so swarm-watch / swarm-up / rotate never see it: a
-# fleet relaunch won't kill it, and it won't be counted by any WORKING rail. If
-# it is missing or unhealthy (crash, host reboot, or a stale credential after a
-# rotation) the adapter recreates it and retries once.
+# It is NOT in swarm.conf, so swarm-watch and the WORKING rails never count it.
+# (A no-arg `swarm-up down` DOES glob-kill every `swarm-*` session including
+# this probe — harmless: it is stateless and recreated on the next poll. And
+# swarm-reauth.sh kills it DELIBERATELY after a successful in-place re-auth so
+# the next poll reads the NEW account.) If it is missing or unhealthy (crash,
+# host reboot, stale credential) the adapter recreates it and retries once.
 #
 # ── OUTPUT (the swarm-usage-poll schema; see swarm-usage-poll.sh header) ─────
 #   {"five_hour":{"used_pct":26,"reset_hint":"8pm (…)"},
