@@ -211,6 +211,129 @@ notice_tier_enabled() {
   return 0
 }
 
+# ── THE TRANSCRIPT TIER (--or-poll; highest priority) ─────────────────────────
+# Pane text is a RENDERING of the limit state — the status strip cycles, wraps,
+# and clears, so a 300s-cadence capture is a sampling lottery (missed a real
+# deployment-core rate_limit on 2026-07-10 whose pane never showed a matchable
+# line at capture time). The lead's TRANSCRIPT is the RECORD: Claude Code
+# writes `"error":"rate_limit","isApiErrorMessage":true,"apiErrorStatus":429`
+# events (top-level keys, ISO timestamp) into the session jsonl the moment the
+# API throttles it. Those events are durable, per-lead, and timestamped — no
+# lottery. This tier scans each swarm's newest transcript tails for a
+# rate_limit event younger than SWARM_XSCRIPT_LIMIT_WINDOW and fires AT.
+# Top-level-key parsing (not substring) so a lead merely WRITING code or prose
+# about rate limits can never trip it — the marker text inside message content
+# is nested, never top-level.
+#
+# Latch identity: "transcript rate_limit <swarm> <UTC-hour-bucket>" — one
+# prompt per swarm-hour through the same pending/latched machinery; a lead
+# that stays throttled after a successful re-auth (did not adopt the fresh
+# credential) re-fires at most hourly and is named by the stuck-pane alerter.
+#
+#   SWARM_XSCRIPT_LIMIT_WINDOW  max event age in seconds (default 900 = 3
+#                               ticks). 0 disables the tier.
+#   SWARM_XSCRIPT_TAIL_BYTES    how much of each transcript tail to scan
+#                               (default 4194304 = 4MB). Must comfortably
+#                               cover WINDOW seconds of writing: a hot lead
+#                               bursts ~0.5MB/15min, and an undersized tail
+#                               silently misses in-window events (the first
+#                               live proof missed 22MB-deep events with a
+#                               256KB tail).
+#   SWARM_XSCRIPT_TIER          force-enable (1) even when a pane stub is
+#                               injected — tests set this with a fixture
+#                               CLAUDE_PROJECTS_DIR; without it an injected
+#                               pane-state disables the tier (hermetic, same
+#                               rule as the notice tier).
+XSCRIPT_WINDOW="${SWARM_XSCRIPT_LIMIT_WINDOW:-900}"
+case "$XSCRIPT_WINDOW" in ''|*[!0-9]*) XSCRIPT_WINDOW=900 ;; esac
+XSCRIPT_TAIL="${SWARM_XSCRIPT_TAIL_BYTES:-4194304}"
+case "$XSCRIPT_TAIL" in ''|*[!0-9]*) XSCRIPT_TAIL=4194304 ;; esac
+
+xscript_tier_enabled() {
+  [ "$XSCRIPT_WINDOW" -eq 0 ] && return 1
+  [ "${SWARM_XSCRIPT_TIER:-}" = "1" ] && return 0
+  [ -n "${SWARM_PANE_STATE_CMD:-}" ] && return 1
+  return 0
+}
+
+# transcript_limit_scan — scan every swarm's transcript tails for a recent
+# top-level rate_limit event. Prints "<swarm>\t<iso-ts>\t<hour-bucket>" for the
+# NEWEST such event; rc 0 = found. One python pass over all swarms; per entry
+# dir only the 2 newest jsonl files, tail 256KB each — cheap at tick cadence.
+transcript_limit_scan() {
+  local rows="" _projects
+  while IFS= read -r _line; do
+    swarm_conf_parse_line "$_line" || continue
+    [ -z "$SWARM_CONF_F_NAME" ] && continue
+    [ -z "$SWARM_CONF_F_REPO" ] && continue
+    swarm_account_resolve "$SWARM_CONF_F_ACCOUNT" || continue
+    _projects="$SWARM_ACCT_PROJECTS_DIR"
+    rows="$rows$SWARM_CONF_F_NAME|$SWARM_CONF_F_REPO|$_projects
+"
+  done < <(grep -vE '^[[:space:]]*(#|$)' "$CONF")
+  [ -z "$rows" ] && return 1
+  printf '%s' "$rows" | python3 -c '
+import json, os, re, sys, time
+window = int(sys.argv[1])
+tail_bytes = int(sys.argv[2])
+now = time.time()
+best = None  # (epoch, swarm, iso)
+for row in sys.stdin.read().splitlines():
+    parts = row.split("|")
+    if len(parts) < 3: continue
+    swarm, repo, projects = parts[0], parts[1], parts[2]
+    lead_enc = re.sub(r"[/.]", "-", repo)
+    tm_prefix = lead_enc + "--claude-worktrees-"
+    try:
+        entries = os.listdir(projects)
+    except Exception:
+        continue
+    for entry in entries:
+        if entry != lead_enc and not entry.startswith(tm_prefix):
+            continue
+        d = os.path.join(projects, entry)
+        try:
+            js = [os.path.join(d, f) for f in os.listdir(d) if f.endswith(".jsonl")]
+        except Exception:
+            continue
+        js.sort(key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0, reverse=True)
+        for path in js[:2]:
+            try:
+                size = os.path.getsize(path)
+                with open(path, "rb") as fh:
+                    if size > tail_bytes:
+                        fh.seek(-tail_bytes, 2)
+                    tail = fh.read().decode("utf-8", "replace")
+            except Exception:
+                continue
+            for line in tail.splitlines():
+                if "\"rate_limit\"" not in line or "isApiErrorMessage" not in line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except Exception:
+                    continue
+                # TOP-LEVEL keys only: nested mentions (a lead writing about
+                # rate limits) never count.
+                if not isinstance(e, dict): continue
+                if e.get("error") != "rate_limit" or e.get("isApiErrorMessage") is not True:
+                    continue
+                ts = e.get("timestamp", "")
+                m = re.match(r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})", str(ts))
+                if not m: continue
+                import calendar
+                ep = calendar.timegm(tuple(int(x) for x in m.groups()) + (0, 0, 0))
+                if now - ep > window or ep - now > 300:
+                    continue
+                if best is None or ep > best[0]:
+                    best = (ep, swarm, str(ts))
+if best is None:
+    sys.exit(1)
+bucket = best[2][:13]  # YYYY-MM-DDTHH
+print("%s\t%s\t%s" % (best[1], best[2], bucket))
+' "$XSCRIPT_WINDOW" "$XSCRIPT_TAIL"
+}
+
 # probe_notice SESSION -> stdout = matched notice lines (exclusions applied);
 # rc 0 = at least one line, 1 = none/can't capture. Default implementation
 # captures the pane (-J joins soft-wrapped lines) and greps the pattern EREs
@@ -483,6 +606,26 @@ PY
 # once per window signature, re-arm only after swarm-reauth promotes the
 # pending signature on a successful re-auth (or the window rolls).
 if [ "$OR_POLL" -eq 1 ]; then
+  # TRANSCRIPT tier first — the durable record outranks the visual rendering.
+  if xscript_tier_enabled && _xs="$(transcript_limit_scan)"; then
+    _xswarm="$(printf '%s' "$_xs" | cut -f1)"
+    _xts="$(printf '%s' "$_xs" | cut -f2)"
+    _xbucket="$(printf '%s' "$_xs" | cut -f3)"
+    _sig="transcript rate_limit $_xswarm $_xbucket"
+    if pane_tier_suppressed "$_sig"; then
+      printf '%s: transcript rate_limit suppressed (answered window / cooldown) — swarm %s throttled at %s; if it persists past the re-auth it re-fires hourly and the stuck-pane alerter names it. Delegating to the poll.\n' "$PROG" "$_xswarm" "$_xts" >&2
+    elif ! pane_tier_arm "$_sig"; then
+      printf '%s: WARNING — cannot persist the pane-signal latch (%s unwritable); NOT firing the transcript tier. Delegating to the poll.\n' "$PROG" "$STATE_DIR" >&2
+    else
+      if [ "$JSON" -eq 1 ]; then
+        LIMIT_SWARM="$_xswarm"
+        emit_json "AT" "transcript-limit" "rate_limit event at $_xts"
+      else
+        printf '%s: AT-LIMIT (TRANSCRIPT record) — swarm %s logged an API rate_limit event at %s (within %ss). The lead is being throttled on ITS account regardless of what the /usage probe reads.\n' "$PROG" "$_xswarm" "$_xts" "$XSCRIPT_WINDOW"
+      fi
+      exit 20
+    fi
+  fi
   if [ "$REAL_VERDICT" = "AT" ]; then
     _sig="$(pane_signature "$LIMIT_DETAIL")"
     if pane_tier_suppressed "$_sig"; then

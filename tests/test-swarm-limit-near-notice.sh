@@ -275,9 +275,13 @@ EOF
 chmod +x "$TMP/fakebin/tmux"
 run_real() {  # writes OUT/rc using the fake tmux (no injected seams at all)
   rm -rf "$STATE"
+  # CLAUDE_PROJECTS_DIR pinned to an empty fixture: without a pane stub the
+  # TRANSCRIPT tier is enabled and would otherwise scan the REAL machine's
+  # transcripts — a live rate_limit event would break these cases.
+  mkdir -p "$TMP/empty-projects"
   OUT="$(SWARM_HOME="$FAKE_HOME" SWARM_TMUX_BIN="$TMP/fakebin/tmux" \
          SWARM_STATE_DIR="$STATE" SWARM_ROTATE_THRESHOLD_PCT=95 \
-         SWARM_PANE_REPROMPT_COOLDOWN=0 \
+         SWARM_PANE_REPROMPT_COOLDOWN=0 CLAUDE_PROJECTS_DIR="$TMP/empty-projects" \
          SWARM_POLL_CMD_INNER="$PROXY" bash "$DETECT" --or-poll 2>&1)"; rc=$?
 }
 IDLE_FOOT='❯

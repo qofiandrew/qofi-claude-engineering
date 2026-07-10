@@ -818,3 +818,28 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   ("limit reached" matches both current banners). Tests: notice tier 41 asserts
   incl. a REAL-grep-path case via a fake tmux (patterns+exclusions exercised, not
   seam-bypassed); reauth 41. Suite 60/60.
+- `2026-07-10` — **Transcript tier: the durable limit record replaces the visual
+  lottery as the primary trigger.** Second missed limit (deployment-core): its
+  session logged API `rate_limit` events at 11:03Z and 11:51Z (`"error":
+  "rate_limit","isApiErrorMessage":true,"apiErrorStatus":429`, top-level keys in
+  the session jsonl) while every 300s pane sample all day showed nothing — the
+  TUI's status strip is a transient RENDERING (cycles/clears; the notice also
+  never persists into scrollback), so pane capture is a sampling lottery. The
+  lead's transcript is the RECORD. New highest-priority tier in
+  `swarm-limit-detect --or-poll`: scan each swarm's newest transcript tails
+  (lead dir + worktree dirs, the `repo_activity` naming convention) for a
+  top-level rate_limit event younger than `SWARM_XSCRIPT_LIMIT_WINDOW` (900s)
+  → AT. Top-level-key JSON parsing means a lead merely *writing about* rate
+  limits can never trip it. Same latch machinery, signature = swarm + UTC hour
+  bucket (one prompt per swarm-hour; re-prompt cooldown bounds the rest).
+  `SWARM_XSCRIPT_TAIL_BYTES` (default 4MB) sizes the tail scan — the first live
+  proof missed 22MB-deep events with a 256KB tail, so the knob is generous and
+  the failure mode is pinned by test. Hermetic: an injected pane stub disables
+  the tier unless forced; the real-grep test now pins CLAUDE_PROJECTS_DIR.
+  **Retro-proof:** with the window widened over today, the tier fires exactly
+  on the missed event (`AT — deployment-core … rate_limit at 11:51:06Z`).
+  Also observed in transcripts: `authentication_failed` burst on
+  phase2-extraction at Jul 9 14:28Z — the didn't-adopt-credential scenario is
+  real; the stuck-pane alerter remains its net. Tests: 15 new (top-level vs
+  nested, window, latch bucket, re-prompt, tail knob both directions,
+  hermeticity). Suite 61/61.
