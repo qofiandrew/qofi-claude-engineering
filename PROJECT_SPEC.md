@@ -876,3 +876,22 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   pending): after posting the URL, poll the channel for a code-shaped operator
   reply and type it into the pane — closing the last gap for phone-only
   rotation.
+- `2026-07-11` — **First codex-engine lead live: press-backend.** Operator trial
+  of the codex bridge: swarm.conf row gained `| codex` (field 7) and the single
+  swarm was cycled. First launch FAILED — `_launch_codex_lead` typed one
+  ~800-char line (doctrine inline) into the pane and the tty mangled it; the
+  daemon never started. The codex launch path had zero test coverage. Fix: the
+  program now lives in a generated `$state_dir/launch.sh` (mode 700, no
+  secrets — the bot token rides the engine-neutral pane env line) and the tty
+  receives one short source line; the launcher `exec`s the daemon (pane
+  process IS bun, verified). New test pins: doctrine in the file never the
+  tty, all send-keys short, exec line, mode, no-token, access.json seeding
+  (15 asserts; suite 62/62). Gateway-connected wait 30→75s (bun cold-start +
+  Discord handshake overran 30s → false-negative WARN). Live: `gateway
+  connected as press-backend-bot#3377`, bound to its channel, sandbox
+  workspace-write. Detector interplay for a codex swarm: rotation/usage tiers
+  are Claude-account machinery — press-backend's transcripts live under
+  ~/.codex (not ~/.claude/projects), so the transcript tier, pane tiers, and
+  alerter are simply inert for it (no false signals); codex billing is its own
+  lane. Round-trip (operator message → codex reply in-channel) pending
+  operator send.
