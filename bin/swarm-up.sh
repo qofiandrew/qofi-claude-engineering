@@ -410,10 +410,13 @@ EOF
   chmod 700 "$state_dir/launch.sh"
   tmux send-keys -t "$sess" C-u ". '$state_dir/launch.sh'" C-m
 
-  if _wait_for "$sess" "gateway connected" 30; then
+  # 75s, not 30: bun cold-start + the Discord gateway handshake overran 30s on
+  # the first live cycle and produced a false-negative WARN while the daemon
+  # came up fine seconds later. A wrong WARN trains operators to ignore WARNs.
+  if _wait_for "$sess" "gateway connected" 75; then
     echo "  codex lead up: $sess (state: $state_dir)"
   else
-    echo "  WARN: $sess: codex-bridge did not report 'gateway connected' in 30s — check the pane (token? bun install?)" >&2
+    echo "  WARN: $sess: codex-bridge did not report 'gateway connected' in 75s — check the pane (token? bun install?)" >&2
   fi
 }
 
