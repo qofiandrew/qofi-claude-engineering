@@ -774,44 +774,114 @@ await Bun.sleep(10_000)
     const dir = mkdtempSync(join(tmpdir(), 'codex-bridge-background-'))
     const bin = join(dir, 'fake-codex')
     const marker = join(dir, 'background-wrote')
+    const ready = join(dir, 'background-ready')
+    const release = join(dir, 'background-release')
+    const pidFile = join(dir, 'background-pid')
     const controlMarker = join(dir, 'control-wrote')
+    const controlReady = join(dir, 'control-ready')
+    const controlRelease = join(dir, 'control-release')
+    const controlPidFile = join(dir, 'control-pid')
     writeFileSync(bin, `#!/usr/bin/env bun
-const child = Bun.spawn(['/bin/sh','-c','sleep 0.3; touch "$AUDIT_MARKER"'], {env: process.env, stdout:'ignore', stderr:'ignore'})
+const command = [
+  'echo "$$" > "$AUDIT_PID"',
+  ': > "$AUDIT_READY"',
+  'while [ ! -e "$AUDIT_RELEASE" ]; do sleep 0.01; done',
+  ': > "$AUDIT_MARKER"',
+].join('; ')
+const child = Bun.spawn(['/bin/sh','-c',command], {env: process.env, stdout:'ignore', stderr:'ignore'})
 child.unref()
+while (!(await Bun.file(process.env.AUDIT_READY).exists())) await Bun.sleep(1)
 console.log(JSON.stringify({type:'thread.started',thread_id:'t1'}))
 console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'done'}}))
 console.log(JSON.stringify({type:'turn.completed'}))
 `)
     chmodSync(bin, 0o700)
-    const old = process.env.AUDIT_MARKER
-    const oldAllowlist = process.env.CODEX_BRIDGE_ENV_ALLOWLIST
-    process.env.AUDIT_MARKER = marker
-    process.env.CODEX_BRIDGE_ENV_ALLOWLIST = 'AUDIT_MARKER'
+    const auditEnvironment: Record<string, string> = {
+      AUDIT_MARKER: marker,
+      AUDIT_READY: ready,
+      AUDIT_RELEASE: release,
+      AUDIT_PID: pidFile,
+    }
+    const oldEnvironment: Record<string, string | undefined> = {}
+    for (const name of [...Object.keys(auditEnvironment), 'CODEX_BRIDGE_ENV_ALLOWLIST']) {
+      oldEnvironment[name] = process.env[name]
+    }
+    Object.assign(process.env, auditEnvironment)
+    process.env.CODEX_BRIDGE_ENV_ALLOWLIST = Object.keys(auditEnvironment).join(',')
+    let controlPid: number | undefined
+    let descendantPid: number | undefined
+
+    const waitForFile = async (path: string): Promise<void> => {
+      const deadline = Date.now() + 5_000
+      while (!existsSync(path)) {
+        if (Date.now() >= deadline) throw new Error(`timed out waiting for ${path}`)
+        await Bun.sleep(5)
+      }
+    }
+    const readPid = (path: string): number => {
+      const pid = Number.parseInt(readFileSync(path, 'utf8').trim(), 10)
+      if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error(`invalid descendant pid in ${path}`)
+      return pid
+    }
+    const waitForProcessExit = async (pid: number): Promise<void> => {
+      const deadline = Date.now() + 5_000
+      while (true) {
+        try {
+          process.kill(pid, 0)
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'ESRCH') return
+          throw err
+        }
+        if (Date.now() >= deadline) throw new Error(`timed out waiting for descendant ${pid} to exit`)
+        await Bun.sleep(5)
+      }
+    }
     try {
       // Control: the same fake binary leaves a background descendant that
       // writes successfully when no runner owns/kills its process group.
       const control = Bun.spawn([bin], {
-        env: { ...process.env, AUDIT_MARKER: controlMarker },
+        env: {
+          ...process.env,
+          AUDIT_MARKER: controlMarker,
+          AUDIT_READY: controlReady,
+          AUDIT_RELEASE: controlRelease,
+          AUDIT_PID: controlPidFile,
+        },
         stdout: 'ignore', stderr: 'ignore',
       })
       await control.exited
-      await Bun.sleep(400)
+      await waitForFile(controlReady)
+      controlPid = readPid(controlPidFile)
+      writeFileSync(controlRelease, '')
+      await waitForProcessExit(controlPid)
+      controlPid = undefined
       expect(existsSync(controlMarker)).toBe(true)
 
       const result = await runCodexTurn(null, 'hello', {
-        cwd: dir, timeoutMs: 2000, bin,
+        cwd: dir, timeoutMs: 5000, bin,
       })
       expect(result.ok).toBe(true)
-      await Bun.sleep(400)
+      await waitForFile(ready)
+      descendantPid = readPid(pidFile)
+      writeFileSync(release, '')
+      await waitForProcessExit(descendantPid)
+      descendantPid = undefined
       expect(existsSync(marker)).toBe(false)
     } finally {
-      if (old === undefined) delete process.env.AUDIT_MARKER
-      else process.env.AUDIT_MARKER = old
-      if (oldAllowlist === undefined) delete process.env.CODEX_BRIDGE_ENV_ALLOWLIST
-      else process.env.CODEX_BRIDGE_ENV_ALLOWLIST = oldAllowlist
+      for (const releasePath of [controlRelease, release]) {
+        try { writeFileSync(releasePath, '') } catch {}
+      }
+      for (const pid of [controlPid, descendantPid]) {
+        if (pid === undefined) continue
+        try { process.kill(pid, 'SIGKILL') } catch {}
+      }
+      for (const [name, value] of Object.entries(oldEnvironment)) {
+        if (value === undefined) delete process.env[name]
+        else process.env[name] = value
+      }
       rmSync(dir, { recursive: true, force: true })
     }
-  })
+  }, 15_000)
 
   test('stdout limit fails closed after reaping the child', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'codex-bridge-output-'))
