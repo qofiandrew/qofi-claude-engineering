@@ -153,6 +153,7 @@ right-click to copy ids):
 | `cpoBotUserId` | the CPO (`qofi-product`) **bot user** id (NOT a channel) | right-click the CPO bot's name → Copy User ID |
 | `alertUserIds` | array of operator **user** ids to DM on a fail-closed event | right-click each operator → Copy User ID |
 | `busRequiresMention` | require the CPO to @mention the watcher to route (default `true`) | — |
+| `roadmapDigestChannelId` | scheduled roadmap-digest destination (defaults to the bus) | right-click the destination → Copy Channel ID |
 | `ctoChannels` | `{ "<name>": { "channelId": …, "botUserId": … } }` | one entry per CTO; `<name>` is what the CPO uses in `[name]` |
 
 A `ctoChannels` entry may also be the shorthand `"<name>": "<channel_id>"` (no
@@ -160,9 +161,10 @@ A `ctoChannels` entry may also be the shorthand `"<name>": "<channel_id>"` (no
 full `{ channelId, botUserId }` form for any CTO whose swarm only acts on mentions
 (the normal case).
 
-Optional **non-snowflake** tuning knobs (liveness thresholds, usage-limit feed, and
-the attachment caps `maxAttachmentBytes` / `attachmentDownloadTimeoutSeconds`) all have
-sane defaults and may be omitted — each is documented inline in `config.example.json`.
+Optional **non-snowflake** tuning knobs (liveness thresholds, check-in attempts,
+roadmap schedule/store paths, usage-limit feed, and the attachment caps
+`maxAttachmentBytes` / `attachmentDownloadTimeoutSeconds`) all have sane defaults
+and may be omitted — each is documented inline in `config.example.json`.
 
 The `ctoChannels` keys are the names the CPO uses in its `[name]` tags — one per
 **CTO swarm registered in `../swarm.conf`** (its engineering-cto rows are the
@@ -210,6 +212,12 @@ append the watcher id, don't remove or reorder existing entries — and back up
 npm install            # installs discord.js + dotenv
 npm start              # foreground, for a quick smoke test
 ```
+
+When any ADR-0023 draft surface is explicitly enabled, the Node daemon also
+requires `bun` on `PATH` for the low-frequency shared-policy helper. With all
+three opt-ins false, no helper is launched and existing relay/liveness startup is
+unchanged. The helper receives bounded JSON over stdin and is launched without
+the watcher's Discord/provider credential environment.
 
 Under **pm2** (the supervised, auto-restart path):
 
@@ -292,6 +300,61 @@ again only if it goes quiet afresh.
 > nudge is gated like a revival ping — AUTO-only, suppressed while the kill switch
 > is paused). `!watcher state` calls a fresh feed read on demand, so it shows
 > `RATE_LIMITED` (with the reset hint) even when liveness is off.
+
+## Structured idle check-ins (ADR-0023 draft)
+
+This surface is **implemented and tested, not live**. Its channel contract is
+proposed for operator ratification: an idle `DRIVING` loop causes the watcher to
+send one named request directly to that loop's bound CTO channel, mentioning the
+bound CTO bot. No CPO-agent forwarding decision is involved. The named CTO
+answers from that channel; the existing channel-id plus author-id gate is the
+provenance proof. The authenticated watcher relay then gives the CPO bus
+visibility. A direct bus post cannot satisfy a CTO check-in.
+
+Activation requires both `livenessEnabled=true` and the separate explicit
+`structuredCheckInsEnabled=true`. With only the existing liveness setting, the
+watcher preserves the previous free-form/STATE legacy ping; a restart therefore
+cannot silently adopt this unratified contract. Enabling the structured surface
+also requires every monitored CTO entry to bind its delivery `botUserId` and
+authenticated response identity; startup fails closed if any loop is shorthand
+or unbound.
+
+The request and validation come from the shared `swarm-harness/checkin.ts`
+contract through a bounded Bun helper; the long-lived watcher remains Node. The
+reply must be exactly one `qofi.cto-checkin/v1` JSON object with `ping_id`,
+`addressee`, `current_task`, a standing state, progress, blockers, next action,
+and boolean `needs_input`. `ok`, `still working`, and a bare state heartbeat are
+invalid. The watcher records attempt and ping-to-reply latency in owner-private
+`$SWARM_STATE_DIR/checkin/metrics.jsonl`, re-pings through the retrying delivery
+queue, and escalates after `checkInMaxAttempts` (default 3).
+
+`current_task` comes from the one active `task.started` without a later
+`task.finished` in the owner-private normalized event store. An ADR key is never
+substituted for a task id. If the journal is absent, malformed, state-mismatched,
+or ambiguous, the helper emits an opaque `pending-<digest>` correlation label
+and logs the gap; it never substitutes model status prose. The metric directory
+must be provisioned in advance as an owner-real mode-0700 directory. Its journal
+is bounded, mode 0600, single-link, and fsynced per accepted metric. A policy or
+delivery failure releases the liveness cooldown and is escalated instead of being
+counted as a successful ping.
+
+## Harness-derived roadmap visibility (ADR-0023 draft)
+
+The watcher never derives roadmap state from Discord messages. It asks the
+shared roadmap policy to read `.swarm-roadmap.json` only when its private
+authority digest matches. Authenticated surfaces are:
+
+- `!watcher roadmap` from the CPO bot on the bus, or from an operator DM
+  authorized by the operator-channel ACL, when `roadmapQueriesEnabled=true`;
+- a scheduled short digest when `roadmapEnabled=true`, sent to
+  `roadmapDigestChannelId` (the bus by default).
+
+Both sends use the existing serialized retry/dead-letter queue. Output is
+phone-sized and contains DR/swarm labels, state, result movement, and grounding
+time only. If the artifact is missing, modified outside the harness, or lacks
+authority, the query says it is unavailable; the watcher does not render an
+unverified file. Scheduled delivery advances its comparison snapshot only after
+Discord accepts the send.
 
 ## DM kill switch (soft pause)
 

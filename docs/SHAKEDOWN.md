@@ -8,7 +8,10 @@
 > Each step states what to do and the **PASS** condition. If a step fails, stop and
 > note which one — the failures are diagnostic (they tell you which layer broke).
 
-## 0. Pick a throwaway target
+## 0. Pick an engine and throwaway target
+
+Run this shakedown once per engine you intend to operate. Set `ENGINE=claude` or
+`ENGINE=codex`; do not infer Codex health from a successful Claude run.
 
 Make an empty git repo you don't care about, e.g. `~/code/shakedown-todo`, with a
 trivial real test command available (a `package.json` with a `test` script, or
@@ -17,16 +20,45 @@ checks `git status`.
 
 - **PASS:** `cd <target> && git rev-parse --is-inside-work-tree` prints `true`.
 
+For `ENGINE=codex`, prepare the dedicated runtime before registration. On the
+first Codex host, run the full bootstrap:
+
+```sh
+if [ ! -e "$HOME/.codex" ]; then (umask 077; mkdir "$HOME/.codex"); fi
+[ ! -L "$HOME/.codex" ] || { echo "refusing symlinked ~/.codex" >&2; exit 1; }
+chmod -N "$HOME/.codex" 2>/dev/null || true
+chmod 700 "$HOME/.codex"
+$SWARM_HOME/bin/swarm-codex-runtime.sh install --repo "$HOME/code/shakedown-todo"
+$SWARM_HOME/bin/swarm-codex-runtime.sh login
+# Log out/in and restart tmux after the first install, then:
+$SWARM_HOME/bin/swarm-codex-runtime.sh verify --repo "$HOME/code/shakedown-todo"
+```
+
+When the attested runtime/login already exists but this throwaway repo is new,
+do not jump straight to `verify`; register its authority first (or let the
+later `swarm-add` do these two steps transactionally):
+
+```sh
+$SWARM_HOME/bin/swarm-codex-runtime.sh prepare-workspace --repo "$HOME/code/shakedown-todo"
+$SWARM_HOME/bin/swarm-codex-runtime.sh verify --repo "$HOME/code/shakedown-todo"
+```
+
+- **PASS (Codex):** verification proves the hidden service UID and exact
+  ChatGPT subscription auth. Current-user `codex login status` is not accepted
+  as a substitute. `bin/swarm-codex-manager.sh ready` also reports the installed
+  root-attested global App Server manager ready.
+
 ## 1. Bootstrap the repo
 
 ```sh
-export SWARM_HOME=<repo>          # the consolidated monorepo root
-$SWARM_HOME/bin/swarm-init.sh ~/code/shakedown-todo
+export SWARM_HOME=/absolute/path/to/qofi-claude-engineering
+$SWARM_HOME/bin/swarm-init.sh ~/code/shakedown-todo --engine "$ENGINE"
 ```
 
-- **PASS:** stdout lists CLAUDE.md, ESCALATION.md, TEAM_LEAD.md, PROJECT_SPEC.md,
+- **PASS:** stdout lists CLAUDE.md, AGENTS.md, ESCALATION.md, TEAM_LEAD.md, PROJECT_SPEC.md,
   docs/adr/ADR.template.md, .claude/hooks/{test-gate,docs-check}.sh,
-  .claude/settings.json, .claude/test-cmd — and the closing line describes the
+  .claude/settings.json and `.claude/test-cmd`; with `ENGINE=codex` it also
+  stamps the adopted `.codex` policy and `.agents/skills` surfaces. The closing line describes the
   design-conversation → "go build" → CTO-authoring flow (the reconciled message,
   not the old "run the spec phase" one).
 - **PASS:** `.claude/test-cmd` contains your target's real test command (edit it now
@@ -36,19 +68,22 @@ $SWARM_HOME/bin/swarm-init.sh ~/code/shakedown-todo
 
 ## 2. Launch one CTO lead
 
-Add a single line to `$SWARM_HOME/swarm.conf` and the matching token to
-`tokens.env`, then:
+Use the supported onboarding path so the engine-aware row and ACL cannot drift
+(Codex writes field 7; historical Claude rows may retain the five-field shape):
 
 ```sh
-$SWARM_HOME/bin/swarm-up.sh up
+$SWARM_HOME/bin/swarm-add.sh shakedown ~/code/shakedown-todo --engine "$ENGINE"
+$SWARM_HOME/bin/swarm-up.sh up shakedown
 $SWARM_HOME/bin/swarm-up.sh status
 ```
 
 - **PASS:** `status` shows one `swarm-<name>` session.
-- **PASS (the Max guard):** attach to the session (`tmux attach -t swarm-<name>`),
-  run `/status` in Claude Code — it shows your **Max subscription**, not an API key.
-  If it shows an API key, `ANTHROPIC_API_KEY` leaked into the shell; fix before
-  continuing or you'll bill metered API.
+- **PASS (subscription guard):** Claude: attach and run `/status`; it shows Max,
+  not an API key. Codex: launch preflight prints a ChatGPT subscription login and
+  `$SWARM_HOME/bin/swarm-view.sh shakedown` shows a fresh runtime. Before the
+  first accepted channel message there is no persisted thread to resume, so the
+  explicitly labeled `FALLBACK EVENT/STATUS VIEW` is expected at this point.
+  API-key environments must cause launch to fail before a model turn.
 - **PASS:** in the repo's Discord channel, the bot is online.
 
 ## 3. The design conversation (no build yet)
@@ -60,6 +95,11 @@ add, list, complete, persist to a JSON file. v1 only." Have a short back-and-for
   writing code or spawning teammates. (If it starts building during the
   conversation, the handoff prompt didn't land — check `swarm-up.sh`'s send-keys
   brief.)
+- **PASS (Codex native view):** after the first reply has persisted the configured
+  channel's thread, rerun `$SWARM_HOME/bin/swarm-view.sh shakedown`. It prints
+  `NATIVE CODEX TUI` and renders that conversation through the read-only
+  per-swarm facade. The tmux client accepts no input; lifecycle and Discord
+  remain the only control paths.
 
 ## 4. "go build" → author + confirm
 
@@ -77,10 +117,14 @@ Send: **go build**.
 
 Approve the spec. Let it decompose and spawn.
 
-- **PASS:** it spawns 3–5 teammates with **disjoint file ownership** (no two tasks
-  own the same path). Spot-check the task list.
-- **PASS:** tool-permission prompts surface **in Discord**; approving with the
-  `yes/no` reply intercept from your phone unblocks the work.
+- **PASS:** the lead decomposes with disjoint ownership. Claude should spawn its
+  Agent Teams teammates. Codex must use only team/subagent capabilities actually
+  present in its installed CLI; serial execution is valid and false claims are not.
+- **PASS:** Claude tool-permission prompts surface in Discord. Codex has no
+  permission relay: its fixed custom permission profile, read-only capability
+  boundaries, and disabled MCP/plugins/network reject forbidden actions and
+  return failure without waiting for an invisible prompt. Unattended turns
+  intentionally ignore project exec-policy rules.
 
 ## 6. The gate bites — the deliberately-broken test
 
@@ -97,11 +141,15 @@ printf 'test("intentional shakedown failure", () => { expect(true).toBe(false); 
 
 Now tell the CTO (or the teammate) to mark its current task complete.
 
-- **PASS:** the `TaskCompleted` hook **blocks** it — the agent reports the task
-  cannot close, surfaces the failing test output, and either fixes/removes the
-  planted test or escalates. It must NOT mark the task done with a red suite.
-- **FAIL looks like:** the task closes anyway → the test gate isn't wired; check
-  `.claude/settings.json` hooks block and `CLAUDE_TEST_CMD` / `.claude/test-cmd`.
+- **PASS (Claude):** the existing TaskCompleted hook rejects completion.
+- **PASS (Codex):** the agent runs `.claude/test-cmd` directly, reports the red
+  command/result as incomplete, and fixes or escalates; CI remains red. The
+  unattended Codex lane deliberately has no repo command-hook/Stop adapter,
+  because those commands execute outside its tool sandbox.
+- **FAIL looks like:** Claude closes the task, or Codex claims green/done without
+  the direct command evidence. Check `.claude/settings.json` for Claude and the
+  immutable bridge preamble/`AGENTS.md` route for Codex, then inspect
+  `.claude/test-cmd` and CI.
 
 Then remove the planted test so the run can proceed:
 
@@ -113,8 +161,12 @@ rm tests/_shakedown_fail.test.js   # (or the python one)
 
 Have a teammate make a source-only change and try to go idle without touching docs.
 
-- **PASS:** the `TeammateIdle` hook blocks idle with the "you changed source but
-  updated no docs" message, and clears once docs / the build log are updated.
+- **PASS:** Claude's `TeammateIdle` hook blocks idle with the "you changed source
+  but updated no docs" message. Codex has no renamed equivalent event: after a
+  successful turn, have the allowlisted operator issue the exact Git-broker
+  commit control. Trusted broker policy must reject a source-only commit until a
+  non-deleted docs/build-log change is part of that latest-turn delta; it never
+  executes the mutable repository hook.
 
 ## 8. Escalation reaches your phone
 
@@ -138,17 +190,23 @@ Let it finish the tiny v1.
 ## 10. Tear down
 
 ```sh
-$SWARM_HOME/bin/swarm-up.sh down
+$SWARM_HOME/bin/swarm-up.sh down shakedown
 $SWARM_HOME/bin/swarm-up.sh status   # → no sessions
+$SWARM_HOME/bin/swarm-remove.sh shakedown
 ```
 
-- **PASS:** clean shutdown, no orphaned tmux sessions.
+- **PASS:** clean shutdown, no orphaned `swarm-shakedown` or
+  `codex-view-shakedown` session, no `shakedown` row, and (when it was the final
+  Codex reference) the runtime reports service workspace authority released.
+  The host-wide `qofi-codex-app-server-manager` session may remain by design for
+  other/future Codex rows. The bot token/ACL prompts remain explicit operator
+  choices; global runtime uninstall is not part of an ordinary shakedown.
 
 ---
 
 ## Scorecard
 
-If steps 4 (author+confirm), 6 (test gate bites), and 8 (escalation reaches phone)
+If steps 4 (author+confirm), 6 (the engine's documented test boundary bites), and 8 (escalation reaches phone)
 all pass, the system's core promise is proven — the rest is polish. Only then check
 `PROJECT_SPEC.md §4`'s end-to-end criterion, and add a §10 build-log entry recording
 the shakedown date and which repo it ran against.

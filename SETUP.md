@@ -7,13 +7,13 @@ swarm responding to `@mention`, switch to the README.
 
 Approximate time: **45–90 minutes** on a truly fresh Mac — most of the
 new friction is the identity/toolchain layer (§0.5: `gh` auth, the SSH
-alias, Xcode CLT download) plus the Claude Code login (§1) and the
+alias, Xcode CLT download) plus the selected Claude login (§1) or dedicated Codex runtime login (§5) and the
 Discord-portal clicking (§4/§8). §2 and §6–§7 are mechanical.
 
 Marker conventions:
 - `[VERIFY ON SETUP]` flags a step that can't be confirmed from the repo
   alone — an external service (Discord/GitHub portal) or an interactive
-  UI action (Claude Code login, `gh auth`).
+  UI action (agent CLI login, `gh auth`).
 - `[S]` = scriptable (a `setup.sh` could do it unattended).
   `[M]` = inherently manual / human-in-the-loop (a GUI dialog, a browser
   login, a token paste). Every step below is marked.
@@ -40,11 +40,11 @@ them now; they reframe what "done" means in §8 and §9.
 
 ### Trap A — `swarm-up` ≠ `swarm-add`
 
-They are NOT interchangeable. `swarm-up` **launches** (spins up tmux,
-starts claude, brings the bot online). `swarm-add` **configures** (stamps
-doctrine into the repo, appends the channel's group to `access.json`,
-sets `enabledPlugins["discord-b2b@qofi-swarm"]=true` in the repo's
-`.claude/settings.json`). A swarm that's been `up`-ed but never `add`-ed
+They are NOT interchangeable. `swarm-up` **launches** the row's selected
+engine in tmux: Claude's native TUI/plugin path or the hardened Codex Discord
+daemon. `swarm-add` **configures** doctrine plus the selected engine's ACL,
+runtime, and policy surfaces (including Claude's enabled plugin or Codex's
+dedicated workspace verification). A swarm that's been `up`-ed but never `add`-ed
 shows the bot **online** in Discord and **ignores every message** —
 because the bridge MCP never spawns (Trap C / §3.4) and the ACL has no
 group for the channel (§3.5). This was the single biggest time-sink
@@ -78,6 +78,12 @@ remediation it prints is always the same: `bin/swarm-add.sh <name>
 <repo> --skip-walkthrough`. The "I know what I'm doing" bypass is
 `SWARM_UP_SKIP_SANITY=1`. These gates exist specifically to turn
 today's silent half-launches into loud refusals.
+
+For `engine=codex`, the equivalent preflight is different and cannot be
+silently bypassed: root attestation/source hashes, hidden-account ChatGPT auth,
+workspace journal/inode, project config, managed Codex surfaces, canonical ACL,
+toolchain, and daemon quiescence must all pass. Claude plugin/Agent Teams gates
+are intentionally not imposed on the Codex daemon.
 
 ---
 
@@ -214,8 +220,9 @@ are written to that floor; you do **not** need a newer bash.
 | --- | --- | --- |
 | macOS 13+ | tmux, launchd, `/opt/homebrew` paths | n/a |
 | **tmux** | every swarm runs as a persistent `tmux` session; watcher reads pane content via `capture-pane` | `brew install tmux` `[S]` |
-| **bun** | the discord-b2b bridge is a Bun project (`bridge/server.ts` → `#!/usr/bin/env bun`); first launch runs `bun install` automatically | `curl -fsSL https://bun.sh/install \| bash` `[S]` |
-| **Claude Code v2.1.32+** | the lead process; needs the dev-channels flag and the marketplace plugin install | https://claude.com/claude-code `[M]` |
+| **bun 1.3+** | both Discord adapters are Bun projects; committed lockfiles make first launch reproducible | `curl -fsSL https://bun.sh/install \| bash` `[S]` |
+| **Claude Code v2.1.32+** | required for `engine=claude`; needs the dev-channels flag and marketplace plugin. Managed Codex's Fable reviewer was audited on 2.1.207 and requires an installed CLI accepting `claude-fable-5`. | https://claude.com/claude-code `[M]` |
+| **Codex CLI `>=0.144.1,<0.145.0`** | required for `engine=codex`; this audited window pins the App Server/remote-TUI protocol, permission profiles, and ambient-feature disables; later minors fail closed pending review | https://developers.openai.com/codex/cli `[M]` |
 | **python3** | manifest walker, settings merger, dod-affirm hook, permission-gate hook, watcher JSON, reset-time parser | provided by **CLT (§0.5.1)**; `/usr/bin/python3` is an install-prompt shim until then |
 | **git** | clone + worktrees + the `git commit`s in swarm-new/onboard/sync | installed via **CLT (§0.5.1)**, configured in **§0.5.3** |
 | **gh** | `swarm-new` preflight + GitHub repo creation | installed + authed in **§0.5.4** |
@@ -223,10 +230,10 @@ are written to that floor; you do **not** need a newer bash.
 | **curl** | watcher posts directly to Discord REST | ships with macOS |
 | **A Discord account + a server you own** | one bot identity per swarm; the bot needs Manage-Messages-equivalent permissions in the channel | n/a |
 
-Not required (verified against repo): `jq` (the system uses `python3 -c`
-for JSON), GNU coreutils, brew bash. **`node`/`npm` are NOT swarm-system
-dependencies** — bun is the bridge runtime. (Node is only relevant
-per-product; see §1.5.)
+Not required: `jq` (the system uses `python3` for JSON), GNU coreutils, or
+brew bash. A Claude-only host does not need Node for the bridge. A Codex host
+does: the supported npm/NVM CLI shape is an attested absolute Node plus
+canonical `codex.js`, and the root runtime provisions Node/npm/npx itself.
 
 > **Apple Silicon vs Intel.** The default Homebrew prefix is
 > `/opt/homebrew` on Apple Silicon, `/usr/local` on Intel. You don't hand-
@@ -240,6 +247,7 @@ per-product; see §1.5.)
 brew install tmux
 curl -fsSL https://bun.sh/install | bash    # then ensure bun is on PATH in ~/.zshrc
 # install Claude Code per https://claude.com/claude-code (native installer)
+# install Codex only if this host will run engine=codex rows
 ```
 
 Paste this whole block into a terminal. Every line should print a version
@@ -254,6 +262,7 @@ it before proceeding.
   echo "tmux:      $(tmux -V 2>/dev/null || echo MISSING)"
   echo "bun:       $(bun --version 2>/dev/null || echo MISSING)"
   echo "claude:    $(claude --version 2>/dev/null || echo MISSING)"
+  echo "codex:     $(codex --version 2>/dev/null || echo MISSING)"
   echo "python3:   $(python3 --version 2>/dev/null || echo MISSING)"
   echo "git:       $(git --version 2>/dev/null || echo MISSING)"
   echo "gh:        $(gh --version 2>/dev/null | head -1 || echo MISSING)"
@@ -273,13 +282,27 @@ explicitly `unset`s it before launching the lead (see
 `bin/swarm-up.sh:74`), but it's still cleaner not to have it in your
 shell at all. `[VERIFY ON SETUP]`
 
+For a host that will run Codex rows, verify only the install/version here:
+
+```sh
+codex --version
+# required audited line: codex-cli 0.144.x, with patch >= 0.144.1
+```
+
+Do not use the current user's `codex login status` as the unattended proof. The
+production bridge runs under a distinct hidden account and provisions that
+account's ChatGPT login after `$SWARM_HOME` is cloned (§5). Claude and Codex
+subscription state are independent; a Claude account label in field 6 is ignored
+for a Codex row before Claude-only account preflight runs.
+
 ---
 
 ## 1.5. PRODUCT-TIER dependencies (conditional — NOT swarm-system prereqs)
 
-> **These are NOT required by the swarm system.** There are zero Docker
-> or Node references in `bin/`, `launchd/`, or the swarm config. Install
-> them only because the **product repos your swarms build** need them.
+> These are product-tier additions, not extra Claude-only host prerequisites.
+> Docker is never required by orchestration. Node is already mandatory and
+> root-provisioned on Codex hosts; install a separate operator Node only when a
+> **Claude-built product repo** needs it.
 > Skip this section entirely if you're only standing up the swarm
 > orchestration; come back when a product requires it.
 
@@ -292,10 +315,10 @@ shell at all. `[VERIFY ON SETUP]`
   headroom per concurrent lead. `swarm.conf.example` already caps you at
   ~1–2 concurrent teams on one Max pool, which bounds lead memory — start
   conservative, raise only if a container demands it.
-- **Node** `[M]` — `brew install node` **only** if a product repo's
+- **Operator Node** `[M]` — `brew install node` only if a Claude product repo's
   test-gate runs node (`templates/engineering-cto/hooks/permission-gate.sh` whitelists
-  `node --test` / `npm test` for product gates). The swarm system itself
-  never needs it; bun is the bridge runtime.
+  `node --test` / `npm test` for product gates). This is separate from the
+  root-owned Node/npm/npx installed for the dedicated Codex runtime.
 
 ---
 
@@ -441,7 +464,7 @@ Should show `"discord-b2b@qofi-swarm"` with an `installPath` under
 `~/.claude/plugins/cache/qofi-swarm/discord-b2b/<version>/`. The first
 time a swarm launches the bridge, `bun install` runs automatically in
 that cache dir (see `bridge/package.json` — `"start": "bun install
---no-summary && bun server.ts"`), so the first cold start is a few
+--frozen-lockfile --no-summary && bun server.ts"`), so the first cold start is a few
 seconds slower than later launches.
 
 ### 3.4 `enabledPlugins[...] = true` per swarm — the silent-failure trap
@@ -478,6 +501,7 @@ machine, holds Discord IDs).
 ```json
 {
   "dmPolicy": "pairing" | "allowlist" | "disabled",
+  "loginControlOwnerId": "<your-discord-user-id>",
   "allowFrom": ["<your-discord-user-id>"],
   "groups": {
     "<channel-id>": { "requireMention": false, "allowFrom": ["<your-id>"] }
@@ -491,6 +515,25 @@ machine, holds Discord IDs).
 defaults (`dmPolicy: "pairing"`, your owner ID in `allowFrom`), and
 appends a per-channel group entry on every subsequent `swarm-add`.
 
+Before the first standup, export the operator identity explicitly (numeric
+Discord user ID, not a bot/application ID):
+
+```sh
+export SWARM_OWNER_DISCORD_ID='<your-discord-user-id>'
+```
+
+Phase 4d pins this ID as `loginControlOwnerId`, puts it in top-level
+`allowFrom` and the channel group, then
+writes the file mode `0600`. Top-level membership is deliberately narrower
+than ordinary group membership: it authorizes Codex's constrained `!qofi-git`
+broker. Never substitute the CTO watcher bot ID or infer an operator from a
+channel group. A safe re-run migrates an owned historical `0644` file to
+`0600`; `swarm-doctor` fails if the mode or explicit principal is wrong.
+
+For `--type cpo`, Phase 4d also creates the `SWARM_BUS_CHANNEL` group with the
+operator and `CTO_BUS_WATCHER_BOT_ID`. The watcher remains a bus sender only;
+it is not added to top-level `allowFrom` and cannot authorize Git actions.
+
 > **`requireMention: false` — listens to the whole channel.** Each
 > per-channel group is created with `requireMention: false`, so the bot
 > processes **every** message in the channel without an `@`-mention.
@@ -501,10 +544,9 @@ appends a per-channel group entry on every subsequent `swarm-add`.
 > `requireMention: true`; the bridge re-reads the file at message
 > dispatch time, no restart needed.
 
-You will need **your Discord user ID** when `swarm-add` prompts for
-`OWNER_ID`: in Discord, User Settings → Advanced → enable Developer
-Mode, then right-click your own name and "Copy User ID". `[VERIFY ON
-SETUP]`
+You will need **your Discord user ID** for `SWARM_OWNER_DISCORD_ID`: in Discord,
+User Settings → Advanced → enable Developer Mode, then right-click your own name
+and "Copy User ID". `[VERIFY ON SETUP]`
 
 ---
 
@@ -653,7 +695,7 @@ rather than this section.
 
 ---
 
-## 5. The bridge
+## 5. Engine bridges
 
 Most of the bridge work is already done by §3.2–3.3. Confirm the wiring:
 
@@ -671,6 +713,116 @@ Most of the bridge work is already done by §3.2–3.3. Confirm the wiring:
 
 **Verify**: `bun --version` returns a version (§1 preflight covered
 this). No other action required at setup time.
+
+For `engine=codex`, no Claude marketplace/plugin setup is used. The host launches
+`codex-bridge/daemon.ts`, reconciles the channel owner ACL into the swarm's
+isolated `~/.codex/channels/discord-<name>/`, and installs dependencies with
+`bun install --frozen-lockfile`. See [`docs/CODEX.md`](docs/CODEX.md) for the
+runtime state, access CLI, root-attested global App Server manager, native tmux
+view, and persisted fallback boundary.
+
+### 5.2 Dedicated Codex runtime (Codex hosts only) `[S]`
+
+The unattended bridge must not run Codex as the logged-in operator: macOS
+Keychain/securityd and launchd IPC are broader than a filesystem sandbox. Create
+the root-attested hidden runtime once, including its fixed global App Server
+manager launcher/bundle, store its own ChatGPT subscription login, then refresh
+the operator's group credentials:
+
+```sh
+if [ ! -e "$HOME/.codex" ]; then (umask 077; mkdir "$HOME/.codex"); fi
+[ ! -L "$HOME/.codex" ] || { echo "refusing symlinked ~/.codex" >&2; exit 1; }
+chmod -N "$HOME/.codex" 2>/dev/null || true
+chmod 700 "$HOME/.codex"   # operator event/ACL/session state, not provider auth
+
+# Only for a repo declaring packageManager "pnpm@9.12.3": populate the
+# operator-trusted cache without sudo. The installer copies it and never runs
+# Corepack or package scripts as root.
+corepack pnpm@9.12.3 --version
+
+"$SWARM_HOME/bin/swarm-codex-runtime.sh" install \
+  --repo /absolute/path/to/first-codex-repo
+"$SWARM_HOME/bin/swarm-codex-runtime.sh" login
+```
+
+The install intentionally does not copy `$HOME/.codex/auth.json`; until the
+second command completes, the host is installed but not login-ready and
+`verify` exits with the exact login remediation. Keep the `login` terminal open
+while using the browser. A localhost callback may finish automatically; if the
+provider presents a paste-back flow, paste the value into that same terminal
+only, never into Discord or a swarm message.
+
+macOS may initialize an opaque runtime-owned `Library/Keychains/<platform-id>`
+subtree even with an empty search list. Qofi never enumerates or deletes it; it
+validates the directory boundary, proves the hidden search list empty before
+and after login, and pins Codex to the hardened file credential store. If an
+older fixed helper reports that this directory must be empty, refresh only the
+fixed lifecycle and resume the ordinary install:
+
+```sh
+"$SWARM_HOME/bin/swarm-codex-runtime.sh" refresh-lifecycle
+"$SWARM_HOME/bin/swarm-codex-runtime.sh" install \
+  --repo /absolute/path/to/first-codex-repo
+```
+
+The hidden launchd domain may also retain one Apple
+`/usr/sbin/distnoted agent`. This is not a Codex child. Qofi exempts only the
+exact stable PID-1/session-0 SIP process; every other hidden-UID process must be
+quiesced. If the installed runner predates that rule, use the same
+`refresh-lifecycle` then `install` sequence above before launching a swarm.
+
+Log out of macOS and back in, then restart every tmux server/session that will
+launch swarms. This is required because already-running processes do not acquire
+a newly assigned supplemental group. Verify from the refreshed shell:
+
+```sh
+"$SWARM_HOME/bin/swarm-codex-runtime.sh" verify \
+  --repo /absolute/path/to/first-codex-repo
+```
+
+For quota-aware per-swarm rotation, initialize every named profile before adding
+it to `codex-profiles.json`, then select its ordered pool in field 8:
+
+```sh
+"$SWARM_HOME/bin/swarm-codex-runtime.sh" login --profile max_b
+"$SWARM_HOME/bin/swarm-codex-runtime.sh" verify --profile max_b \
+  --repo /absolute/path/to/first-codex-repo
+
+"$SWARM_HOME/bin/swarm-add.sh" <name> <repo> --engine codex \
+  --codex-auth-pool rotating
+```
+
+`default` uses the hidden account's `.codex`; named handles use complete,
+separate `.codex-profiles/<handle>` homes. Registry and Discord state contain
+profile labels and sanitized quota/reset metadata only—never auth or callback
+values. Claude's field-6 account and device-global rotation are unaffected.
+
+**PASS:** verification reports the exact v2 account/group/runner/toolchain/auth
+contract and `Logged in using ChatGPT`; it must not accept an API-key session or
+the operator's own `~/.codex/auth.json`. For another Codex target, registration
+prepares and verifies the workspace before committing its row; the direct form is:
+
+```sh
+"$SWARM_HOME/bin/swarm-codex-runtime.sh" prepare-workspace \
+  --repo /absolute/path/to/other-repo
+"$SWARM_HOME/bin/swarm-codex-runtime.sh" verify \
+  --repo /absolute/path/to/other-repo
+```
+
+The current root toolchain baseline is Node, Bun, npm, and npx plus audited
+root-controlled system tools. An exactly pinned `pnpm@9.12.3` project gains the
+audited global pnpm package/direct-Node wrapper; that singleton is preserved by
+later npm-only installs, while other pnpm versions fail closed. A product
+requiring any other user-owned Homebrew/NVM tool outside the boundary is refused
+until it is explicitly provisioned; Claude's toolchain remains unchanged.
+
+A successful runtime install starts and attests the one global manager in the
+persistent `qofi-codex-app-server-manager` tmux session through the fixed root
+launcher; `swarm-up` also ensures it is ready before launching any Codex row.
+Later rows share that manager and receive separate owner-only,
+protocol-filtering facade sockets; they do not start per-repo App Servers.
+`bin/swarm-codex-manager.sh status` reports its health. Root runtime lifecycle
+commands drain, resume, or replace it automatically.
 
 ---
 
@@ -758,8 +910,8 @@ have its alias.
 ## 8. Your first swarm  `[M]`
 
 > **`swarm-add` is NON-OPTIONAL per swarm — even if `swarm-up` already
-> launched a session for it.** `swarm-up.sh launch_one()` only spins up
-> tmux + claude + the bot; **only `swarm-add`** does Phase 4d
+> launched a session for it.** `swarm-up.sh launch_one()` only starts the
+> configured Claude TUI or Codex daemon; **only `swarm-add`** does Phase 4d
 > (`access.json` group), Phase 4c (doctrine stamp), and Phase 5
 > (`enabledPlugins["discord-b2b@qofi-swarm"]=true` in the repo's
 > `.claude/settings.json`). A swarm that's been `up`-ed but never
@@ -776,8 +928,8 @@ first swarm.
 | Use this | When |
 | --- | --- |
 | `bin/swarm-new.sh <name>` | **brand-new** swarm with no repo yet. Creates the local repo at `~/qofirepos/<name>`, the GitHub repo under `qofiandrew` (via the `github-company` alias), pushes the initial commit, then execs `swarm-add` for the Discord half. |
-| `bin/swarm-add.sh <name> <repo>` | **existing local** repo. Walks the Discord portal interactively (§4 in this doc, abbreviated) and runs `swarm-init` against the repo for you. |
-| `bin/swarm-onboard.sh <repo>` then `bin/swarm-add.sh <name> <repo> --skip-walkthrough` | **existing real codebase** you want to onboard. Onboard stamps the doctrine + hooks with collision-refuse-and-report semantics; then swarm-add wires up the Discord side. |
+| `bin/swarm-add.sh <name> <repo> [--engine claude\|codex]` | **existing local** repo. Walks the Discord portal, writes the engine-aware row, and runs `swarm-init`. Codex additionally prepares/verifies its dedicated workspace before commit; Claude keeps the historical default row/path. |
+| `bin/swarm-onboard.sh <repo> --engine <engine>` then `bin/swarm-add.sh <name> <repo> --engine <engine> --skip-walkthrough` | **existing real codebase** you want to onboard. Use the same explicit engine in both commands: onboard stamps doctrine plus that engine's repository surfaces, then swarm-add wires and verifies the selected runtime. `claude` remains the default when the flag is omitted. |
 
 For your **very first** standup, use `swarm-add` (or `swarm-new` if the
 repo doesn't exist yet) — the interactive Phase 1 walkthrough covers §4
@@ -787,15 +939,17 @@ into `~/qofirepos/`, then `swarm-add <name> ~/qofirepos/<name>`.
 
 ```sh
 bin/swarm-add.sh mythirdswarm ~/qofirepos/mythirdswarm
+# or: bin/swarm-add.sh mythirdswarm ~/qofirepos/mythirdswarm --engine codex
 ```
 
 You'll be prompted for:
 
 - The **channel ID** (Discord Developer Mode → right-click channel →
   Copy Channel ID).
-- Your **owner ID** (same Developer Mode → right-click yourself → Copy
-  User ID). Goes into `access.json` as `allowFrom`.
 - The **bot token** (silent prompt; never echoed).
+
+The owner ID is not an interactive prompt: export and verify
+`SWARM_OWNER_DISCORD_ID` as shown in §3.5 before running this command.
 
 The script is idempotent: re-running with the same args picks up where
 it left off (Phase 0 reports detected pre-existing state). If anything
@@ -814,16 +968,18 @@ common bringup mode.
 | 1 | `launchctl list \| grep com.qofi` | both agents listed |
 | 2 | `swarm-status` | shows `(no swarm sessions running)` until next step |
 | 3 | `bin/swarm-up.sh up <name>` | prints `launching: swarm-<name> (<repo>)`, no `ERROR:` lines |
-| 4 | `bin/swarm-attach.sh <name>` (or `swarm-<name>` alias) | attaches to the tmux session; the Claude TUI renders within ~20s |
-| 5 | watch the pane | sees: `unset ANTHROPIC_API_KEY` → `claude --dangerously-load-development-channels …` → dev-channels prompt (auto-cleared) → main UI with footer `auto mode` → the initial brief lands |
+| 4 | `bin/swarm-attach.sh <name>` for either engine (`bin/swarm-view.sh <name>` is the explicit Codex-only form) | Claude renders its native TUI. After the configured Discord channel has a persisted thread, Codex prints `NATIVE CODEX TUI` and opens that thread through the read-only facade. Before the first accepted channel turn—or if a proof is unavailable—it explicitly opens `FALLBACK EVENT/STATUS VIEW`. |
+| 5 | watch the engine view | Claude shows its normal launch/brief. Codex's native UI shows the persisted configured-channel conversation and filtered live updates without granting input; its fallback reports fresh runtime/gateway/queue/turn state without exposing prompts or tokens. |
 | 6 | Discord member sidebar in your server | the bot status flips **online** |
 | 7 | `@mention` the bot in #<channel> | the lead replies or reacts within seconds |
 | 8 | wait up to 10s, look in #<channel> | a heartbeat message lands (and is **pinned**) showing `🟢 swarm ready · waiting for input · <name>` or similar |
 | 9 | `tail -F ~/.config/swarm/watch.log` (or `swarm-watch-log`) | no `ERROR:` / no `FATAL:` lines; tick output runs every 10s |
 
-If step 7 fails (bot online but silent), §3.4 is wrong for this repo —
-re-run `bin/swarm-add.sh <name> <repo> --skip-walkthrough` and Phase 5
-will detect and repair `enabledPlugins`.
+If step 7 fails for Claude (bot online but silent), §3.4 is wrong for this repo;
+re-run `swarm-add --skip-walkthrough`. For Codex, run `swarm-view.sh <name>` and
+inspect `last_error`, then verify the bound group's nonempty `allowFrom` and run
+`bin/swarm-codex-runtime.sh verify --repo <absolute-repo>`; Codex launch fails closed instead of silently opening an
+unconfigured channel.
 
 If step 8 fails (no heartbeat), the watcher isn't reaching Discord —
 check `~/.config/swarm/watch.err` for token / channel ID / HTTP
@@ -881,11 +1037,18 @@ when something is wrong.
   the templates. Syncing the templates over them would overwrite the
   brief doctrine. The pre-commit hook in this repo is the
   `anti-secret-only` variant for the same reason (see `README.md §9`).
-- **`tmux Ctrl-C` kills `claude`.** Inside a swarm session: `Ctrl-b d`
+- **Claude TUI: `tmux Ctrl-C` kills `claude`.** Inside a Claude swarm session: `Ctrl-b d`
   to detach (lead keeps running); `Esc` to interrupt a turn in flight.
   **Never `Ctrl-C`** — that kills the `claude` process, which closes
   the pane, which kills the tmux session, which (because §6's watcher
   predicates need the session) flips the heartbeat to `⚪ down`.
+- **Codex view is read-only.** `swarm-attach.sh <name>` engine-dispatches to
+  `swarm-view.sh <name>`, which normally opens the native
+  Codex TUI for the configured channel thread, but its tmux client and per-swarm
+  protocol facade reject all input/mutations. If runtime, endpoint, toolchain, or
+  thread attestation is incomplete, it opens the explicitly labeled persisted
+  event/status fallback. Stop or restart Codex through `swarm-up.sh down` /
+  `swarm-restart.sh`, never by typing into the daemon or viewer session.
 - **`ANTHROPIC_API_KEY` in your shell.** Even though `swarm-up.sh`
   `unset`s it before launching `claude`, leaving it in your interactive
   shell is a footgun for other workflows. Don't export it in

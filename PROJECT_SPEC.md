@@ -1,12 +1,12 @@
-# Project Spec — claude-swarm
+# Project Spec — hybrid engineering swarm
 
-> The system that lets one operator run Claude Code as an autonomous engineering
+> The system that lets one operator run Claude Code or OpenAI Codex as an autonomous engineering
 > org. This is the spec CC builds the system itself against. It is also the
 > reference implementation of the very practice it ships: a real spec plus ADRs,
 > kept reconciled with the code.
 
-**Status:** approved-for-build
-**Last updated:** 2026-05-21
+**Status:** operational; hybrid-engine hardening verified locally
+**Last updated:** 2026-07-13
 
 ---
 
@@ -15,8 +15,8 @@
 An operator wants to direct software work the way a founder directs an engineering
 org: hold a product-design conversation, say "go build," and have a CTO agent turn
 that vision into docs, coordinate a team that builds end-to-end, and surface only
-the decisions that genuinely need a human. `claude-swarm` is the thin layer that
-makes this real on one Mac mini and one Claude Max subscription: a per-repo
+the decisions that genuinely need a human. The swarm is the thin layer that
+makes this real on one Mac mini and subscription-authenticated agent CLIs: a per-repo
 operating contract, deterministic quality gates, and a host launcher.
 
 The one sentence the build must not drift from: **the operator gives vision and
@@ -28,7 +28,9 @@ automatically.**
 A single technical operator, driving from a phone via Discord. They:
 - spec a product conversationally with a CTO agent, then say "go build";
 - approve one-way-door decisions and v1/v2 scope calls when pinged;
-- approve tool-permission prompts remotely (the `yes/no` reply intercept);
+- approve Claude tool-permission prompts remotely; Codex instead operates inside
+  a fixed non-interactive permission profile and OS/runtime capability floor
+  (unattended turns intentionally ignore project exec-policy rules);
 - run several products over time, one or two live concurrently.
 
 ## 3. Scope
@@ -39,21 +41,47 @@ A single technical operator, driving from a phone via Discord. They:
   `settings.example.json`, and the two hooks.
 - `bin/swarm-init.sh` — idempotent repo bootstrap.
 - `bin/swarm-up.sh` — tmux launcher/supervisor for one CTO lead per repo.
-- Integration with the existing **Discord bridge** (the `discord-b2b` plugin):
-  one bot identity per repo channel, directives down, escalations + permission
-  prompts up.
+- Engine-specific Discord integration: Claude uses the existing `discord-b2b`
+  plugin (including permission prompts); Codex uses its standalone bounded
+  daemon (directives/replies/escalations, no interactive permission relay).
 - The **CTO-authoring flow**: design conversation → "go build" → author spec+ADRs →
   confirm → decompose → spawn → integrate → reconcile.
-- Deterministic gates: `TaskCompleted` test gate, `TeammateIdle` docs check.
-- Single team on Claude Max (Agent Teams, in-process teammates).
+- Deterministic gates by substrate: Claude uses `TaskCompleted`/`TeammateIdle`
+  hooks; Codex requires direct `.claude/test-cmd` evidence and the trusted Git
+  broker's docs-touch policy because repo command hooks are disabled.
+- Single Claude team on Max (Agent Teams, in-process teammates); serialized
+  Codex turns lease isolated ChatGPT profile homes per swarm.
+- A per-row `claude|codex` engine selector with first-class Codex onboarding,
+  isolated Discord state/ACLs, resumed threads, bounded serialized execution,
+  engine-native policy surfaces, engine-aware lifecycle safety, and a live tmux
+  event view.
+- Quota-aware Codex profile pools: exclusive-by-default per-swarm leases,
+  local-rollout-only 5-hour/weekly telemetry, inclusive configurable soft
+  thresholds (95% default), structured hard-limit requeue, boundary-only
+  drain/respawn, pool parking, sanitized status, and Discord announcements.
+- Symmetric foreign-model adversarial review: Claude-authored work retains the
+  Codex companion lane; managed Codex workers receive one terminal,
+  capability-minimal Claude Fable 5 MCP tool with bounded data-only input,
+  per-swarm budgets, task/profile-scoped canonical verdict artifacts, and no
+  merge authority. Hard-limit replay and same-profile retry intake only the
+  active attempt's profile-scoped artifact delta without resetting task budget.
+- Harness-owned lifecycle parity: both runtimes normalize into one event schema;
+  completion requires one final foreign-model artifact and a delivered-or-queued
+  stop outcome; idle pings require strict CTO check-ins; roadmap/digests derive
+  from events and result sets; corpus-commit context packs and grounding-budget
+  gap reports reduce repeated recon. Runtime adapters translate and never own
+  policy. Unavoidable control differences are explicit in a parity matrix and
+  divergence register (ADR-0023; implemented/tested, not live).
 
 ### Explicitly deferred to v2+
-- A **heartbeat health monitor** that detects a wedged-but-alive lead (v1 liveness
-  is "tmux session exists," which only catches a dead one).
+- Provider-level wedged detection beyond today's engine-aware activity rails
+  (Claude transcript freshness/pane evidence; Codex runtime heartbeat/state).
 - A **second concurrent team** and a metered-API overflow path for bursts.
-- **Headless Agent SDK** migration for true unattended 24/7 operation.
-- Richer pooled-worktree provisioning for ephemeral fan-out beyond the basic
-  recycled pool (→ ADR-0008).
+- A Claude-side **Headless Agent SDK** migration for true unattended 24/7 operation.
+- A host-owned Codex worktree lifecycle that can provision isolated delegates,
+  merge/push, and tear them down without exposing `.git` or mutable repo hooks.
+  The exec v1 substrate uses disjoint paths in one checkout plus an
+  operator-authorized side-ref branch/commit/retire handoff (→ ADR-0008).
 - Richer reconciliation tooling (automated spec-vs-code drift reports).
 
 ### Non-goals
@@ -67,38 +95,70 @@ A single technical operator, driving from a phone via Discord. They:
       run, and never clobbers a real `PROJECT_SPEC.md`.
 - [ ] `swarm-up.sh up` launches one lead per `swarm.conf` entry, each with its own
       `DISCORD_BOT_TOKEN`, with `ANTHROPIC_API_KEY` unset (runs on Max).
+- [ ] A Codex row launches only with ChatGPT subscription auth, scrubs metered
+      API-key variables, applies an explicit sandbox/network policy, and exposes
+      fresh atomic runtime state used by restart/watch/typing/view consumers.
+- [ ] One Codex swarm reaching either fresh quota threshold rotates only its own
+      profile lease at a task boundary; structured usage-limit/429 failure
+      requeues the same task, and null/stale/unknown telemetry never rotates.
+- [ ] A managed Codex worker can request a `claude-fable-5` adversarial review
+      without granting Claude repository, exec, write, plugin, nested-MCP, or
+      recursive-agent capability. Every success/failure is canonical and
+      provenance-bearing; unavailable review is pending, never approval.
+- [ ] The same parity fixtures pass through Claude and Codex adapters: a task
+      cannot stop without a final hash-bound review artifact; stop delivery must
+      be delivered or durably queued; bare idle replies fail strict check-in
+      validation; grounding-budget overrun emits a pack-gap result; and ordinary
+      mid-task review is refused. Roadmap state must derive from normalized
+      events/result sets, never worker prose.
+- [ ] A Codex engineering turn may edit and verify in one serialized checkout;
+      only an allowlisted operator can ask the trusted broker to create a
+      non-protected branch and commit the immutable latest-turn delta. Merge,
+      push, teammate worktrees, and teardown remain explicit operator/CI work.
 - [ ] `swarm-up.sh {down,status,watch}` behave as documented.
-- [ ] End-to-end: design conversation → "go build" → CTO authors `PROJECT_SPEC.md`
-      + ADRs → operator confirms → team builds → escalation reaches the phone →
-      permission reply works → milestone reported.
-- [ ] `TaskCompleted` hook blocks completion on red tests; `TeammateIdle` hook
-      blocks idle when source changed but docs didn't.
+- [ ] End-to-end per engine: design conversation → "go build" → CTO authors
+      `PROJECT_SPEC.md` + ADRs → operator confirms → build → escalation reaches
+      the phone → milestone reported. Claude additionally proves permission
+      reply + Agent Teams; Codex proves serialized direct-test evidence.
+- [ ] Claude: `TaskCompleted` blocks red tests and `TeammateIdle` blocks
+      source-without-docs idle. Codex: direct test evidence and broker docs-touch
+      reject the equivalent false completion/commit claims.
 
 ## 5. Constraints
 
-- **One Max pool** feeds everything — realistically 1–2 concurrent teams (see
-  ADR-0004). Concurrency is capped by the subscription, not the hardware.
+- **Subscription lanes stay separate.** Claude rows retain the one-Max-pool
+  guidance (ADR-0004); Codex rows use their own ChatGPT login. Neither persistent
+  engine may silently fall back to metered API keys.
 - **Agent Teams is experimental**: flag-gated (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`),
   requires Claude Code v2.1.32+, and in-process teammates do not survive `/resume`.
 - **macOS bash 3.2** — host scripts must avoid bash-4 features.
-- The bridge requires the `discord-b2b` plugin and its `bun` runtime.
+- The Claude bridge requires the `discord-b2b` plugin and its Bun runtime.
+  Codex uses the separate standalone `codex-bridge` daemon; it does not load
+  the Claude marketplace plugin.
 
 ## 6. Architecture overview
 
-Five layers — control (phone) → Discord bridge → host (tmux) → per-repo CTO team →
-guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisions:
+Six layers — control (phone) → engine adapter → host (tmux) → execution →
+guardrails/memory → observability. Full writeup in `docs/ARCHITECTURE.md`.
+Load-bearing decisions:
 
 - Orchestration: Agent Teams, hierarchical lead + teammates (→ ADR-0001)
-- Bridge: Discord, persistent session (→ ADR-0002)
-- Deconfliction: per-teammate worktrees, substrate-conditional; file ownership
-  reduces merge conflicts (→ ADR-0008)
+- Bridge: Discord, with Claude plugin and standalone Codex daemon adapters
+  (→ ADR-0002, ADR-0019)
+- Deconfliction: Claude uses per-teammate worktrees; Codex v1 uses serialized
+  disjoint-path ownership and an operator Git handoff (→ ADR-0008)
 - Capacity: single Max pool, 1–2 teams (→ ADR-0004)
-- Gates: deterministic hooks (→ ADR-0005)
+- Gates: runtime-blind harness lifecycle policy plus substrate-specific safe
+  adapters and Git controls (→ ADR-0005, ADR-0019, ADR-0023)
 - Process: CTO authors docs from the conversation (→ ADR-0006)
+- Runtime: engine-aware Codex App Server bridge + read-only native TUI with a
+  truthful persisted fallback (→ ADR-0019, ADR-0020)
 
 ## 7. Verification plan
 
-- The two hooks are the automated gate; CI green is the merge gate.
+- The existing hooks and Git controls remain active. ADR-0023's common
+  completion/check-in/roadmap/grounding boundary must pass both runtime fixtures
+  and an operator shakedown before adoption; CI green remains the merge gate.
 - A manual **shakedown** on a throwaway repo verifies the directive lifecycle
   end-to-end (see §9 open item, and the README's first-run checklist when written).
 - Self-review against §3 scope and §4 acceptance before declaring v1 done.
@@ -114,20 +174,31 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
 - ADR-0007 — Monorepo with the bridge as a `bridge/` subcomponent
 - ADR-0008 — Per-teammate worktree isolation, substrate-conditional
 - ADR-0009 — Canonical prod-migration surface (makes the D floor gateable)
+- ADR-0019 — Initial first-class Codex exec runtime and truthful fallback view
+- ADR-0020 — Brokered global Codex App Server and filtered native TUI exposure
+- ADR-0021 — Quota-aware isolated Codex profile rotation scoped per swarm
+- ADR-0022 — Terminal Claude Fable 5 adversarial reviewer for Codex workers
+- ADR-0023 — Harness-enforced lifecycle, evidence visibility, and runtime parity
+  (draft; implemented/tested, not live)
 
 ## 9. Open questions
 
-- [ ] (non-blocking) Verify the exact mechanism for handing a launched lead its
-      brief — `send-keys` after a sleep works, but a native initial-prompt flag
-      would be cleaner. Confirm against the installed Claude Code version.
-- [ ] (non-blocking) `jq -s '.[0] * .[1]'` settings merge replaces arrays; confirm
-      the hooks block survives a merge into a repo with existing hooks.
+- [ ] (acceptance) Complete the live shakedown of the implemented ADR-0020 global
+      App Server manager and per-swarm read-only facades. Production Discord
+      turns now use the manager, and `swarm-view.sh` opens the native
+      `codex --remote` TUI when its runtime/endpoint/thread proofs pass, with the
+      persisted event/status view as a fail-safe fallback. The remaining gate is
+      the real Discord/provider/native-TUI round trip plus the full Claude/Codex
+      regression run; local mocks must not close that external acceptance item.
+- [ ] (non-blocking) Design a host-owned Codex worktree/merge/push lifecycle with
+      an authority surface as narrow and auditable as the current side-ref branch/commit/retire
+      broker. Until then, operator/CI performs integration and Codex doctrine
+      explicitly overrides the Claude-only substrate clauses.
 - [ ] (non-blocking) Measure real token burn for one team through a full build to
       calibrate whether a second concurrent team fits the Max pool (feeds ADR-0004).
-- [ ] (non-blocking) Run the first end-to-end shakedown (see `docs/SHAKEDOWN.md`
-      once written) — exercises the §4 directive-lifecycle acceptance criterion
-      that the unit gates can't cover.
-- [ ] (v2) Wedged-but-alive lead detection — design the heartbeat.
+- [ ] (non-blocking) Run the end-to-end shakedown once for each configured engine
+      (see `docs/SHAKEDOWN.md`) — unit and shell integration tests do not prove a
+      real Discord → provider → Discord round trip.
 
 ## 10. Build log
 
@@ -184,8 +255,8 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   denies push entirely — correct, since the release PR is the operator's GitHub
   merge, not an agent push). CPO product-vision facets (`quality-bar`,
   `reliability`, `roadmap`, `constraints`) also updated; `requirements.md`
-  verified unchanged. STILL OPEN, handed to a Claude Code session (see
-  `HANDOVER-robustness-adoption.md`): regenerate the 3 stale fixtures
+  verified unchanged. The transient adoption handover tracked the then-open
+  work: regenerate the 3 stale fixtures
   (CLAUDE/ESCALATION/TEAM_LEAD engineering-cto) and green `test-doctrine-compose.sh`
   (currently RED — fixtures stale by design); build the mechanism (quality
   PostToolUse hook, Stop-phase session-summary hook, hook runtime controls with
@@ -194,7 +265,8 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   integration, per-stack skill fragments) with manifest lines + tests; then
   operator full-diff review → compose green → canary reserve-backend-2 →
   `swarm-update`. Per-product CI referee + branch protection + Railway staging is
-  a separate operator-run per-repo checklist.
+  a separate operator-run per-repo checklist. The handover was removed after
+  the adoption work landed; this build-log entry remains the historical record.
 - `2026-06-14` — frontend|backend **profile axis** added (ADR-0013), an
   orthogonal selector layered on top of the engineering-cto archetype. New
   per-repo `.claude/swarm-profile` marker + `swarm_known_profiles` /
@@ -269,7 +341,7 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
     1. **Observe** — run `swarm-rotate-tick.sh --observe` on the live cadence
        (e.g. the launchd interval), logging to a file, for a few days. Each tick
        emits one greppable line, e.g.:
-       `swarm-rotate-tick: OBSERVE ts=2026-06-14T19:40:02Z proxy_verdict=NEAR proxy_exit=10 five_hour_pct=88 weekly_pct=41 worst_pct=88 worst_window=5h threshold_pct=85 account=max-a real_signal=OK real_exit=0 would_rotate=yes (NOT rotating: observe-mode)`.
+       `swarm-rotate-tick: OBSERVE ts=2026-06-14T19:40:02Z proxy_verdict=NEAR proxy_exit=10 five_hour_pct=98 weekly_pct=41 worst_pct=98 worst_window=5h threshold_pct=95 account=max-a real_signal=OK real_exit=0 would_rotate=yes (NOT rotating: observe-mode)`.
     2. **Calibrate** — compare `would_rotate`/`proxy_verdict` against
        `real_signal`. Tune `SWARM_5H_TOKEN_BUDGET` / `SWARM_WEEKLY_TOKEN_BUDGET`
        (and `SWARM_ROTATE_THRESHOLD_PCT`) so NEAR fires shortly BEFORE the real
@@ -580,6 +652,9 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   `sh -c` invocation, token no-leak — plus the staleness/lock/boundary
   closes, with mutation-verified assertions (exact keystrokes, `-J` capture
   argv, curl argv shape, resume-Enter ordering, bottom-most-fresh-URL).
+  **Historical transport note:** this first version published the OAuth URL as
+  an ordinary channel message. The 2026-07-11 secure interaction design below
+  retired that transport; it is not the current operator contract.
 - `2026-07-09` — **Fix: `swarm-up.sh` codex-lead access.json seeding routed
   through `swarm_account_resolve`** — `_launch_codex_lead` (61e7156)
   hand-built `$HOME/.claude/channels/discord/access.json`, tripping the
@@ -733,9 +808,12 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   (6 operator env keys merged, `plutil -lint` OK, atomic install) and reloaded
   the agent. `com.qofi.swarm-rotate-tick` now runs the full loop every 300s:
   poll → route → on NEAR/AT invoke the actuator (`swarm-rotate.sh`) to
-  checkpoint every repo, swap credentials via `swarm-login-relay.sh` (OAuth URL
-  posted to the qofi-product Discord channel; the operator's browser picks the
-  account) and relaunch the fleet. This completes the
+  checkpoint every repo, swap credentials via the then-current
+  `swarm-login-relay.sh` (at that time the OAuth URL was posted to the
+  qofi-product Discord channel; the operator's browser picked the account) and
+  relaunch the fleet. The later no-restart actuator and 2026-07-11 private
+  interaction flow supersede both that actuator and its public-link transport.
+  This completed the
   observe → calibrate → enable sequence begun earlier today.
   **Verification.** A kickstarted live tick logged the non-observe path
   (`verdict OK (exit 0) — headroom remains; no rotation`; 5h=9% weekly=2%), the
@@ -860,6 +938,9 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   seconds of firing (delivery works), and it surfaced a defect no stubbed test
   could see (the mock frames never hard-wrapped). Pinned: `-x 800` in the
   create argv; truncated-URL → exit 5 + zero Discord posts. Suite 61/61.
+  This drill describes the retired public-link transport. URL completeness and
+  fresh-pane detection remain enforced, but the complete URL now crosses only
+  private host state into an owner-only ephemeral interaction.
 - `2026-07-10` — **Drill #2: full happy path proven live — with one flow
   discovery.** Post-fix re-run: 450-char URL captured intact (state= present),
   posted to Discord; operator authenticated; success detected → resume Enter →
@@ -872,10 +953,77 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   oauth/code/callback): the browser shows a CODE the user must paste into the
   pane. The relay is one-way (posts to Discord, cannot read replies), so a
   fully remote login cannot complete unaided — this drill's code was
-  hand-carried into the pane via send-keys. Proposed v2 (operator decision
-  pending): after posting the URL, poll the channel for a code-shaped operator
-  reply and type it into the pane — closing the last gap for phone-only
-  rotation.
+  hand-carried into the pane via send-keys. The proposed raw-channel v2 — poll
+  for a code-shaped reply and type it into the pane — was rejected and is
+  superseded by the 2026-07-11 host-owned interaction flow below. A code in an
+  ordinary channel is already disclosed to history and model ingress; asking
+  the product swarm to repeat it would add no authentication property and has
+  the shape of credential exfiltration.
+- `2026-07-11` — **Secure two-path Claude auto-rotation authentication.** The
+  exact consumer is Claude Code `/login` running in the isolated
+  `swarm-login-probe` tmux session. Its completion mode is location-dependent:
+  when the authorizing browser can reach Claude Code's localhost callback the
+  credential arrives automatically and the relay resumes the TUI; a remote
+  browser instead displays an `authorization#state` value for the fresh Claude
+  prompt. The public channel now receives only a generic secure-control button.
+  The canonical owner (pinned by the private ACL's `loginControlOwnerId` and
+  required in both the top-level and target-channel ACLs)
+  receives the OAuth URL through an ephemeral interaction and, only for the
+  remote case, submits the value through an owner-only modal. Interaction
+  events are handled by the bridge control plane and never become
+  `messageCreate`, MCP notifications, transcript/model input, or a request for
+  the swarm to echo the credential.
+
+  The host protocol is v1 and fail-closed: before touching `/login`, the relay
+  requires a fresh readiness record bound to the exact channel and bot from a
+  live updated bridge. Each private request/response is owner-held, bounded,
+  nonce-bound to owner/channel/message/bot/expiry, and single-use; the modal
+  response is atomically published and replay-refused. The relay waits for a
+  fresh Claude paste prompt before piping the response directly into a named
+  tmux buffer via stdin, without a shell variable, argv, environment entry, or
+  log. Automatic callback success wins the race and discards an unused modal
+  response. Every completion/failure path removes the generic control and
+  private request/response records; timeout also Escapes the login UI. The
+  permission gate denies model tools access to `login-control`, including
+  canonicalized/symlinked paths, and attachment snapshots reject link tricks
+  that could expose private control-state inodes. This replaces public OAuth
+  links and raw-channel paste-back without changing Claude's default-pane or
+  no-restart dedicated semantics.
+
+  Final audit hardening removed the deployment-specific owner literal:
+  provisioning now pins `loginControlOwnerId` in the private ACL, with a
+  single-principal legacy fallback and fail-closed ambiguity. Missing state is
+  created privately; legacy owner-held non-writable `0755` Discord state stays
+  compatible while `login-control` remains exact `0700`; unsafe control setup
+  disables re-auth readiness without taking normal Discord chat offline.
+  Symlinked account/config ancestors, writable or ACL-bearing state, incomplete
+  request writes, replay, and temp-file residue are rejected. Labeled ACCOUNT
+  rows are refused because this actuator changes only the shared default Claude
+  credential. Agent permission gates deny invocation of `swarm-login-relay` and
+  `swarm-reauth` themselves, preventing hermetic test seams from becoming a
+  model-controlled redirect. Verification: 377/377 Bun tests, all 76 canonical
+  shell suites, bridge bundle, `git diff --check`, and both production dependency
+  audits pass with zero reported vulnerabilities.
+
+  A reported post-switch 95% miss was traced to the deliberate live-scheduler
+  `bootout` used during this security rollout, not threshold math: the prior
+  account fired at exactly 95%; the new browser-selected account was sampled at
+  weekly 93%, 93%, then 94%, after which no tick ran. A regression now proves
+  that a fresh post-reauth pane latch cannot mask the independent percentage
+  poll when a newly selected account moves 90% → exactly 95% (`NEAR`, exit 10).
+
+  The first secure live retry then exposed an independent launchd verifier
+  defect: `/login` completed, but the installed tick job had no `PATH` entry and
+  Claude existed only at `~/.local/bin/claude`, so the old auth probe returned 1
+  before exercising the credential. The default probe now resolves an explicit
+  absolute `SWARM_CLAUDE_BIN`, then PATH, then the native install path, and
+  invokes the resolved executable directly rather than interpolating it through
+  a shell. Post-login verdict 1 is retried for a bounded five attempts at two-
+  second intervals to cover credential-visibility handoff; capped verdict 75 and
+  unexpected verdicts remain immediate, and persistent failure still fails
+  closed. The exact minimal-launchd environment now authenticates. Focused
+  verification: auth probe 22/22, relay 130/130, dedicated relay 38/38, and the
+  tick→reauth→secure-relay chain 31/31.
 - `2026-07-11` — **First codex-engine lead live: press-backend.** Operator trial
   of the codex bridge: swarm.conf row gained `| codex` (field 7) and the single
   swarm was cycled. First launch FAILED — `_launch_codex_lead` typed one
@@ -888,10 +1036,413 @@ guardrails + memory. Full writeup in `docs/ARCHITECTURE.md`. Load-bearing decisi
   tty, all send-keys short, exec line, mode, no-token, access.json seeding
   (15 asserts; suite 62/62). Gateway-connected wait 30→75s (bun cold-start +
   Discord handshake overran 30s → false-negative WARN). Live: `gateway
-  connected as press-backend-bot#3377`, bound to its channel, sandbox
-  workspace-write. Detector interplay for a codex swarm: rotation/usage tiers
-  are Claude-account machinery — press-backend's transcripts live under
-  ~/.codex (not ~/.claude/projects), so the transcript tier, pane tiers, and
-  alerter are simply inert for it (no false signals); codex billing is its own
-  lane. Round-trip (operator message → codex reply in-channel) pending
-  operator send.
+  connected as press-backend-bot#3377`, bound to its channel, using the early
+  classic workspace-write sandbox. The initial operator note assumed Claude transcript/pane
+  detectors would be inert for Codex. The parity audit later that day disproved
+  that assumption: false-idle status could make restart/rotation unsafe. That
+  claim is superseded by the engine-aware runtime-state work below. Round-trip
+  (operator message → Codex reply in-channel) remained pending at this point.
+- `2026-07-11` — **First-class Codex hardening and Claude-preserving lifecycle.**
+  Added the engine-aware row schema/dispatch without changing blank/Claude
+  semantics; a dedicated hidden macOS account, root-attested exact runner argv,
+  fixed Node/Codex/Bun/npm/npx toolchain, subscription-only auth, inode-bound
+  workspace authority journals, bounded serial Discord turns, canonical live
+  ACL reauthorization, retry notices, attachments, operator Git broker, runtime
+  state, and a full-screen redacted event view. Registration, migration,
+  removal, launch, attach, and sync now serialize their destructive boundaries,
+  account for shared physical repos, fail closed on aliases/replacements, roll
+  back uncommitted AGENTS/runtime authority, and preserve Claude account/TUI/
+  hooks/worktree behavior. The native Codex TUI is still not shared: that
+  requires the deferred App Server + `codex --remote` single-writer protocol.
+  Security review also closed wildcard sudo argv, Directory Services rollback,
+  ACL, stale-process, config-CAS, filesystem TOCTOU, partial-index sync, and
+  path-form engine-authority findings. Final local verification: canonical
+  `npm test` exit 0 (311 Bun tests across 32 files plus all 73 shell suites,
+  including the 6-test trusted-helper and 32-test runtime-provisioning Python
+  suites); both Bun bridges bundle from frozen locks; both production audits
+  report no vulnerabilities. A real Discord→provider→Discord shakedown remains
+  deliberately open for each engine and is not implied by mocks.
+- `2026-07-11` — **Final Codex/Claude integration audit closed.** The follow-up
+  adversarial pass made release linearization crash-safe with an exact atomic
+  exchange protocol for lifecycle, daemon, and repository locks; malformed,
+  live-owner, pre-exchange, exchanged, and finalized evidence now fails closed
+  or recovers only through its bound receipt. Privileged workspace preparation
+  now rejects cross-device entries, hard-linked/duplicate regular inodes,
+  foreign owners, and set-id/sticky regular files before mutation. Root runner,
+  lifecycle, attestation, sudoers, and toolchain authority is installed and
+  invoked only through ACL-free root-controlled chains. The compatibility
+  Codex reviewer retains Claude's historical contrarian lane without exposing
+  shell/tools or accepting loose `~/.codex/auth.json` state. Malformed engine
+  rows are rejected before restart, rotation, login relay, launch, or removal;
+  Codex onboarding preserves `--engine codex`; and launch fixtures no longer
+  write fake toolchains into the real user home. The supported Codex view is a
+  full-screen read-only redacted event/status view. Native `codex --remote`
+  remains deliberately gated on ADR-0020's global App Server manager,
+  connection-bound lease, and per-swarm filtering gateways. Final verification:
+  canonical `npm test` exit 0 (359 Bun tests across 34 files plus all 75 shell
+  suites, including 188 Codex-launch, 123 recovery, and 44 privileged-runtime
+  cases); Claude-focused regression audit found no remaining high/medium issue;
+  all three Bun entry points bundle; both production dependency audits report
+  no vulnerabilities; shell/Python syntax and `git diff --check` are clean.
+  Real Discord→provider→Discord and native multi-client App Server shakedowns
+  remain explicit external acceptance work, not claims made by local mocks.
+- `2026-07-11` — **Live hidden-user bootstrap race closed.** The first privileged
+  press-backend install exposed an asynchronous macOS launchd boundary:
+  `bootstrap user/502` returned at 21:37:01.658, the one-shot `asuser` UID proof
+  ran 5 ms later while launchd was still in bootstrap mode, and the domain
+  became ready at 21:37:01.740. Marker-bound rollback removed the user domain and
+  withheld every root execution authority; because the exact Qofi-marked user and
+  group predated that transaction, it intentionally retained them for verified
+  idempotent reconciliation instead of deleting pre-existing state. The error was
+  blank because it printed successful-bootstrap stderr rather than the failed
+  proof's output. Bootstrap readiness now retries only the fixed read-only UID
+  proof for at most five seconds and emits bounded control-stripped diagnostics.
+  The retry then exposed the deeper macOS 26 rule: `asuser` switches bootstrap/
+  audit context but not credentials, and a pre-exec drop to uid 502 made every
+  attempt fail `Could not switch to audit session ... Operation not permitted`.
+  Both root lifecycle and runner now execute root `asuser` first, followed by the
+  same shell-free `/usr/bin/python3 -I -S` trampoline: exact bidirectional pwd
+  mapping, nonzero UID/GID, `initgroups` -> `setgid` -> `setuid`, real/effective
+  credential and no-root-group proof, then exact absolute-argv `execve`. Lifecycle
+  login retains its terminal; runner process-group cleanup uses
+  `start_new_session=True`. The next live precommit proof exposed one remaining
+  duplicated parser: the runner treated `IsHidden` as a generic scalar and
+  rejected macOS's normal `dsAttrTypeNative:IsHidden: 1` rendering. Its dedicated
+  boolean reader now matches the lifecycle's exact allowlist (direct/native key;
+  `1`/`YES` true and `0`/`NO` false) while rejecting standard aliases, coercion,
+  and extra fields. Verification: 55/55 privileged provisioning tests,
+  91/91 Codex account-lifecycle assertions, 26/26 runtime-state assertions, and
+  Python source/syntax checks pass. The remaining acceptance step is a privileged
+  installer rerun proving the live root-asuser handoff on this host.
+- `2026-07-11` — **Normal pnpm hard links and the press-backend toolchain are
+  first-class.** The next live install reached workspace capture and rejected
+  four esbuild inode pairs (eight names) produced by pnpm entirely beneath
+  `node_modules/.pnpm`. The global hard-link guard remains: a package inode is
+  exempt only when a complete descriptor-bound scan observes every alias,
+  every name stays in the ordinary `node_modules` tier, observed aliases equal
+  `st_nlink`, and the operator-owned ACL-free inode is runtime-readable,
+  executable when needed, and not group/world writable. Proven inodes are
+  never chmodded, chgrped, or journaled; surrounding directories remain managed
+  so pnpm can replace entries atomically. Outside, cross-tier, mutable, foreign,
+  partial, special, set-id, ACL-bearing, and cross-device aliases still fail
+  before root mutation. The daemon repeats the same closed-set proof. Because
+  press declares `pnpm@9.12.3`, the global root toolchain now copies that exact
+  already-populated Corepack cache with its audited locator/integrity record and
+  invokes it only through fixed Node plus direct `pnpm.cjs`; root/runtime never
+  dispatch Corepack. Installer, host preflight, runner, and daemon isolation all
+  enforce the singleton version. npm-only reinstalls preserve it, while pnpm
+  home/store/XDG state is private per turn and automatic manager downloads are
+  disabled. Claude paths and ambient developer toolchains are unchanged.
+  Read-only validation of the real press tree scanned 29,786 journalable entries
+  and omitted exactly the eight proven hard-link names. Focused verification:
+  61 privileged provisioning tests, host-preflight/Python-source suites, and 53
+  dedicated-runtime/toolchain/Codex Bun tests pass. The privileged live rerun
+  remains the next external acceptance step.
+- `2026-07-11` — **Press runtime installation committed; pre-login is now an
+  explicit safe state.** The live verifier exposed macOS `fwalk` classifying
+  pnpm directory symlinks (first `node_modules/typescript`) in `dirs` while
+  `O_DIRECTORY|O_NOFOLLOW` returns `ENOTDIR`. Verification now double-lstats and
+  skips only a stable nofollow symlink; every nonlink is descriptor-bound back
+  to its device/inode/type, so a directory substitution still fails closed. A
+  read-only press scan skipped 1,083 proven symlinks, opened 25,330 nonlinks,
+  and reported no failures. The next install committed the exact hidden user,
+  toolchain, sudoers, attestation, registry, and workspace authority with no
+  credential present, which is the intended install→login transition. Missing
+  auth previously leaked a raw `FileNotFoundError`; lifecycle, runner, host
+  preflight, and daemon validation now report the terminal login remediation.
+  Operator-side checks use metadata only and cannot read auth contents. Root
+  login/runner checks bind a private parent plus nofollow singleton auth inode,
+  enforce the size/owner/mode/ACL boundary, force ChatGPT login, run from the
+  hidden private home with no ambient API/access token, and require exact
+  `Logged in using ChatGPT` before a final inode recheck. Operator auth is never
+  copied or used as fallback. Verification: 68 privileged provisioning tests,
+  26 runtime-state tests, host-preflight/Python-source suites, and 53 focused
+  Bun tests pass. The remaining live acceptance sequence is idempotent reinstall
+  of the final helper, terminal-only login, refreshed tmux credentials, verify,
+  then a real press-backend Discord round trip.
+- `2026-07-11` — **Security.framework backing storage is opaque; authentication
+  remains file-only.** The live rerun showed that macOS creates a private
+  platform-UUID subtree beneath the hidden user's `Library/Keychains` while
+  the user keychain search list is still empty. Lifecycle and runner now bind
+  and validate the runtime-owned, ACL-free, non-writable directory boundary
+  without enumerating, reading, deleting, copying, or requiring emptiness of
+  its contents. Install and pre-login clear and prove the hidden search list;
+  login proves it again after exact ChatGPT status; the fixed runner proves it
+  before every unattended child. Every auth-bearing and turn invocation also
+  pins `forced_login_method="chatgpt"` plus
+  `cli_auth_credentials_store="file"`, leaving the hardened singleton
+  `.codex/auth.json` as the only accepted provider authority. Because the old
+  fixed lifecycle rejects the OS-created subtree before reaching self-update,
+  an explicit, attested, locked, transactional `refresh-lifecycle` operation
+  may replace that one root file; the ordinary idempotent installer must then
+  update and re-attest the runner before login. Verification: 70 privileged
+  provisioning tests, the Python-source/host-preflight contracts, 61 focused
+  bridge tests, 71 Codex-review assertions, and 188 Codex launch assertions
+  pass. Live refresh, reinstall, terminal login, and final press-backend verify
+  remain the external acceptance sequence.
+- `2026-07-12` — **Live press-backend daemon shakedown reached the privileged
+  sandbox boundary and closed seven host-integration gaps.** Login and the full
+  v2 root authority verify succeeded. The first launch then showed that macOS
+  ships `/usr/bin/sudo` root:wheel mode 04511, so host preflight now admits only
+  that exact execute-only system binary while every other unreadable wrapper
+  still fails shebang inspection. The generated `env -i` launcher now carries
+  the same validated Discord operator/bus role set as its response boundary;
+  tests execute both engineering and CPO launchers and inspect the final daemon
+  environment. Because Bun/Node omit a live supplemental group and cannot
+  `realpath` through the intentionally narrow hidden-home ACL on this host, the
+  daemon proves inherited groups with fixed isolated system Python and uses
+  lexical/no-symlink hidden-directory checks while leaving descriptor/content
+  authority with the root runner. Isolation probes now run from the canonical
+  workspace. Dedicated tool resolution prefers the direct root-owned Command
+  Line Tools Git instead of Apple's `/usr/bin/git` xcrun shim, avoiding an
+  ambient `/var/folders` cache capability. Finally, the initialized user domain
+  legitimately retains one `/usr/sbin/distnoted agent`; lifecycle and runner
+  treat quiescence as zero payload processes and exempt only one stable
+  PID-1/session-0/process-group-leader instance with exact saved credentials,
+  libproc path, argv, and SIP-restricted image metadata. Verification: 72
+  privileged provisioning tests, Python-source/host-preflight contracts, 61
+  focused Bun tests, 71 Codex-review assertions, 193 launch assertions, and 71
+  usage-threshold/account-switch assertions pass. The installed lifecycle and
+  runner must be refreshed/re-attested once more before resuming the live
+  sandbox and Discord round trip.
+- `2026-07-12` — **First-class App Server/native-view implementation passed its
+  final local release gate.** A real manager-backed review exposed that Codex
+  0.144.1 rejects `runtimeWorkspaceRoots` unless initialize explicitly opts in
+  to `experimentalApi`; only the global manager client now advertises that
+  capability, while generic clients and attestation remain default-off. A
+  definitive registration-free review rejection now retires the suspect
+  generation before restoring readiness, while registered workspace ambiguity
+  remains blocked. Replacement of the affected legacy manager is authorized
+  only by the fixed root helper after exact root admission, process credential/
+  parent/group/argv, launcher-flock, socket-inode, kernel-peer, stopped-health,
+  runner-lock, and hidden-UID quiescence proofs; install/uninstall hold the
+  launcher then runner locks across manager authority mutation. Tmux names never
+  authorize termination. The operator view now explains why it selected its
+  redacted fallback and opens the pinned read-only native TUI once the configured
+  channel has a persisted thread and healthy facade. The late aggregate gate
+  also closed a `review-runner` deadline/output-cap classification race.
+  Verification: 485 Bun tests across 41 files plus all 79 canonical shell suites
+  pass; the privileged provisioner has 97 cases, replacement wrapper 31, and
+  native-view/orchestration 81. The manager bundle reproduced byte-identically
+  twice at `44c362b6e25d1e7b57f90595a6150a0a24fcca330bc804a15db1907d275f7dd0`
+  (249,903 bytes), all entry points bundle, both production dependency audits
+  report no vulnerabilities, and diff/shell/Python syntax checks are clean. The
+  remaining external gate is the sudo-backed live install/recovery followed by
+  a manager review, press-backend daemon/facade, native TUI, and Discord round
+  trip on this host.
+- `2026-07-12` — **The live press launch exposed and closed the final Codex
+  0.144.1 effective-policy and persisted-thread lifecycle gaps.** The installed
+  runtime and press workspace first passed the complete v2
+  runner/account/group/toolchain/auth/canary verifier. Daemon registration then
+  correctly failed closed because the manager treated the response's legacy
+  `sandbox.writableRoots` projection as authoritative. Codex intentionally
+  removes the workspace cwd from that compatibility field; the experimental
+  `runtimeWorkspaceRoots` and `activePermissionProfile` fields carry the actual
+  named-profile authority. The manager now requires exactly one canonical
+  registered runtime workspace, both ambient-temp exclusions, and only the
+  exact outside-workspace write roots granted to the active turn. The named
+  profile explicitly denies `:tmpdir` and `:slash_tmp`, then grants back only
+  the private turn directory. It no longer sends a legacy `sandboxPolicy` on
+  `turn/start`, because Codex converts that field into a replacement legacy
+  profile and would discard protected-path read rules.
+
+  Registration and generation restore also no longer resume persisted threads.
+  Codex ignores new permission/config overrides when a subscribed thread is
+  already loaded, so readiness now populates the filtered native facade with
+  `thread/read(includeTurns:true)`, which preserves full history without loading
+  or subscribing. The actual turn performs the only cold resume with the current
+  hardened profile; cross-repo stored cwd metadata is refused, and stale rollout
+  errors remain eligible for the one bounded fresh-thread fallback. A live
+  isolated probe against a copy of the hidden runtime's press rollout proved
+  `thread/loaded/list` stayed empty before and after the history read. The
+  metadata publisher's final aggregate run also corrected one hermetic
+  `/private/tmp` launch fixture so it models a prepared operator-group checkout
+  rather than macOS's non-member wheel group; production publication stayed
+  strict. Final verification: canonical `npm test` exit 0 with 488 Bun tests,
+  2,067 assertions, 41 files, and all 79 shell/Python suites; privileged runtime
+  provisioning 97/97; manager control 3/3; recovery wrapper 31/31; launch
+  integration 200/200; `git diff --check` clean. The manager bundle reproduced
+  byte-identically twice at
+  `bd479ac8ef2fa121fe57c6c3ea6a658b98f3843e68b3df8f6f1a6a54620467b1`
+  (250,188 bytes). Installing that new root-attested bundle and repeating the
+  press daemon/native-TUI/Discord shakedown remain the external completion gate.
+- `2026-07-12` — **The press-backend live acceptance round trip passed, and the
+  native Codex transcript bootstrap is now protocol-correct.** The final v2
+  installer and verifier succeeded on the real press workspace; the global
+  Codex 0.144.1 App Server registered exactly one idle swarm and published its
+  owner-private per-swarm Unix facade. A real Discord message entered the
+  persisted thread, completed through the hidden `_qofi_codex` runtime with no
+  workspace changes, returned the exact visible bot reply
+  `QOFI_PRESS_BACKEND_OK`, and restored the manager to idle. The native viewer
+  launched the pinned full Codex TUI in its separate auth-free,
+  navigation-enabled tmux session behind the read-only facade. Its first live
+  open exposed two final viewer-only defects. On macOS,
+  direct extended-ACL enumeration is unsupported for Unix sockets; socket ACL
+  validation now uses bounded fixed `/bin/ls -lde` output between exact inode
+  identity checks and still fails closed on every ACL, replacement, or malformed
+  result. The TUI then opened with a blank transcript even though the facade had
+  both completed turns. Pinned Codex source showed that native resume omits
+  `initialTurnsPage` and replays only chronological `thread.turns`; the facade
+  had unconditionally done the inverse. It now honors `excludeTurns`
+  independently, returns an initial page only when requested, and supplies a
+  bounded newest history window in oldest-to-newest order for native replay.
+  Tests cover native/default, excluded, paged, combined, and chronological read
+  shapes. Final-tree verification: 488 Bun tests, 2,077 assertions, 41 files;
+  all 79 canonical shell/Python suites; native-view/orchestration 81/81;
+  runtime-state 27/27; clean diff whitespace check. The root manager bundle
+  reproduced byte-identically twice at
+  `92b9f6dd8f81ab14885271c3a9c52f832d7b9f7563fc62bbc41c0745858e5196`
+  (250,262 bytes). The sudo-backed idempotent install then published that exact
+  bundle, the verifier repeated the complete v2 authority proof, and a fresh
+  native pane visibly replayed both persisted Discord turns in chronological
+  order—including `CODEX LIVE OK` and `QOFI_PRESS_BACKEND_OK`—inside the full
+  Codex 0.144.1 interface. The external acceptance gate is complete.
+- `2026-07-12` — **Every first-class Codex surface is pinned to GPT-5.6-Sol
+  Ultra, and the native viewer is scrollable and responsive.** Managed classic
+  turns, App Server start/resume, the native facade's model/config contract,
+  and the contrarian review lane all use `gpt-5.6-sol` with literal effort
+  `ultra`; every historical lower-model route has been removed. Review retains its
+  tool-less authority by reaping the shared App Server and invoking the fixed
+  hidden-UID root runner through Codex's built-in `review -` mode, whose pinned
+  0.144.1 review session disables model-level delegation; shell/unified exec,
+  network, MCP, hooks, plugins, and workspace roots remain disabled. The
+  privileged workspace grammar now requires both `:tmpdir=deny` and
+  `:slash_tmp=deny` in addition to the root/minimal baseline.
+
+  Native `swarm-view` runs inline with `--no-alt-screen`, a 100,000-line tmux
+  history, mouse/copy-mode navigation, `window-size latest`, and aggressive
+  resize. Live host proof entered copy mode with retained history and propagated
+  a 149x47 client to an exact 149x47 pane. The facade—not a tmux read-only
+  attach—is the mutation boundary and forwards no viewer writes; a reopened
+  viewer replays the newest 512 turns or 8 MiB. The final audit also exposed an
+  auto-rotation hang: macOS `security ... -w` can ignore piped stdin while a
+  controlling TTY exists. The new bounded no-controlling-TTY helper keeps the
+  credential off argv, pins `/usr/bin/security`, reaps on timeout/signals, and
+  passed a real synthetic-Keychain PTY round trip with guaranteed cleanup.
+
+  Final-tree verification: canonical `npm test` passed under a live PTY; 494
+  Bun tests, 2,162 assertions, 42 files, and all 84 shell/Python suites passed;
+  privileged runtime provisioning 98/98; native-view/orchestration 88/88;
+  direct review 76/76; manager review 12/12; credential swap 80/80; and
+  `git diff --check` is clean. The manager bundle reproduced byte-identically
+  twice at
+  `a69483e04250a73ab67274ae6890b3fd3b68a8ee904452373672c8f4cd2a44ee`
+  (258,237 bytes). The sudo-backed install published that exact hash and the
+  complete v2 runtime verifier passed before and after launch. The live native
+  pane reported `gpt-5.6-sol ultra`, entered copy mode at scroll position 29,
+  and propagated a 149x47 client to an exact 149x47 pane. A fresh Discord turn
+  then returned `QOFI_SOL_ULTRA_OK` exactly, restored the manager to idle with
+  one registration, left runtime error/queue state empty, and made no workspace
+  changes. The external acceptance gate is complete.
+- `2026-07-13` — **Managed Codex workers now have an implemented and locally
+  tested terminal Claude Fable 5 adversarial reviewer; it is not live.** Recon
+  pinned the installed print-mode alias `claude-fable-5` and the existing
+  Claude-to-Codex plugin's raw v1 contract. A production normalizer now maps
+  those legacy results into the shared
+  `qofi-adversarial-review-output/v2` contract without inventing unavailable
+  diff provenance. The mirror direction is one root-attested stdio MCP tool:
+  bounded diff/file excerpts and context enter only as untrusted stdin data,
+  while Fable runs with an immutable doctrine, no tools, no exec, no nested MCP,
+  no plugins, and no persistence. Deterministic profile-home rendering and
+  byte-identity verification carry the registration into every managed home.
+
+  Manager-derived active-turn scope, task/profile artifact directories,
+  durable FIFO budgets, stale-scope revalidation, and a crash-surviving
+  process-group/flock supervisor keep the call terminal and per-swarm. Timeout,
+  auth, rate-limit, malformed, confidentiality, and invocation failures become
+  `review-unavailable`/`review-pending`, never approval. Private artifacts bind
+  the exact reviewed-input SHA-256; Discord receives only label-only block
+  notices. Provider-token/JWT/opaque-credential fixtures prove suspect bytes
+  cannot be returned or persisted while ordinary SHA values and source
+  identifiers remain usable. The per-swarm Codex pool and the legacy
+  rotation-proxy fallbacks now both default to an inclusive 95 percent trigger;
+  all OpenAI model routes remain `gpt-5.6-sol` with `ultra`, with no 5.4 route.
+
+  Final no-spend verification: canonical `npm test` exit 0 with 544 Bun tests,
+  2,357 assertions across 44 files, and all 86 shell/Python entrypoint suites;
+  Fable shim 25/25; legacy normalizer 11/11; runtime provisioner 110/110;
+  template integration 94/94; Claude review 61/61; Codex review 76/76. Both
+  production dependency audits report no vulnerabilities, syntax and whitespace
+  checks are clean, and the manager bundle reproduced byte-identically twice at
+  `a8703b739b09e7e7a669473786c9ad4b02e6187c4409e2722643c61be2affc5a`
+  (313,259 bytes). Activation still requires the operator-run privileged
+  reinstall and a real managed Codex-to-Fable shakedown; no provider call or
+  live Discord/runtime mutation was performed for this delivery.
+- `2026-07-13` — **Harness-enforced lifecycle parity and the deferred native-UI
+  regression are implemented and tested; the new lifecycle policy is not
+  live.** One runtime-blind harness now owns normalized events, final-review
+  admission, delivered-or-durably-queued Discord stop outcomes, retry/fallback/
+  dead-letter audit, strict provenance-bound CTO check-ins, derived roadmap and
+  digest views, corpus-addressed context packs, and grounding-gap metrics. The
+  completion policy permits one terminal foreign-model review; active-worker
+  Codex review scope and ordinary mid-task review are refused. The managed Codex
+  host path reaps the App Server generation, revokes its workspace ACL, snapshots
+  the exact final input, obtains one Fable receipt, and requires root-broker
+  consumption before cleanup. Secret-bearing summaries and transport errors are
+  reduced before durable persistence.
+
+  Parity remains deliberately adoption-off. Native Claude hooks are same-UID
+  visibility evidence, not completion authority; a supervised exact-final
+  `claude -p` runner is not shipped. The missing descriptor-bound root execution
+  wrapper hardblocks conformance admission, and cross-owner roadmap publication
+  hardblocks until a descriptor-bound helper can publish without reopening a
+  worker-raceable path. The parity matrix records these restrictions instead of
+  silently enabling only Codex.
+
+  After that behavior gate was green, live press-backend forensics found why
+  `swarm-press-backend` had regressed to the event/status fallback: the installed
+  root record still exactly attested Node and Codex 0.144.1, but viewer preflight
+  incorrectly required newly added, unrelated Fable-reviewer fields. Viewer
+  admission now projects only schema/operator identity and exact Node/Codex
+  path/hash authority. The real command immediately reopened the full native
+  TUI, replayed prior Discord turns, and displayed `gpt-5.6-sol ultra`. Live copy
+  mode reached retained history at scroll position 22; a second 111x37 terminal
+  attach produced an exact 111x37 pane with `window-size=latest`, aggressive
+  resize, mouse navigation, and a 100,000-line history limit.
+
+  Final verification: canonical `npm test` passes 718 Bun tests with 2,957
+  assertions across 69 files plus all 88 shell/Python entrypoint suites; watcher
+  tests pass 144/144; Fable shim tests pass 33/33; native-view/orchestration
+  passes 88/88; host-preflight capability tests pass; doctrine byte-identity and
+  `git diff --check` are clean. Both production dependency audits report no
+  vulnerabilities. No provider turn, Discord send, privileged install, commit,
+  or push was performed during the UI repair.
+- `2026-07-13` — **Legacy-to-Fable runtime installation no longer deadlocks
+  before first publication.** The live press runtime carried the valid legacy
+  16-field v2 attestation while the newly required root Fable shim, doctrine,
+  and schema did not yet exist. The refreshed installer incorrectly demanded
+  those outputs before reaching its transaction. Install entry now binds the
+  exact root lifecycle alone for that legacy migration; expanded authorities
+  and every ordinary lifecycle operation retain the complete Fable proof.
+  Root-file publication now identity-binds its staged inode and rolls back both
+  absent-target and replacement failures after final validation. Provisioning
+  tests cover legacy bootstrap, expanded-authority refusal, rollback to absence,
+  post-publication restoration, and cross-UID private-config verification. The
+  operator verifier uses metadata plus the deterministic render hash while the
+  fixed root runner retains exact private-byte/ACL proof; no runtime ACL was
+  widened. The complete 115-test provisioner,
+  lifecycle-recovery shell contract, host preflight, and Python source checks
+  pass. No privileged install was performed by the test run.
+- `2026-07-13` — **Primary Codex CPO workers are now routed to GPT-5.6-Sol at
+  medium reasoning effort; implemented and tested, not yet live.** The trusted
+  bridge archetype selects effort before manager registration. That immutable
+  per-swarm value flows through classic exec, App Server thread configuration,
+  effective-authority validation, turn start, re-registration rollback, and the
+  read-only native facade. Engineering and unknown/future workers retain the
+  fail-safe Sol Ultra route, and the terminal contrarian-review lane remains
+  independently Sol Ultra. Registration echoes the exact selected effort and
+  the daemon rejects a stale manager that omits or changes it, so mixed-version
+  startup fails closed instead of silently falling back to Ultra. Shared
+  profile-home configuration was deliberately unchanged so CPO tuning cannot
+  silently alter CTO execution.
+
+  The fixed root workspace runner accepts only the managed `medium|ultra`
+  pair; its review grammar remains Ultra-only. CPO doctrine now names the
+  host-enforced route. Verification passed canonical `npm test`, the full
+  Codex bridge suite, focused routing/manager/native/mixed-version suites, all
+  115 privileged provisioner tests, 95 Codex template checks, doctrine
+  composition, the existing Claude per-archetype effort test, and whitespace
+  validation. Activation requires an idempotent privileged runtime install
+  followed by restart of an actual Codex-engine CPO swarm; no provider turn,
+  privileged install, Discord
+  send, commit, or push was performed here.
