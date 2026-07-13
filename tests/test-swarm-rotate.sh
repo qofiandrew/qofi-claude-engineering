@@ -94,6 +94,14 @@ cat > "$TMP/hooks/credswap-fail.sh" <<'EOF'
 #!/usr/bin/env bash
 exit 9
 EOF
+# A successful credential swap that concurrently corrupts the fleet config.
+# Rotation must revalidate after the long-running swap and hold the relaunch.
+cat > "$TMP/hooks/credswap-config-drift.sh" <<EOF
+#!/usr/bin/env bash
+printf 'swap-drift:%s\n' "\$1" >> "$WITNESS"
+printf 'broken | $TMP/repo-broken | BOT_BAD | 333 | 999 | | typo\n' >> "$FAKE_SH/swarm.conf"
+exit 0
+EOF
 # A credential-swap stub that reports RING EXHAUSTION (exit 7): the swap TOOK and
 # the new credential AUTHENTICATES, but the account it points at is itself
 # rate-limited (see swarm-credswap-keychain.sh exit 7). The actuator must NOT
@@ -120,6 +128,7 @@ CHECKPOINT="$TMP/hooks/checkpoint.sh $Q"
 RELAUNCH="$TMP/hooks/relaunch.sh"
 CHECKPOINT_FAIL="$TMP/hooks/checkpoint-fail.sh $Q"
 CREDSWAP_FAIL="$TMP/hooks/credswap-fail.sh"
+CREDSWAP_CONFIG_DRIFT="$TMP/hooks/credswap-config-drift.sh $Q"
 CREDSWAP_CAPPED="$TMP/hooks/credswap-capped.sh $Q"
 ATTENTION="$TMP/hooks/attention.sh $Q"
 
@@ -327,6 +336,15 @@ assert_lacks "$(cat "$WITNESS")" "relaunch" "no relaunch when the swap is refuse
 RR_CRED="$CREDSWAP_FAIL"; run_rotate
 assert_eq 5 "$rc" "failing credential swap -> exit 5"
 assert_lacks "$(cat "$WITNESS")" "relaunch" "no relaunch when the swap FAILED (don't boot on unknown creds)"
+
+ORIG_CONF="$(cat "$FAKE_SH/swarm.conf")"
+: > "$WITNESS"
+RR_CRED="$CREDSWAP_CONFIG_DRIFT"; run_rotate
+assert_eq 5 "$rc" "config drift after a successful swap -> explicit hold"
+assert_has "$(cat "$WITNESS")" "swap-drift:max-b" "the credential swap completed before drift was detected"
+assert_lacks "$(cat "$WITNESS")" "relaunch" "post-swap malformed config never reaches fleet teardown/relaunch"
+assert_has "$OUT" "fleet was NOT relaunched" "post-swap hold reports the safe recovery boundary"
+printf '%s\n' "$ORIG_CONF" > "$FAKE_SH/swarm.conf"
 
 # ---------------------------------------------------------------------------
 echo "=== 6b) RING EXHAUSTION: credswap exit 7 (authed-but-capped) -> exit 6, NO relaunch, escalate ==="

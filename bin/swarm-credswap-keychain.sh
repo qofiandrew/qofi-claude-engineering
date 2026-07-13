@@ -64,7 +64,7 @@
 # touching the keychain (you cannot install nothing).
 #
 # ── ALL KEYCHAIN/AUTH ACCESS IS THROUGH OVERRIDABLE SEAMS (testability) ─────
-#   SWARM_KEYCHAIN_CMD            the keychain CLI. Default: "security". Tests
+#   SWARM_KEYCHAIN_CMD            the keychain CLI. Default: "/usr/bin/security". Tests
 #                                point this at a mock so synthetic ops never
 #                                touch the real login keychain — and so a VERIFY
 #                                failure can be injected deterministically.
@@ -91,9 +91,13 @@
 #                                proves the binary runs). If that helper is absent
 #                                AND `claude` is not on PATH we REFUSE rather than
 #                                pretend — an unverifiable swap is not a safe swap.
-#   SWARM_CREDSWAP_KEYCHAIN       optional keychain path passed to add/find/delete
-#                                (e.g. a throwaway test keychain). Default: the
-#                                default login keychain.
+#   SWARM_CREDSWAP_KEYCHAIN       optional keychain path for injected/mock CLIs.
+#                                The real /usr/bin/security write path refuses
+#                                this option: security requires an explicit
+#                                keychain as its trailing operand but requires a
+#                                bare prompting -w to be the final argument, so
+#                                it cannot do both without treating the path as
+#                                the password. Default: the login keychain.
 #
 # THIS SCRIPT NEVER touches the LIVE `claude` keychain entry in its own tests:
 # the entry is only ever a write target when the operator runs it for real with
@@ -147,10 +151,19 @@ case "$NEXT" in
   *[!A-Za-z0-9._-]*) echo "swarm-credswap: REFUSED — suspicious account handle '$NEXT' (allowed: A-Za-z0-9._-)." >&2; exit 2 ;;
 esac
 
-KEYCHAIN_CMD="${SWARM_KEYCHAIN_CMD:-security}"
+KEYCHAIN_CMD="${SWARM_KEYCHAIN_CMD:-/usr/bin/security}"
+# Preserve the documented short spelling without allowing metadata reads/deletes
+# to resolve through ambient PATH while writes use the fixed system binary.
+[ "$KEYCHAIN_CMD" = "security" ] && KEYCHAIN_CMD="/usr/bin/security"
 SERVICE="${SWARM_CREDSWAP_SERVICE:-Claude Code-credentials}"
 ACCOUNT="${SWARM_CREDSWAP_ACCOUNT:-$(id -un 2>/dev/null || echo unknown)}"
 KEYCHAIN_PATH="${SWARM_CREDSWAP_KEYCHAIN:-}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+KEYCHAIN_WRITE_HELPER="$SCRIPT_DIR/security-add-generic-password.py"
+
+uses_real_security() {
+  [ "$KEYCHAIN_CMD" = "/usr/bin/security" ]
+}
 
 # kc — invoke the keychain CLI with an optional trailing keychain path. Centralizes
 # the `security` invocation so the mock seam and the keychain-path option both
@@ -228,7 +241,7 @@ if [ -z "$AUTHCHECK" ]; then
   # (0 good / 75 capped / other bad) this step relies on. `claude --version`
   # would NOT do this — it only proves the binary runs, hollowing out
   # restore-on-failure. We deliberately do not fall back to `--version`.
-  _probe="$(cd "$(dirname "$0")" && pwd)/swarm-auth-probe.sh"
+  _probe="$SCRIPT_DIR/swarm-auth-probe.sh"
   if [ -x "$_probe" ]; then
     AUTHCHECK="$_probe"
   elif command -v claude >/dev/null 2>&1; then
@@ -242,6 +255,24 @@ if [ -z "$AUTHCHECK" ]; then
     echo "                'claude' is not on PATH, and SWARM_CREDSWAP_AUTHCHECK_CMD is unset." >&2
     echo "                Refusing to swap a credential we cannot then VERIFY (unverifiable swap" >&2
     echo "                = unsafe swap)." >&2
+    exit 2
+  fi
+fi
+
+# The real macOS CLI may ignore a piped stdin for its bare `-w` prompt whenever
+# the caller has a controlling TTY.  Refuse before touching the keychain unless
+# the no-controlling-TTY writer is available.  Injected test/mock commands keep
+# using the original stdin seam below and do not depend on Python or security.
+if uses_real_security; then
+  if [ ! -x /usr/bin/security ] || [ ! -x /usr/bin/python3 ] || [ ! -r "$KEYCHAIN_WRITE_HELPER" ]; then
+    echo "swarm-credswap: REFUSED — secure non-interactive keychain writer is unavailable." >&2
+    echo "                Required: /usr/bin/security, /usr/bin/python3, and $KEYCHAIN_WRITE_HELPER" >&2
+    exit 2
+  fi
+  if [ -n "$KEYCHAIN_PATH" ]; then
+    echo "swarm-credswap: REFUSED — an explicit keychain path is incompatible with secure stdin prompting." >&2
+    echo "                /usr/bin/security requires both the keychain operand and bare -w to be last;" >&2
+    echo "                placing the path after -w would expose the path as the stored password." >&2
     exit 2
   fi
 fi
@@ -311,15 +342,22 @@ backup_is_multiline() {
 # `security add-generic-password -w <value>` would expose the value on the
 # command line (process table / scrollback), which this build forbids. Instead we
 # use `-w` with NO argument: `security` then prompts for the password AND a retype
-# on its input, so we feed the value TWICE on stdin (newline-separated). The secret
-# travels only over stdin — never argv. -U upserts so it overwrites the active slot
-# in place. The value is read from a FILE descriptor ($1 = a chmod-600 file path),
-# never echoed.
+# on its input. For the real CLI a bounded helper starts /usr/bin/security in a
+# new session (no controlling TTY), reads the value from this file on stdin, and
+# supplies it twice over a private pipe with a hard timeout. This prevents the
+# prompt from bypassing piped stdin and hanging on Discord/tmux-launched rotation.
+# Injected mocks retain the original stdin seam. The secret never reaches argv.
 kc_set_value() {  # value-file
   local vf="$1" v
   # The keychain password prompt is line-oriented; an embedded newline would end
   # the value early. We already refuse newline-bearing blobs on acquisition, and
   # the backup is whatever was previously stored (also single-line for this slot).
+  if uses_real_security; then
+    /usr/bin/python3 "$KEYCHAIN_WRITE_HELPER" \
+      --service "$SERVICE" --account "$ACCOUNT" \
+      < "$vf" >/dev/null 2>&1
+    return $?
+  fi
   v="$(cat "$vf")"
   printf '%s\n%s\n' "$v" "$v" | kc add-generic-password -U -s "$SERVICE" -a "$ACCOUNT" -w >/dev/null 2>&1
 }

@@ -1,0 +1,35 @@
+{
+  "schema": "qofi-completion-review-policy/v1",
+  "maxCallsPerTask": 1,
+  "maxEarlyExceptionCallsPerTask": 1,
+  "earlyExceptions": [
+    {
+      "class": "security",
+      "pattern": "bin/qofi-codex-runner"
+    },
+    {
+      "class": "security",
+      "pattern": "bin/swarm-codex-runtime.py"
+    },
+    {
+      "class": "security",
+      "pattern": "codex-bridge/git-broker.ts"
+    },
+    {
+      "class": "security",
+      "pattern": "codex-bridge/runtime-acl.ts"
+    },
+    {
+      "class": "security",
+      "pattern": "codex-bridge/security.ts"
+    },
+    {
+      "class": "standing-invariant",
+      "pattern": "templates/_base/codex/fable-reviewer-doctrine.md"
+    },
+    {
+      "class": "standing-invariant",
+      "pattern": "templates/_base/codex/rules/**"
+    }
+  ]
+}

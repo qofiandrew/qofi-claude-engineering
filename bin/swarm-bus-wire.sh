@@ -155,9 +155,34 @@ if [ ! -f "$ACCESS" ]; then
   echo "  WARN: $ACCESS not found — skipping allowFrom write." >&2
   echo "        swarm-add phase 4d creates it; run swarm-add first, or create it by hand." >&2
 else
-  python3 - "$ACCESS" "$CHANNEL" "$CTO_BUS_WATCHER_BOT_ID" <<'PY' || { echo "swarm-bus-wire: FATAL — failed to add watcher id to access.json allowFrom" >&2; exit 2; }
-import json, os, sys
+  /usr/bin/python3 -I -B - "$ACCESS" "$CHANNEL" "$CTO_BUS_WATCHER_BOT_ID" <<'PY' || { echo "swarm-bus-wire: FATAL — failed to add watcher id to access.json allowFrom" >&2; exit 2; }
+import ctypes, errno, json, os, stat, sys, tempfile
 path, channel, watcher = sys.argv[1], sys.argv[2], sys.argv[3]
+st=os.lstat(path)
+if (not stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode) or st.st_uid != os.getuid()):
+    raise SystemExit('unsafe access.json owner/type')
+if os.environ.get('SWARM_ACCESS_REQUIRE_NO_ACL') == '1' and sys.platform == 'darwin':
+    libc=ctypes.CDLL(None,use_errno=True)
+    get_acl=libc.acl_get_fd_np
+    get_acl.argtypes=[ctypes.c_int,ctypes.c_int]
+    get_acl.restype=ctypes.c_void_p
+    free_acl=libc.acl_free
+    free_acl.argtypes=[ctypes.c_void_p]
+    for checked,is_dir in ((path,False),(os.path.dirname(path),True)):
+      flags=os.O_RDONLY | getattr(os,'O_NOFOLLOW',0)
+      if is_dir: flags |= getattr(os,'O_DIRECTORY',0)
+      fd=os.open(checked,flags)
+      try:
+        ctypes.set_errno(0)
+        acl=get_acl(fd,0x00000100)
+        if acl:
+            free_acl(acl)
+            raise SystemExit(f'access boundary must not have an extended ACL: {checked}; run chmod -N')
+        if ctypes.get_errno() not in (0,errno.ENOENT):
+            raise SystemExit(f'could not inspect access ACL: {checked}')
+      finally:
+        os.close(fd)
+if stat.S_IMODE(st.st_mode) != 0o600: os.chmod(path,0o600)
 with open(path) as f: cfg = json.load(f)
 grp = cfg.setdefault("groups", {}).setdefault(channel, {"requireMention": False, "allowFrom": []})
 af = grp.setdefault("allowFrom", [])
@@ -165,10 +190,15 @@ if watcher in af:
     print("  access.json: watcher id {} already in allowFrom for channel {}".format(watcher, channel))
 else:
     af.append(watcher)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(cfg, f, indent=2); f.write("\n")
-    os.replace(tmp, path)
+    fd,tmp=tempfile.mkstemp(prefix='.access.json.',dir=os.path.dirname(path) or '.')
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(cfg, f, indent=2); f.write("\n"); f.flush(); os.fsync(f.fileno())
+        os.chmod(tmp,0o600); os.replace(tmp,path)
+    except BaseException:
+        try: os.unlink(tmp)
+        except FileNotFoundError: pass
+        raise
     with open(path) as f: json.load(f)  # validate
     print("  access.json: added watcher id {} to allowFrom for channel {}".format(watcher, channel))
 PY

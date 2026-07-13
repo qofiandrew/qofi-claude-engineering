@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "qofi-adversarial-review-output/v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "verdict",
+    "summary",
+    "checked",
+    "not_checked",
+    "findings",
+    "next_steps"
+  ],
+  "properties": {
+    "schema": {
+      "const": "qofi-adversarial-review-output/v2"
+    },
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "approve",
+        "needs-changes",
+        "block",
+        "review-unavailable"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "checked": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1024
+      }
+    },
+    "not_checked": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1024
+      }
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "severity",
+          "locus",
+          "claim",
+          "evidence",
+          "suggested_test"
+        ],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "locus": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "claim": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "evidence": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192
+          },
+          "suggested_test": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        }
+      }
+    },
+    "next_steps": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1024
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "verdict": {
+            "const": "approve"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "checked": {
+            "minItems": 1
+          },
+          "not_checked": {
+            "minItems": 1
+          },
+          "findings": {
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "verdict": {
+            "enum": [
+              "needs-changes",
+              "block"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "findings": {
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "verdict": {
+            "const": "review-unavailable"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "not_checked": {
+            "minItems": 1
+          },
+          "findings": {
+            "maxItems": 0
+          }
+        }
+      }
+    }
+  ]
+}

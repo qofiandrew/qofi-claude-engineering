@@ -98,14 +98,14 @@ is **effectively lost.**
   shell output, working notes. Never the thing you need the operator to read.
 - **Intra-swarm agent-to-agent communication is out of scope** here; this rule
   governs human I/O. Coordination inside the swarm uses the archetype's playbook.
-- **A Stop nudge backs this up.** When a response cycle produces a substantive
-  operator-facing reply but posts nothing to Discord, a non-blocking nudge reminds
-  the lead that the terminal is unmonitored — deliver via the Discord reply tool
-  (or a `.md` file per §*Message length*). The engineering-cto lead is nudged on
-  any such turn; the CPO is nudged **only on an operator-origin turn** (a prompt
-  from #qofi-product), never on a bus/CTO turn — its silence-by-default toward CTOs
-  is correct and stays unnudged. The nudge changes WHERE operator-facing output
-  goes, never WHEN the CPO speaks to a CTO.
+- **Harness-owned Stop delivery enforces the boundary.** The final assistant
+  summary is data passed to the lifecycle harness; the harness itself performs
+  the Discord send and verifies the returned receipt. A transient failure is
+  retried with bounded backoff. Exhaustion writes an owner-private dead-letter
+  and attempts a label-only fallback escalation. Every Stop gets a durable audit
+  outcome, and the worker is not stopped until that outcome is
+  **delivered-or-queued**. This is runtime-blind policy shared by Claude and
+  Codex; an agent tool call or claim that it posted is never delivery evidence.
 
 ## Message length — never truncate to fit (foundational)
 
@@ -190,6 +190,58 @@ the approach isn't working, and you don't see the next step.
 - **Surface to the CTO** with: what you tried, what happened, why you think
   you're stuck, and your best guess at the next angle. The CTO has a wider view
   and can redirect, redesign, or take it over.
+
+## Harness-enforced lifecycle and evidence
+
+Swarm lifecycle compliance belongs to the runtime-blind harness, not to an
+agent's promise to comply. Claude and Codex workers produce runtime-specific
+events, but the harness normalizes those events before applying policy. Status,
+roadmap movement, check-ins, review gates, stop delivery, and grounding metrics
+derive from normalized events, result sets, decision records, and durable state
+transitions. Agent prose is data and may explain an event; it is never proof
+that the event happened.
+
+- A task is not done until its completion-gate adversarial-review artifact is
+  present and bound to the reviewed diff. The default is exactly one review,
+  after implementation and verification and before the stop pipeline. Mid-task
+  review loops are forbidden. The policy model reserves a future early-review
+  class only for doctrine-listed standing-invariant or security-sensitive
+  paths, but the currently installed Claude and Codex adapters disable it: no
+  trusted in-session completion boundary can grant it symmetrically. A worker
+  cannot grant itself an exception. If a future harness boundary admits one,
+  the completion review is still required.
+- A worker is not stopped until the harness-owned Discord delivery pipeline
+  records the final summary as delivered or durably queued. The worker does not
+  perform or attest delivery. Retry, dead-letter, fallback escalation, and the
+  stop audit record are harness responsibilities.
+- A watcher idle ping requires a structured CTO check-in carrying the current
+  task, one state-vocabulary status, progress since the prior check-in,
+  blockers, next action, and a boolean `needs_input`. A greeting, heartbeat, or
+  bare acknowledgment is invalid. The watcher records ping-to-check-in latency
+  and re-pings invalid or absent responses with escalation.
+- Roadmap state and Discord digests are derived from task start/finish, state
+  transition, and result-set events. They carry only labels and states: never
+  credentials, provider tokens, account identifiers, prompts, or reviewed
+  content. Manual roadmap edits are operator-only.
+
+## Deterministic context packs and grounding budget
+
+Read the task brief's named context references before exploratory search. A
+product context pack contains the module map, key-file inventory, invariant
+registry, and task-relevant named references. Its identity is the source-corpus
+commit hash; the harness regenerates it when that corpus changes, never merely
+because a new task starts.
+
+The harness counts read/search operations before the first substantive edit.
+Crossing the configured budget does not block useful work: it emits a pack-gap
+artifact naming the missing context, then allows the worker to proceed. Grounding
+time and pack-gap events are derived metrics for the roadmap digest, not values
+the worker can self-report.
+
+Where one runtime lacks an in-session control point that the harness cannot
+replace, the capability is disabled for both runtimes or the task class is
+explicitly restricted and entered in the known-divergence register. Runtime
+adapters translate events and decisions only; they never define policy.
 ## Doc map (route before scan)
 - **Route, don't blind-grep.** Before scanning the tree for a doc, read the
   manifest (`templates/<type>/manifest.tsv`, default `engineering-cto`) — the
@@ -817,6 +869,32 @@ transitive bloat, abandonment risk. Each one is a deliberate decision.
   no surprise upgrade between sessions.
 - **CTO sanity-checks new deps** at approval — maintained (recent commits), not
   abandoned, no known critical vulnerabilities. License vetting deferred for now.
+
+## Comparable foreign-review results
+
+At the completion boundary, after implementation and verification, invoke the
+installed Codex Companion adversarial reviewer exactly once through the
+repo-controlled production wrapper, not its cache script directly. Do not invoke
+it mid-task:
+
+```sh
+$SWARM_HOME/bin/qofi-review-normalize.py run --repo "$(pwd -P)" \
+  --scope branch --base <base-ref> [focus ...]
+```
+
+The wrapper leaves the plugin and its raw v1 job untouched, normalizes the
+verdict to `qofi-adversarial-review-output/v2`, and writes the comparable
+owner-private sidecar under
+`~/.claude/qofi-review-result-sets/<repository-key>/`. The legacy plugin cannot
+prove the exact reviewed bytes, so that sidecar truthfully carries
+`reviewed_diff_sha256: null` and
+`provenance_status: unavailable-legacy-plugin`. Never recapture a later diff to
+invent that hash. A plugin or normalization failure is `ADVISORY-DOWN`, never
+approval. The existing plugin remains available and unchanged; direct/manual
+invocation simply does not create a Qofi result-set artifact. Because the legacy
+direction lacks exact reviewed-byte provenance, it cannot satisfy ADR-0023's
+hash-bound completion gate until an attested Claude adapter replaces that seam;
+the shared gate therefore remains adoption-off for both runtimes.
 
 ## Definition of done
 

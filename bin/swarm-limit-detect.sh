@@ -133,7 +133,7 @@ POLL_INNER="${SWARM_POLL_CMD_INNER:-$SCRIPT_DIR/swarm-usage-poll.sh}"
 #                                 (+ usage credit) — matched generically.
 #   SWARM_NEAR_EXCLUDE_PATTERNS   benign-notice exclusions (pipe/newline-
 #                                 separated case-INsensitive fixed strings).
-#   SWARM_ROTATE_THRESHOLD_PCT    fire only at >= this percent (default 85,
+#   SWARM_ROTATE_THRESHOLD_PCT    fire only at >= this percent (default 95,
 #                                 same default as swarm-usage-poll.sh; the
 #                                 no-percent "Approaching" form always fires).
 #   SWARM_PANE_LATCH_COOLDOWN     seconds after a successful re-auth during
@@ -162,7 +162,7 @@ POLL_INNER="${SWARM_POLL_CMD_INNER:-$SCRIPT_DIR/swarm-usage-poll.sh}"
 _NEAR_DEFAULT='[0-9]{1,3}% of your [A-Za-z0-9 .-]{1,30}limit|Approaching [A-Za-z0-9 .-]{1,30}limit · resets'
 NEAR_PATTERNS="${SWARM_NEAR_PATTERNS:-$_NEAR_DEFAULT}"
 NEAR_EXCLUDE="${SWARM_NEAR_EXCLUDE_PATTERNS:-you can use up to|can use up to}"
-NEAR_THRESHOLD="${SWARM_ROTATE_THRESHOLD_PCT:-85}"
+NEAR_THRESHOLD="${SWARM_ROTATE_THRESHOLD_PCT:-95}"
 LATCH_COOLDOWN="${SWARM_PANE_LATCH_COOLDOWN:-900}"
 REPROMPT_COOLDOWN="${SWARM_PANE_REPROMPT_COOLDOWN:-3600}"
 LATCH_TTL="${SWARM_PANE_LATCH_TTL:-604800}"
@@ -264,6 +264,7 @@ transcript_limit_scan() {
   local rows="" _projects
   while IFS= read -r _line; do
     swarm_conf_parse_line "$_line" || continue
+    [ "$SWARM_CONF_F_ENGINE" = "codex" ] && continue
     [ -z "$SWARM_CONF_F_NAME" ] && continue
     [ -z "$SWARM_CONF_F_REPO" ] && continue
     swarm_account_resolve "$SWARM_CONF_F_ACCOUNT" || continue
@@ -473,6 +474,7 @@ if [ "$BY_ACCOUNT" -eq 1 ]; then
   OBS=""
   while IFS= read -r _line; do
     swarm_conf_parse_line "$_line" || continue
+    [ "$SWARM_CONF_F_ENGINE" = "codex" ] && continue
     _name="$SWARM_CONF_F_NAME"
     [ -z "$_name" ] && continue
     _key="$SWARM_CONF_F_ACCOUNT"; [ -z "$_key" ] && _key="_default_"
@@ -542,6 +544,7 @@ NOTICE_SWARMS=""      # which swarms showed a notice
 if [ "$have_tmux" -eq 1 ]; then
   while IFS= read -r _line; do
     swarm_conf_parse_line "$_line" || continue
+    [ "$SWARM_CONF_F_ENGINE" = "codex" ] && continue
     _name="$SWARM_CONF_F_NAME"
     [ -z "$_name" ] && continue
     _sess="${PREFIX}-${_name}"

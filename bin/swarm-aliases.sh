@@ -17,6 +17,9 @@
 #                             swarm fully current with templates" bundle.
 #                             Same safety rail.
 #   swarm-attach              same as swarm-<name> but takes <name> as arg
+#   swarm-view                supported Codex operator view; takes <name>
+#   swarm-view-<name>         scrollable native Codex TUI behind the managed
+#                             read-only facade; persisted event/status fallback
 #   swarm-restart             same as swarm-restart-<name> but takes arg
 #   swarm-update              same as swarm-update-<name> but takes arg
 #   swarm-update-all          sync + restart EVERY swarm (resilient: one
@@ -58,6 +61,7 @@ unset _swarm_aliases_src
 
 # Generic helpers.
 alias swarm-attach="$_swarm_bin/swarm-attach.sh"
+alias swarm-view="$_swarm_bin/swarm-view.sh"
 alias swarm-up="$_swarm_bin/swarm-up.sh up"
 alias swarm-down="$_swarm_bin/swarm-up.sh down"
 alias swarm-status="$_swarm_bin/swarm-up.sh status"
@@ -84,16 +88,30 @@ alias watcher-enable="pm2 start $SWARM_HOME/cto-watcher/ecosystem.config.cjs && 
 #   swarm-<name>          attach-or-launch
 #   swarm-restart-<name>  down + up (safety-railed)
 #   swarm-update-<name>   sync + restart (the "fully current" bundle)
+# Codex rows additionally get `swarm-view-<name>`, the managed scrollable native
+# TUI behind a read-only facade (with a truthful persisted fallback); their
+# primary pane remains a daemon.
 # Re-source this file after swarm-add.sh to pick up new swarms.
 if [ -f "$SWARM_HOME/swarm.conf" ]; then
-  while IFS='|' read -r _swarm_name _; do
+  while IFS='|' read -r _swarm_name _swarm_repo _swarm_tok _swarm_channel _swarm_guild _swarm_account _swarm_engine _swarm_rest; do
     _swarm_name="$(echo "${_swarm_name:-}" | xargs)"
+    _swarm_engine="$(echo "${_swarm_engine:-}" | xargs)"
     [ -z "$_swarm_name" ] && continue
-    alias "swarm-$_swarm_name=$_swarm_bin/swarm-attach.sh $_swarm_name"
     alias "swarm-restart-$_swarm_name=$_swarm_bin/swarm-restart.sh $_swarm_name"
     alias "swarm-update-$_swarm_name=$_swarm_bin/swarm-update.sh $_swarm_name"
+    if [ "$_swarm_engine" = "codex" ]; then
+      # Keep the primary alias's documented attach-or-launch contract.  The
+      # attach helper launches a missing daemon, then engine-dispatches Codex
+      # to the separate navigation-enabled native viewer behind its read-only
+      # facade; it never exposes the daemon pane.  `swarm-view-*` remains the
+      # explicit view-only/fallback command.
+      alias "swarm-$_swarm_name=$_swarm_bin/swarm-attach.sh $_swarm_name"
+      alias "swarm-view-$_swarm_name=$_swarm_bin/swarm-view.sh $_swarm_name"
+    else
+      alias "swarm-$_swarm_name=$_swarm_bin/swarm-attach.sh $_swarm_name"
+    fi
   done < <(grep -vE '^[[:space:]]*(#|$)' "$SWARM_HOME/swarm.conf")
-  unset _swarm_name
+  unset _swarm_name _swarm_repo _swarm_tok _swarm_channel _swarm_guild _swarm_account _swarm_engine _swarm_rest
 fi
 
 unset _swarm_bin

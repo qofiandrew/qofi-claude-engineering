@@ -626,6 +626,32 @@ transitive bloat, abandonment risk. Each one is a deliberate decision.
 - **CTO sanity-checks new deps** at approval — maintained (recent commits), not
   abandoned, no known critical vulnerabilities. License vetting deferred for now.
 
+## Comparable foreign-review results
+
+At the completion boundary, after implementation and verification, invoke the
+installed Codex Companion adversarial reviewer exactly once through the
+repo-controlled production wrapper, not its cache script directly. Do not invoke
+it mid-task:
+
+```sh
+$SWARM_HOME/bin/qofi-review-normalize.py run --repo "$(pwd -P)" \
+  --scope branch --base <base-ref> [focus ...]
+```
+
+The wrapper leaves the plugin and its raw v1 job untouched, normalizes the
+verdict to `qofi-adversarial-review-output/v2`, and writes the comparable
+owner-private sidecar under
+`~/.claude/qofi-review-result-sets/<repository-key>/`. The legacy plugin cannot
+prove the exact reviewed bytes, so that sidecar truthfully carries
+`reviewed_diff_sha256: null` and
+`provenance_status: unavailable-legacy-plugin`. Never recapture a later diff to
+invent that hash. A plugin or normalization failure is `ADVISORY-DOWN`, never
+approval. The existing plugin remains available and unchanged; direct/manual
+invocation simply does not create a Qofi result-set artifact. Because the legacy
+direction lacks exact reviewed-byte provenance, it cannot satisfy ADR-0023's
+hash-bound completion gate until an attested Claude adapter replaces that seam;
+the shared gate therefore remains adoption-off for both runtimes.
+
 ## Definition of done
 
 A module or task is **done** only when **every** item below is true. The agent

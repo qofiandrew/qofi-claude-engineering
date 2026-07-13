@@ -19,7 +19,8 @@ TEMPLATES="$SCRIPT_DIR/../templates"
 REPO="/Users/aschettino/qofirepos/some-product"   # stand-in for a swarm's $CWD
 
 GATE="$(mktemp -t permission-gate-scope-test.XXXXXX)" || { echo "mktemp failed"; exit 1; }
-trap 'rm -f "$GATE"' EXIT INT TERM
+LAB="$(mktemp -d "${TMPDIR:-/tmp}/permission-gate-control.XXXXXX")" || { echo "mktemp failed"; exit 1; }
+trap 'rm -f "$GATE"; rm -rf "$LAB"' EXIT INT TERM
 
 # Test the engineering-cto composition (the prelude floor under test is shared
 # by every archetype, so one composition exercises the new lines fully).
@@ -76,6 +77,19 @@ assert deny  "$(decide Read "$REPO/.env.local")"                  'Read in-repo 
 assert allow "$(decide Read "$REPO/.env.example")"                'Read .env.example (template, allowed)'
 assert deny  "$(decide Read "$REPO/config/access.json")"          'Read access.json (pairing secrets)'
 assert deny  "$(decide Read "/Users/aschettino/qofirepos/qofi-claude-engineering/tokens.env")" 'Read tokens.env -> deny'
+CONTROL="/Users/aschettino/.claude/channels/discord/login-control"
+assert deny  "$(decide Read "$CONTROL/request-0123456789abcdef0123456789abcdef.json")" 'Read login-control request -> deny (OAuth URL)'
+assert deny  "$(decide Glob "$CONTROL/*")"                    'Glob login-control records -> deny'
+assert deny  "$(decide Grep "$CONTROL/response-0123456789abcdef0123456789abcdef.json")" 'Grep login-control response -> deny (paste-back code)'
+assert deny  "$(decide LS "$CONTROL")"                        'LS login-control root -> deny'
+LAB_REPO="$LAB/repo"; LAB_CONTROL="$LAB/.claude/channels/discord/login-control"
+mkdir -p "$LAB_REPO" "$LAB_CONTROL"
+printf 'private\n' > "$LAB_CONTROL/response.json"
+ln -s "$LAB_CONTROL" "$LAB_REPO/control-link"
+assert deny  "$(decide Read "$LAB_REPO/control-link/response.json" "$LAB_REPO")" 'Read through in-repo symlink to login-control -> deny'
+LABELED="$LAB/.claude-accounts/max-a/channels/discord/login-control/request.json"
+mkdir -p "$(dirname "$LABELED")"; printf '{}\n' > "$LABELED"
+assert deny  "$(decide Read "$LABELED")"                       'Read labeled-account login-control -> deny'
 
 echo ""
 echo "=== Bash utilities — in-scope allowed, out-of-scope deferred ==="
@@ -84,6 +98,16 @@ assert allow "$(decide Bash "cat $REPO/src/app.js")"              'cat absolute 
 assert defer "$(decide Bash 'cat ../other-repo/x')"               'cat ../other-repo -> defer'
 assert defer "$(decide Bash 'cat /Users/aschettino/qofirepos/other-repo/x')" 'cat absolute other-repo -> defer'
 assert allow "$(decide Bash 'cat /etc/hostname')"                 'cat system file -> allow (read scope)'
+assert deny  "$(decide Bash "cat $CONTROL/response-0123456789abcdef0123456789abcdef.json")" 'Bash cat login-control response -> deny'
+assert deny  "$(decide Bash 'bash bin/swarm-login-relay.sh --dedicated')" 'agent cannot invoke the host login relay'
+assert deny  "$(decide Bash '\"$SWARM_HOME\"/bin/swarm-reauth.sh')" 'agent cannot trigger host auto-reauth'
+assert deny  "$(decide Bash 'python3 -c \"open(\\\".swarm-roadmap.json\\\",\\\"w\\\").write(\\\"{}\\\")\"')" 'arbitrary shell process cannot write harness/operator-owned roadmap'
+assert deny  "$(decide Bash 'cat .swarm-roadmap.json')" 'roadmap shell path is closed because interpreters can hide writes'
+assert deny  "$(decide Bash "node -e 'require(\"fs\").readFileSync(\"$CONTROL/request-0123456789abcdef0123456789abcdef.json\")'")" 'generic node read of login-control request -> deny before policy allows'
+CONTROL_ENV_CMD='cat "$SWARM_LOGIN_CONTROL_DIR/response-x.json"'
+assert deny  "$(decide Bash "$CONTROL_ENV_CMD")" 'env-relative login-control read -> deny'
+assert deny  "$(decide Bash "cat $LAB_REPO/control-link/response.json" "$LAB_REPO")" 'Bash read through in-repo symlink to login-control -> deny'
+assert allow "$(decide Bash 'node bridge/login-control.ts')" 'repository login-control source remains workable (path-scoped deny)'
 assert allow "$(decide Bash 'find . -name "*.js"')"               'find . in-repo'
 assert defer "$(decide Bash 'find / -name passwd')"               'find / -> defer'
 
@@ -103,6 +127,9 @@ echo "=== Edit/Write floor — unchanged (regression guard) ==="
 assert allow "$(decide Edit "$REPO/src/app.js")"                  'Edit in-repo'
 assert deny  "$(decide Edit "/Users/aschettino/other/x.js")"      'Edit outside repo -> deny (floor)'
 assert deny  "$(decide Edit "$REPO/.env")"                        'Edit .env -> deny (floor)'
+assert deny  "$(decide Edit "$CONTROL/ready-1-2.json")"          'Edit login-control readiness -> deny'
+assert deny  "$(decide Edit "$REPO/.swarm-roadmap.json")"       'Edit harness/operator-owned roadmap -> deny'
+assert allow "$(decide Read "$REPO/.swarm-roadmap.json")"       'Read-only roadmap inspection remains allowed'
 
 echo ""
 echo "=== Summary ==="

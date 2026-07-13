@@ -117,6 +117,7 @@ while :; do
     repo="$SWARM_CONF_F_REPO"
     tokvar="$SWARM_CONF_F_TOKVAR"
     channel="$SWARM_CONF_F_CHANNEL"
+    engine="$SWARM_CONF_F_ENGINE"
     [ -z "$name" ] && continue
     [ -z "$channel" ] && continue
 
@@ -124,6 +125,20 @@ while :; do
     [ -z "$token" ] && continue
 
     case "$repo" in "~"*) repo="$HOME${repo#\~}";; esac
+
+    if [ "$engine" = "codex" ]; then
+      # The Codex bridge owns an engine-native active bit; no Claude footer or
+      # transcript exists. Any missing/stale/malformed state fails silent.
+      session_alive "$name" || continue
+      swarm_codex_runtime_read "$name" || continue
+      [ "$SWARM_CODEX_RUNTIME_READY" -eq 1 ] || continue
+      [ "$SWARM_CODEX_RUNTIME_ACTIVE" -eq 1 ] || continue
+      curl --max-time "$CURL_MAX_TIME" -s -X POST \
+        -H "Authorization: Bot $token" \
+        "$API/channels/$channel/typing" \
+        >/dev/null 2>&1 || true
+      continue
+    fi
 
     # Resolve THIS swarm's projects dir from ITS account (field 6). Empty
     # account → ${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects} (default,
@@ -167,5 +182,8 @@ while :; do
       >/dev/null 2>&1 || true
   done < <(grep -vE '^[[:space:]]*(#|$)' "$CONF")
 
+  # Deterministic one-sweep seam for regression tests and manual diagnostics;
+  # the launchd/default path remains the historical infinite loop.
+  [ "${SWARM_TYPING_ONCE:-0}" = "1" ] && break
   sleep "$SLEEP_SECONDS"
 done

@@ -1034,24 +1034,63 @@ misconfiguration and injection risk. External tooling (e.g. ECC's AgentShield)
 may be run **by the operator, by hand**, as an occasional second opinion; it is
 **never a wired dependency**.
 
-The reviewer and security passes are **gating**. The Codex contrarian lane below
-is **advisory** — a different tier; don't conflate them.
+The reviewer and security passes are **gating**. The foreign-model lane below
+has a different split: its findings are advisory, while presence of the exact
+completion artifact is a harness lifecycle gate. Do not turn a foreign-model
+verdict into merge authority or confuse artifact presence with a veto.
 
-## Codex contrarian review lane (advisory, never gating)
+## Foreign-model completion review (advisory verdict, required artifact)
 
-On the highest-stakes diffs, the integrated diff is also piped to the **OpenAI
-Codex CLI**, and its findings are **input to your judgment — never a gate**. A
-different model family decorrelates the blind spots a Claude reviewer shares with
-Claude-authored code; that is the entire point. Rules, all ratified:
+The historical lane's name came from the Claude-authored direction, but the
+actual rule is **foreign-model review**. Run it exactly once at the completion
+boundary, after implementation and verification and before stop/done. For an
+operator-run compatibility review, use
+`$SWARM_HOME/bin/adversarial-review.sh --engine claude --range <range>` from the integrated repo:
+the dispatcher sends Claude-authored work to OpenAI Codex and Codex-authored
+work to Claude/Fable. Never review Codex-authored work with Codex-on-Codex. The
+managed Codex runtime keeps the one-tool MCP registration for deterministic
+home parity, but active workers cannot acquire reviewer scope: a direct call is
+refused and creates no completion artifact. After the App Server reports a
+successful terminal result, the generation is reaped, hidden-runtime access is
+revoked, and the host snapshots exact final material; only then does the trusted
+manager invoke the fixed one-shot Fable shim. A root lifecycle broker consumes
+that lease-bound receipt before stop delivery may complete. It does not launch
+the operator compatibility lane above. Early and mid-task calls are disabled. A
+different model family decorrelates shared blind spots; that is the entire point.
 
-- **Advisory, never gating.** Codex gets a **voice, not a veto** — a foreign
-  model never holds authority over a qofi gate. You weigh its findings; you are
-  never blocked by them.
+When using the installed Codex Companion's v1 `/codex:adversarial-review`
+direction, do not call its cache script directly for a Qofi review. Use the
+repo-controlled production wrapper instead:
+
+```sh
+$SWARM_HOME/bin/qofi-review-normalize.py run --repo "$(pwd -P)" \
+  --scope branch --base <base-ref> [focus ...]
+```
+
+The wrapper preserves the plugin's review behavior, forces its supported
+foreground JSON contract, maps the raw v1 verdict to
+`qofi-adversarial-review-output/v2`, and writes an owner-private member of the
+Qofi review result set. The raw plugin job remains external. Because that
+legacy contract does not attest the exact reviewed bytes, its sidecar has
+`reviewed_diff_sha256: null` and
+`provenance_status: unavailable-legacy-plugin`; never recapture a later mutable
+diff and present its hash as review provenance. Plugin or normalization failure
+is loud `ADVISORY-DOWN`, never approval. Direct plugin invocation remains
+available for historical/manual use, but it does not produce a comparable Qofi
+result-set artifact and cannot satisfy an exact-diff completion gate.
+
+- **Advisory verdict, mandatory evidence.** A foreign model gets a **voice, not
+  a veto**: you weigh its findings and it never receives merge, push, commit, or
+  ratification authority. Separately, the harness refuses `done` without one
+  schema-valid completion artifact bound to the exact final reviewed input.
+  `review-unavailable` is explicit review-pending, never approval.
 - **Disagreement escalates, never loops.** When Codex and the Claude-side
   reviewer (or you) materially disagree, the §*Verification* circuit-breaker
   applies: escalate to the operator, never autonomously loop.
-- **Sequencing.** This lane lands **after** the Claude-side reviewer lane is
-  live, so its marginal value is measurable against a baseline.
+- **Sequencing and cardinality.** Exactly one completion call is the default.
+  The current adapters disable early review because they cannot grant a trusted,
+  symmetric in-session exception. A future harness-classified invariant or
+  security exception never replaces the completion call.
 - **Type-2 spend, consciously approved + logged.** This lane runs on a Codex
   subscription (recurring cost outside the one-Max-subscription shape). The
   operator **explicitly approved this spend on 2026-06-12** — it is a knowingly

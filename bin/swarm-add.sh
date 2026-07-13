@@ -36,6 +36,13 @@
 #                        stack-specific overlay onto CLAUDE.md. v1 'backend'
 #                        is label-only. Refused with a non-engineering-cto
 #                        --type. Omit for no profile.
+#   --engine <name>      lead runtime: claude (default) or codex. Codex uses
+#                        codex-bridge + the dedicated hidden-account login from
+#                        `swarm-codex-runtime.sh login`; Claude remains the
+#                        byte-compatible default.
+#   --codex-auth-pool <name>
+#                        named ordered profile pool from codex-profiles.json.
+#                        Codex-only; blank field 8 resolves to `default`.
 #   --bot-user-id <id>   the new swarm's Discord BOT USER id (== the app's
 #                        Application ID). For engineering-cto swarms this is
 #                        written into cto-watcher/config.json so the CTO
@@ -74,23 +81,22 @@ PLUGIN_KEY="discord-b2b@qofi-swarm"
 # for tests.
 CTO_WATCHER_CONFIG="${CTO_WATCHER_CONFIG:-$SWARM_HOME/cto-watcher/config.json}"
 CTO_BUS_WATCHER_BOT_ID="${CTO_BUS_WATCHER_BOT_ID:-1510298728148369448}"
+SWARM_BUS_CHANNEL="${SWARM_BUS_CHANNEL:-1510301812434141194}"
+
+case "$OWNER_ID" in ''|*[!0-9]*) echo "swarm-add: SWARM_OWNER_DISCORD_ID must be numeric" >&2; exit 1 ;; esac
+case "$CTO_BUS_WATCHER_BOT_ID" in ''|*[!0-9]*) echo "swarm-add: CTO_BUS_WATCHER_BOT_ID must be numeric" >&2; exit 1 ;; esac
+case "$SWARM_BUS_CHANNEL" in ''|*[!0-9]*) echo "swarm-add: SWARM_BUS_CHANNEL must be numeric" >&2; exit 1 ;; esac
 
 SCRIPT_DIR_EARLY="$(cd "$(dirname "$0")" && pwd)"
+CODEX_RUNTIME_BIN="${SWARM_CODEX_RUNTIME_BIN:-$SCRIPT_DIR_EARLY/swarm-codex-runtime.sh}"
 # Source the lib for swarm_type_is_known (used to validate --type before
 # any Discord-side side-effects).
 # shellcheck source=swarm-lib.sh
 . "$SCRIPT_DIR_EARLY/swarm-lib.sh"
 
-# Resolve the access.json for the account this swarm is being added with. There
-# is no --account flag yet (Phase 2+), so the new swarm gets the DEFAULT account
-# — resolve "" → SWARM_ACCT_ACCESS_FILE, which the resolver maps to exactly
-# today's $HOME/.claude/channels/discord/access.json (honoring SWARM_ACCESS_FILE
-# if set). A labeled account would land in $HOME/.claude-accounts/<label>/...
-# instead. This is the SOLE constructor of the path — never hand-built here.
-# The rc-check is a no-op today (the literal "" always resolves) but is here so a
-# future --account flag that threads a VARIABLE label is fail-safe by default
-# (refuse rather than read a stale SWARM_ACCT_ACCESS_FILE) — same discipline as
-# the WORKING-rail consumers (ADR-0018, Phase-2 Finding 1).
+# Resolve a provisional default access path for new/Codex rows. After the
+# existing row is parsed below, a Claude target is re-resolved through its
+# actual ACCOUNT label. This resolver remains the sole path constructor.
 if ! swarm_account_resolve ""; then
   echo "swarm-add: could not resolve the account's access.json path" >&2
   exit 1
@@ -98,7 +104,7 @@ fi
 ACCESS="$SWARM_ACCT_ACCESS_FILE"
 
 usage() {
-  sed -n '1,50p' "$0"
+  sed -n '1,53p' "$0"
   exit "${1:-0}"
 }
 
@@ -110,11 +116,16 @@ usage() {
 NAME=""
 REPO=""
 CHANNEL=""
+CHANNEL_EXPLICIT=0
 ROTATE_TOKEN=0
 SKIP_WALKTHROUGH=0
 TYPE=""
 PROFILE=""
 BOT_USER_ID=""
+ENGINE="claude"
+ENGINE_EXPLICIT=0
+CODEX_AUTH_POOL="default"
+CODEX_AUTH_POOL_EXPLICIT=0
 POS_COUNT=0
 
 while [ $# -gt 0 ]; do
@@ -131,6 +142,16 @@ while [ $# -gt 0 ]; do
       PROFILE="$2"; shift 2 ;;
     --profile=*)
       PROFILE="${1#--profile=}"; shift ;;
+    --engine)
+      [ $# -ge 2 ] || { echo "swarm-add: --engine requires a value" >&2; usage 1; }
+      ENGINE="$2"; ENGINE_EXPLICIT=1; shift 2 ;;
+    --engine=*)
+      ENGINE="${1#--engine=}"; ENGINE_EXPLICIT=1; shift ;;
+    --codex-auth-pool)
+      [ $# -ge 2 ] || { echo "swarm-add: --codex-auth-pool requires a value" >&2; usage 1; }
+      CODEX_AUTH_POOL="$2"; CODEX_AUTH_POOL_EXPLICIT=1; shift 2 ;;
+    --codex-auth-pool=*)
+      CODEX_AUTH_POOL="${1#--codex-auth-pool=}"; CODEX_AUTH_POOL_EXPLICIT=1; shift ;;
     --bot-user-id)
       [ $# -ge 2 ] || { echo "swarm-add: --bot-user-id requires a value" >&2; usage 1; }
       BOT_USER_ID="$2"; shift 2 ;;
@@ -143,7 +164,7 @@ while [ $# -gt 0 ]; do
       case "$POS_COUNT" in
         1) NAME="$1" ;;
         2) REPO="$1" ;;
-        3) CHANNEL="$1" ;;
+        3) CHANNEL="$1"; CHANNEL_EXPLICIT=1 ;;
         *) echo "swarm-add: too many positional args (got '$1' after name/repo/channel)" >&2; usage 1 ;;
       esac
       shift ;;
@@ -152,6 +173,22 @@ done
 
 [ -z "$NAME" ] && { echo "swarm-add: missing <name>" >&2; usage 1; }
 [ -z "$REPO" ] && { echo "swarm-add: missing <repo_path>" >&2; usage 1; }
+
+case "$ENGINE" in
+  claude|codex) : ;;
+  *) echo "swarm-add: --engine must be claude or codex (got: $ENGINE)" >&2; exit 1 ;;
+esac
+
+[ -n "$CODEX_AUTH_POOL" ] || CODEX_AUTH_POOL="default"
+case "$CODEX_AUTH_POOL" in
+  [!a-z]*|*[!a-z0-9_-]*)
+    echo "swarm-add: --codex-auth-pool must match [a-z][a-z0-9_-]{0,31} (got: $CODEX_AUTH_POOL)" >&2
+    exit 1 ;;
+esac
+if [ "${#CODEX_AUTH_POOL}" -gt 32 ]; then
+  echo "swarm-add: --codex-auth-pool must be at most 32 characters (got: $CODEX_AUTH_POOL)" >&2
+  exit 1
+fi
 
 if [ -n "$TYPE" ]; then
   if ! swarm_type_is_known "$TYPE"; then
@@ -187,8 +224,31 @@ fi
 # Name + repo validation.
 echo "$NAME" | grep -qE '^[a-zA-Z][a-zA-Z0-9_-]*$' || {
   echo "swarm-add: name must match [a-zA-Z][a-zA-Z0-9_-]* (got: $NAME)" >&2; exit 1; }
+if ! /usr/bin/python3 -I -B - "$REPO" <<'PY' >/dev/null 2>&1
+import sys
+path=sys.argv[1]
+safe=('|' not in path and path==path.rstrip()
+      and not any(ord(ch)<32 or ord(ch)==127 for ch in path))
+raise SystemExit(0 if safe else 1)
+PY
+then
+  echo "swarm-add: repo path cannot contain pipe/control characters or trailing whitespace" >&2
+  exit 1
+fi
 [ -d "$REPO" ] || { echo "swarm-add: repo not found: $REPO" >&2; exit 1; }
-REPO="$(cd "$REPO" && pwd)"
+REPO="$(/usr/bin/python3 -I -B - "$REPO" <<'PY'
+import os, stat, sys
+raw=sys.argv[1]; path=os.path.realpath(raw)
+st=os.stat(path,follow_symlinks=False)
+safe=(stat.S_ISDIR(st.st_mode) and '|' not in path and path==path.rstrip()
+      and not any(ord(ch)<32 or ord(ch)==127 for ch in path))
+if not safe: raise SystemExit(1)
+sys.stdout.write(path)
+PY
+)" || {
+  echo "swarm-add: canonical repo path cannot contain pipe/control characters or trailing whitespace: $REPO" >&2
+  exit 1
+}
 REPO_BASENAME="$(basename "$REPO")"
 
 # Channel validation if given up front.
@@ -203,10 +263,10 @@ if [ -n "$BOT_USER_ID" ]; then
     echo "swarm-add: --bot-user-id must be numeric (got: $BOT_USER_ID)" >&2; exit 1; }
 fi
 
-# Effective archetype: TYPE may be blank (engineering-cto default). Only
-# engineering-cto swarms are CTOs that ride the #cpo-cto-bus, so phase 4e's
-# cto-watcher registration is gated on this.
-EFFECTIVE_TYPE="${TYPE:-engineering-cto}"
+# Effective archetype: an explicit --type wins; otherwise honor an existing
+# marker before falling back to engineering-cto. A CPO re-run without --type
+# must not be miswired as a CTO or lose its dual-channel ACL.
+EFFECTIVE_TYPE="${TYPE:-$(swarm_type_of "$REPO")}"
 
 TOK_VAR="BOT_$(echo "$NAME" | tr '[:lower:]-' '[:upper:]_')"
 
@@ -271,12 +331,779 @@ phase() {
 # ---------------------------------------------------------------------------
 # PHASE 0 — preflight + partial-state detection
 # ---------------------------------------------------------------------------
+EXISTING_ENGINE=""
+EXISTING_REPO=""
+EXISTING_CHANNEL=""
+EXISTING_TOK_VAR=""
+EXISTING_ACCOUNT=""
+EXISTING_CODEX_AUTH_POOL="default"
+EXISTING_ROW_RAW=""
+EXISTING_ROW=0
+EXISTING_MATCHES=0
+if [ -f "$CONF" ]; then
+  while IFS= read -r _line; do
+    _trimmed_line="$(_swarm_trim "$_line")"
+    case "$_trimmed_line" in ''|'#'*) continue ;; esac
+    _raw_name="$(_swarm_trim "${_line%%|*}")"
+    [ "$_raw_name" = "$NAME" ] || continue
+    EXISTING_MATCHES=$((EXISTING_MATCHES + 1))
+    if ! swarm_conf_parse_line "$_line"; then
+      echo "swarm-add: REFUSED — existing row '$NAME' is malformed (repo/token/engine fields must parse safely)." >&2
+      exit 2
+    fi
+    if [ -z "$SWARM_CONF_F_TOKVAR" ]; then
+      echo "swarm-add: REFUSED — existing row '$NAME' has a missing or malformed TOKEN_VAR_NAME." >&2
+      exit 2
+    fi
+    EXISTING_ENGINE="$SWARM_CONF_F_ENGINE"
+    EXISTING_REPO="$SWARM_CONF_F_REPO"
+    EXISTING_CHANNEL="$SWARM_CONF_F_CHANNEL"
+    EXISTING_TOK_VAR="$SWARM_CONF_F_TOKVAR"
+    EXISTING_ACCOUNT="$SWARM_CONF_F_ACCOUNT"
+    EXISTING_CODEX_AUTH_POOL="$SWARM_CONF_F_CODEX_AUTH_POOL"
+    EXISTING_ROW_RAW="$_line"
+    EXISTING_ROW=1
+  done < "$CONF"
+fi
+if [ "$EXISTING_MATCHES" -gt 1 ]; then
+  echo "swarm-add: REFUSED — swarm.conf has $EXISTING_MATCHES rows named '$NAME'; identity is ambiguous." >&2
+  exit 2
+fi
+
+# An existing row is the registration identity. Never stamp one repository or
+# rewrite one ACL and then flip the engine on a same-name row that still points
+# somewhere else. Canonicalize the configured repo, compare an explicitly
+# supplied channel, and use the row's actual token variable on idempotent runs.
+if [ "$EXISTING_ROW" -eq 1 ]; then
+  case "$EXISTING_CHANNEL" in ''|*[!0-9]*)
+    [ -z "$EXISTING_CHANNEL" ] || { echo "swarm-add: REFUSED — existing row '$NAME' has a nonnumeric channel." >&2; exit 2; }
+    ;;
+  esac
+  case "$EXISTING_REPO" in
+    /*) ;;
+    *) echo "swarm-add: REFUSED — existing row '$NAME' has a non-absolute repo path: $EXISTING_REPO" >&2; exit 2 ;;
+  esac
+  if [ ! -d "$EXISTING_REPO" ]; then
+    echo "swarm-add: REFUSED — existing row '$NAME' repo is missing: $EXISTING_REPO" >&2
+    exit 2
+  fi
+  EXISTING_REPO_CANON="$(cd "$EXISTING_REPO" && pwd -P)" || {
+    echo "swarm-add: REFUSED — could not canonicalize existing row repo: $EXISTING_REPO" >&2
+    exit 2
+  }
+  if [ "$EXISTING_REPO_CANON" != "$REPO" ]; then
+    echo "swarm-add: REFUSED — name '$NAME' is already registered to repo $EXISTING_REPO_CANON (not $REPO)." >&2
+    exit 2
+  fi
+  if [ "$CHANNEL_EXPLICIT" -eq 1 ] && [ -n "$EXISTING_CHANNEL" ] && [ "$CHANNEL" != "$EXISTING_CHANNEL" ]; then
+    echo "swarm-add: REFUSED — name '$NAME' is already registered to channel '${EXISTING_CHANNEL:-<empty>}' (not '$CHANNEL')." >&2
+    exit 2
+  fi
+  if [ "$CHANNEL_EXPLICIT" -eq 0 ] && [ -n "$EXISTING_CHANNEL" ]; then
+    CHANNEL="$EXISTING_CHANNEL"
+  fi
+  TOK_VAR="$EXISTING_TOK_VAR"
+fi
+
+# A re-run without --engine preserves the row's engine. An explicit change is
+# a migration and remains uncommitted until every target-engine setup phase has
+# succeeded below.
+if [ "$EXISTING_ROW" -eq 1 ] && [ "$ENGINE_EXPLICIT" -eq 0 ]; then
+  ENGINE="$EXISTING_ENGINE"
+fi
+if [ "$EXISTING_ROW" -eq 1 ] && [ "$CODEX_AUTH_POOL_EXPLICIT" -eq 0 ]; then
+  CODEX_AUTH_POOL="$EXISTING_CODEX_AUTH_POOL"
+fi
+if [ "$CODEX_AUTH_POOL_EXPLICIT" -eq 1 ] && [ "$ENGINE" != "codex" ]; then
+  echo "swarm-add: --codex-auth-pool is only valid when the effective engine is codex" >&2
+  exit 1
+fi
+if [ "$ENGINE" = "codex" ] && ! swarm_codex_profiles_validate \
+    "$SWARM_HOME/codex-profiles.json" "$CODEX_AUTH_POOL"; then
+  echo "swarm-add: REFUSED — invalid Codex profile catalog or unknown auth pool '$CODEX_AUTH_POOL'." >&2
+  exit 2
+fi
+
+# Claude channel ACLs are account-partitioned. Resolve the target row's actual
+# ACCOUNT after authoritative engine selection; an idempotent labeled Claude
+# rerun and a Codex->Claude migration must prepare the same access.json that
+# launch will consume. Codex intentionally always uses the default canonical
+# ACL, regardless of a dormant ACCOUNT field retained for reversible migration.
+ACCESS_ACCOUNT=""
+if [ "$ENGINE" = "claude" ] && [ "$EXISTING_ROW" -eq 1 ]; then
+  ACCESS_ACCOUNT="$EXISTING_ACCOUNT"
+fi
+if ! swarm_account_resolve "$ACCESS_ACCOUNT"; then
+  echo "swarm-add: REFUSED — invalid ACCOUNT '$ACCESS_ACCOUNT' in the existing row." >&2
+  exit 2
+fi
+ACCESS="$SWARM_ACCT_ACCESS_FILE"
+
+# Count configured Codex consumers of one canonical repo. Lifecycle authority
+# is repo-scoped, while swarm.conf rows are bot/channel-scoped, so revocation
+# must be reference-aware. Any malformed active row makes the answer unsafe;
+# callers then retain authority or refuse the destructive transition.
+swarm_codex_repo_ref_count() {  # repo [excluded-name]
+  local _repo="$1" _exclude="${2:-}" _line _trimmed _configured_repo
+  SWARM_CODEX_REPO_REF_COUNT=0
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    _trimmed="$(_swarm_trim "$_line")"
+    case "$_trimmed" in ''|'#'*) continue ;; esac
+    if ! swarm_conf_parse_line "$_line"; then
+      return 2
+    fi
+    if [ "$SWARM_CONF_F_ENGINE" != "codex" ] || [ "$SWARM_CONF_F_NAME" = "$_exclude" ]; then
+      continue
+    fi
+    _configured_repo="$SWARM_CONF_F_REPO"
+    if [ -d "$_configured_repo" ]; then
+      _configured_repo_canon="$(cd "$_configured_repo" && pwd -P)" || return 2
+      [ "$_configured_repo_canon" = "$_configured_repo" ] || return 2
+      _configured_repo="$_configured_repo_canon"
+    elif [ -L "$_configured_repo" ]; then
+      return 2
+    else
+      _configured_repo="$(/usr/bin/python3 -I -B - "$_configured_repo" <<'PY'
+import os,sys
+path=sys.argv[1]
+if not os.path.isabs(path) or any(ord(ch)<32 or ord(ch)==127 for ch in path): raise SystemExit(2)
+print(os.path.normpath(path))
+PY
+)" || return 2
+    fi
+    if [ "$_configured_repo" = "$_repo" ]; then
+      SWARM_CODEX_REPO_REF_COUNT=$((SWARM_CODEX_REPO_REF_COUNT + 1))
+    fi
+  done < "$CONF"
+  return 0
+}
+
+codex_runtime_remediation() {
+  cat >&2 <<EOF
+swarm-add: Codex dedicated runtime is not ready; swarm.conf remains on the prior engine.
+Complete the one-time host lifecycle, then re-run this command:
+  $SCRIPT_DIR_EARLY/swarm-codex-runtime.sh install --repo "$REPO"
+  $SCRIPT_DIR_EARLY/swarm-codex-runtime.sh login
+  log out/in to refresh group membership and restart existing tmux servers
+  $SCRIPT_DIR_EARLY/swarm-codex-runtime.sh verify --repo "$REPO"
+EOF
+}
+
+codex_runtime_prepare_and_verify() {
+  if ! repo_identity_matches; then
+    echo "swarm-add: REFUSED — repo identity changed before Codex workspace preparation." >&2
+    return 1
+  fi
+  if [ ! -x "$CODEX_RUNTIME_BIN" ]; then
+    echo "swarm-add: Codex runtime lifecycle command is missing or not executable: $CODEX_RUNTIME_BIN" >&2
+    codex_runtime_remediation
+    return 1
+  fi
+  if ! "$CODEX_RUNTIME_BIN" prepare-workspace --repo "$REPO"; then
+    codex_runtime_remediation
+    return 1
+  fi
+  CODEX_RUNTIME_PREPARED=1
+  if ! repo_identity_matches; then
+    echo "swarm-add: REFUSED — repo identity changed during Codex workspace preparation." >&2
+    return 1
+  fi
+  if ! "$CODEX_RUNTIME_BIN" verify --repo "$REPO"; then
+    codex_runtime_remediation
+    return 1
+  fi
+  if ! repo_identity_matches; then
+    echo "swarm-add: REFUSED — repo identity changed during Codex runtime verification." >&2
+    return 1
+  fi
+  return 0
+}
+
+codex_runtime_release_if_unreferenced() {
+  if ! swarm_codex_repo_ref_count "$REPO"; then
+    echo "swarm-add: WARNING — malformed swarm.conf prevents safe Codex authority rollback; retaining workspace authority." >&2
+    return 2
+  fi
+  if [ "$SWARM_CODEX_REPO_REF_COUNT" -gt 0 ]; then
+    return 0
+  fi
+  if ! "$CODEX_RUNTIME_BIN" release-workspace --repo "$REPO"; then
+    echo "swarm-add: CRITICAL — failed to roll back uncommitted Codex workspace authority for $REPO" >&2
+    return 1
+  fi
+  CODEX_RUNTIME_PREPARED=0
+  return 0
+}
+
+engine_migration_quiescent() {
+  local _tmux _codex_state _boundary
+  _tmux="${SWARM_TMUX_BIN:-tmux}"
+  if ! command -v "$_tmux" >/dev/null 2>&1; then
+    echo "swarm-add: REFUSED — cannot prove engine quiescence because tmux is unavailable: $_tmux" >&2
+    return 1
+  fi
+  if "$_tmux" has-session -t "swarm-$NAME" 2>/dev/null; then
+    echo "swarm-add: REFUSED — cannot change ENGINE $EXISTING_ENGINE -> $ENGINE while swarm-$NAME is live. Stop it cleanly first." >&2
+    return 1
+  fi
+  # Read PIDs independently of schema validity so a damaged record with a live
+  # salvageable PID still blocks. Present-but-unclassifiable state is also a
+  # refusal: malformed evidence is never proof that an old daemon is stopped.
+  _codex_state="$(swarm_codex_state_dir "$NAME")"
+  _boundary="$(/usr/bin/python3 -I -B - "$_codex_state/runtime.json" "$_codex_state/daemon.lock" <<'PY'
+import datetime as dt, json, os, sys
+runtime,lock=sys.argv[1:3]; pids=[]; issues=[]
+def stamp(value):
+  if not isinstance(value,str) or not value: return False
+  try: dt.datetime.fromisoformat(value.replace('Z','+00:00')); return True
+  except Exception: return False
+if os.path.lexists(runtime):
+  try:
+    d=json.load(open(runtime))
+    if isinstance(d,dict):
+      for key in ('pid','child_pid'):
+        value=d.get(key)
+        if type(value) is int and value>0 and value not in pids: pids.append(value)
+    if (not isinstance(d,dict) or d.get('schema')!='codex-bridge-runtime/v1'
+        or type(d.get('pid')) is not int or d['pid']<=0
+        or not stamp(d.get('started_at')) or not stamp(d.get('updated_at'))
+        or type(d.get('ready')) is not bool or type(d.get('active')) is not bool
+        or type(d.get('queue_depth')) is not int or d['queue_depth']<0
+        or (d.get('child_pid') is not None and (type(d.get('child_pid')) is not int or d['child_pid']<=0))
+        or d.get('backend') not in ('exec','app-server')): raise ValueError()
+  except Exception: issues.append('runtime-unreadable')
+if os.path.lexists(lock):
+  owner=os.path.join(lock,'owner.json')
+  try:
+    d=json.load(open(owner))
+    if isinstance(d,dict):
+      value=d.get('pid')
+      if type(value) is int and value>0 and value not in pids: pids.append(value)
+    if (not isinstance(d,dict) or d.get('schema')!='codex-bridge-lock/v1'
+        or type(d.get('pid')) is not int or d['pid']<=0): raise ValueError()
+  except Exception: issues.append('lock-owner-unreadable')
+live=[]
+for pid in pids:
+  try: os.kill(pid,0)
+  except PermissionError: live.append(pid)
+  except OSError: pass
+  else: live.append(pid)
+if live: print('live|' + ','.join(map(str,live)))
+elif issues: print('unsafe|' + ','.join(issues))
+else: print('ok|')
+PY
+)"
+  case "$_boundary" in
+    live\|*)
+      echo "swarm-add: REFUSED — cannot change ENGINE while Codex runtime PID(s) or lock owner PID(s) ${_boundary#live|} are live. Stop them cleanly first." >&2
+      return 1 ;;
+    unsafe\|*)
+      echo "swarm-add: REFUSED — cannot prove engine quiescence because Codex process state is ${_boundary#unsafe|}." >&2
+      return 1 ;;
+    ok\|) return 0 ;;
+    *)
+      echo "swarm-add: REFUSED — Codex process boundary could not be classified." >&2
+      return 1 ;;
+  esac
+}
+
+ENGINE_SWITCH_PENDING=0
+if [ "$EXISTING_ROW" -eq 1 ] && [ "$ENGINE_EXPLICIT" -eq 1 ] && [ "$ENGINE" != "$EXISTING_ENGINE" ]; then
+  engine_migration_quiescent || exit 2
+  ENGINE_SWITCH_PENDING=1
+fi
+
+release_engine_switch_lock() {
+  swarm_conf_lock_release
+}
+CODEX_RUNTIME_PREPARED=0
+CODEX_ADOPTION_PENDING=0
+ADD_TRANSACTION_LOCK_HELD=0
+ENGINE_SURFACE_ROLLBACK_PENDING=0
+ENGINE_SURFACE_SNAPSHOT_DIR=""
+ENGINE_SURFACE_AGENTS_KIND=""
+ENGINE_SURFACE_AGENTS_MODE=""
+ENGINE_SURFACE_AGENTS_ID=""
+REPO_IDENTITY=""
+
+bind_repo_identity() {
+  REPO_IDENTITY="$(/usr/bin/python3 -I -B - "$REPO" <<'PY'
+import os, stat, sys
+path=sys.argv[1]
+if os.path.realpath(path) != path: raise SystemExit(2)
+flags=os.O_RDONLY | getattr(os,'O_DIRECTORY',0) | getattr(os,'O_NOFOLLOW',0)
+fd=os.open(path,flags)
+try:
+    opened=os.fstat(fd); current=os.lstat(path)
+    if (not stat.S_ISDIR(opened.st_mode) or stat.S_ISLNK(current.st_mode)
+            or (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino)):
+        raise SystemExit(2)
+    print(f'{opened.st_dev}:{opened.st_ino}')
+finally: os.close(fd)
+PY
+)" || return 1
+  [ -n "$REPO_IDENTITY" ]
+}
+
+repo_identity_matches() {
+  local _current
+  [ -n "$REPO_IDENTITY" ] || return 1
+  _current="$(/usr/bin/python3 -I -B - "$REPO" <<'PY'
+import os, stat, sys
+path=sys.argv[1]
+if os.path.realpath(path) != path: raise SystemExit(2)
+flags=os.O_RDONLY | getattr(os,'O_DIRECTORY',0) | getattr(os,'O_NOFOLLOW',0)
+fd=os.open(path,flags)
+try:
+    opened=os.fstat(fd); current=os.lstat(path)
+    if (not stat.S_ISDIR(opened.st_mode) or stat.S_ISLNK(current.st_mode)
+            or (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino)):
+        raise SystemExit(2)
+    print(f'{opened.st_dev}:{opened.st_ino}')
+finally: os.close(fd)
+PY
+)" || return 1
+  [ "$_current" = "$REPO_IDENTITY" ]
+}
+
+snapshot_engine_surface() {
+  local _out
+  [ "$ENGINE_SWITCH_PENDING" -eq 1 ] || return 0
+  ENGINE_SURFACE_SNAPSHOT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/swarm-add-surface.XXXXXX")" || return 1
+  _out="$(/usr/bin/python3 -I -B - "$REPO" "$REPO_IDENTITY" "$ENGINE_SURFACE_SNAPSHOT_DIR/AGENTS.md" <<'PY'
+import errno, os, stat, sys
+repo, expected, dest=sys.argv[1:4]
+dev,ino=(int(v) for v in expected.split(':',1))
+flags=os.O_RDONLY|getattr(os,'O_DIRECTORY',0)|getattr(os,'O_NOFOLLOW',0)
+root=os.open(repo,flags)
+try:
+    rst=os.fstat(root)
+    if (rst.st_dev,rst.st_ino)!=(dev,ino): raise SystemExit(2)
+    try: fd=os.open('AGENTS.md',os.O_RDONLY|getattr(os,'O_NOFOLLOW',0),dir_fd=root)
+    except FileNotFoundError:
+        print('absent'); raise SystemExit(0)
+    except OSError as exc:
+        if exc.errno==errno.ELOOP: raise SystemExit(3)
+        raise
+    try:
+        before=os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_size>2*1024*1024: raise SystemExit(3)
+        data=b''
+        while len(data)<=2*1024*1024:
+            chunk=os.read(fd,65536)
+            if not chunk: break
+            data+=chunk
+        after=os.fstat(fd)
+        if (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns)!=(
+            before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns): raise SystemExit(3)
+    finally: os.close(fd)
+    out=os.open(dest,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0),0o600)
+    try:
+        view=memoryview(data)
+        while view: view=view[os.write(out,view):]
+        os.fsync(out)
+    finally: os.close(out)
+    print(f'file:{stat.S_IMODE(before.st_mode):o}:{before.st_dev}:{before.st_ino}')
+finally: os.close(root)
+PY
+)" || return 1
+  case "$_out" in
+    absent) ENGINE_SURFACE_AGENTS_KIND="absent" ;;
+    file:*)
+      ENGINE_SURFACE_AGENTS_KIND="file"
+      IFS=: read -r _kind ENGINE_SURFACE_AGENTS_MODE _agents_dev _agents_ino <<EOF
+$_out
+EOF
+      ENGINE_SURFACE_AGENTS_ID="${_agents_dev}:${_agents_ino}"
+      ;;
+    *) return 1 ;;
+  esac
+  ENGINE_SURFACE_ROLLBACK_PENDING=1
+  return 0
+}
+
+restore_engine_surface() {
+  [ "$ENGINE_SURFACE_ROLLBACK_PENDING" -eq 1 ] || return 0
+  /usr/bin/python3 -I -B - "$REPO" "$REPO_IDENTITY" "$ENGINE_SURFACE_AGENTS_KIND" \
+    "$ENGINE_SURFACE_AGENTS_MODE" "$ENGINE_SURFACE_AGENTS_ID" "$ENGINE_SURFACE_SNAPSHOT_DIR/AGENTS.md" <<'PY' || return 1
+import errno, os, secrets, stat, sys
+repo, expected, kind, mode_text, original_id, source=sys.argv[1:7]
+dev,ino=(int(v) for v in expected.split(':',1))
+flags=os.O_RDONLY|getattr(os,'O_DIRECTORY',0)|getattr(os,'O_NOFOLLOW',0)
+root=os.open(repo,flags)
+tmp=''
+try:
+    rst=os.fstat(root)
+    if (rst.st_dev,rst.st_ino)!=(dev,ino): raise SystemExit(2)
+    try: current=os.stat('AGENTS.md',dir_fd=root,follow_symlinks=False)
+    except FileNotFoundError: current=None
+    if current is not None and not stat.S_ISREG(current.st_mode): raise SystemExit(3)
+    if kind=='absent':
+        if current is not None: os.unlink('AGENTS.md',dir_fd=root)
+        raise SystemExit(0)
+    if kind!='file': raise SystemExit(3)
+    src=os.open(source,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))
+    try:
+        sinfo=os.fstat(src)
+        if not stat.S_ISREG(sinfo.st_mode) or sinfo.st_size>2*1024*1024: raise SystemExit(3)
+        data=b''
+        while len(data)<=2*1024*1024:
+            chunk=os.read(src,65536)
+            if not chunk: break
+            data+=chunk
+    finally: os.close(src)
+    mode=int(mode_text,8)
+    original_dev,original_ino=(int(v) for v in original_id.split(':',1))
+    if (current is not None and (current.st_dev,current.st_ino)==(original_dev,original_ino)
+            and stat.S_IMODE(current.st_mode)==mode):
+        unchanged=os.open('AGENTS.md',os.O_RDONLY|getattr(os,'O_NOFOLLOW',0),dir_fd=root)
+        try:
+            unchanged_info=os.fstat(unchanged)
+            current_data=b''
+            while len(current_data)<=2*1024*1024:
+                chunk=os.read(unchanged,65536)
+                if not chunk: break
+                current_data+=chunk
+        finally: os.close(unchanged)
+        if ((unchanged_info.st_dev,unchanged_info.st_ino)==(original_dev,original_ino)
+                and stat.S_IMODE(unchanged_info.st_mode)==mode and current_data==data):
+            raise SystemExit(0)
+    for _ in range(20):
+        tmp='.AGENTS.md.rollback.'+secrets.token_hex(12)
+        try:
+            out=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0),0o600,dir_fd=root)
+            break
+        except FileExistsError: continue
+    else: raise SystemExit(3)
+    try:
+        view=memoryview(data)
+        while view: view=view[os.write(out,view):]
+        os.fchmod(out,mode); os.fsync(out)
+    finally: os.close(out)
+    os.rename(tmp,'AGENTS.md',src_dir_fd=root,dst_dir_fd=root)
+    tmp=''
+finally:
+    if tmp:
+        try: os.unlink(tmp,dir_fd=root)
+        except FileNotFoundError: pass
+    os.close(root)
+PY
+  ENGINE_SURFACE_ROLLBACK_PENDING=0
+  return 0
+}
+
+discard_engine_surface_snapshot() {
+  ENGINE_SURFACE_ROLLBACK_PENDING=0
+  if [ -n "$ENGINE_SURFACE_SNAPSHOT_DIR" ]; then
+    rm -rf "$ENGINE_SURFACE_SNAPSHOT_DIR"
+  fi
+  ENGINE_SURFACE_SNAPSHOT_DIR=""
+  ENGINE_SURFACE_AGENTS_KIND=""
+  ENGINE_SURFACE_AGENTS_MODE=""
+  ENGINE_SURFACE_AGENTS_ID=""
+}
+
+validate_add_registration_snapshot() {
+  local _line _trimmed _raw_name _matches=0 _current=""
+  if [ ! -f "$CONF" ]; then
+    [ "$EXISTING_ROW" -eq 0 ]
+    return
+  fi
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    _trimmed="$(_swarm_trim "$_line")"
+    case "$_trimmed" in ''|'#'*) continue ;; esac
+    _raw_name="$(_swarm_trim "${_line%%|*}")"
+    [ "$_raw_name" = "$NAME" ] || continue
+    _matches=$((_matches + 1))
+    _current="$_line"
+  done < "$CONF"
+  if [ "$EXISTING_ROW" -eq 1 ]; then
+    [ "$_matches" -eq 1 ] && [ "$_current" = "$EXISTING_ROW_RAW" ]
+  else
+    [ "$_matches" -eq 0 ]
+  fi
+}
+
+cleanup_swarm_add() {
+  _swarm_add_exit=$?
+  trap - EXIT
+  # Roll back authority and the one cross-engine repo surface while the global
+  # lifecycle lock is still held. Releasing the lock first lets a second
+  # adopter or launcher observe and take ownership of this transaction's
+  # uncommitted state.
+  if [ "$CODEX_ADOPTION_PENDING" -eq 1 ] && [ "$CODEX_RUNTIME_PREPARED" -eq 1 ]; then
+    if repo_identity_matches; then
+      codex_runtime_release_if_unreferenced || true
+    else
+      echo "swarm-add: CRITICAL — repo identity changed; refusing pathname-based Codex authority rollback for $REPO" >&2
+    fi
+  fi
+  if [ "$ENGINE_SURFACE_ROLLBACK_PENDING" -eq 1 ]; then
+    restore_engine_surface || \
+      echo "swarm-add: CRITICAL — failed to restore AGENTS.md after uncommitted engine migration" >&2
+  fi
+  discard_engine_surface_snapshot
+  while [ "${SWARM_CONF_LOCK_DEPTH:-0}" -gt 0 ]; do swarm_conf_lock_release; done
+  exit "$_swarm_add_exit"
+}
+trap cleanup_swarm_add EXIT
+
+acquire_engine_switch_lock() {
+  swarm_conf_lock_acquire "$CONF"
+}
+
+commit_engine_switch() {
+  local _rc _conf_digest _released_workspace=0
+  [ "$ENGINE_SWITCH_PENDING" -eq 1 ] || return 0
+  acquire_engine_switch_lock || return 1
+  if ! repo_identity_matches; then
+    echo "swarm-add: REFUSED — repo identity changed before engine commit." >&2
+    release_engine_switch_lock
+    return 2
+  fi
+  # Setup may be interactive and long-running. Re-check the process boundary
+  # under the commit lock immediately before changing the configured engine.
+  if ! engine_migration_quiescent; then
+    release_engine_switch_lock
+    return 2
+  fi
+  if ! repo_identity_matches; then
+    echo "swarm-add: REFUSED — repo identity changed during final engine quiescence check." >&2
+    release_engine_switch_lock
+    return 2
+  fi
+  _conf_digest="$(/usr/bin/python3 -I -B - "$CONF" <<'PY'
+import hashlib,sys
+print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())
+PY
+)" || {
+    release_engine_switch_lock
+    return 2
+  }
+
+  # A last-reference Codex -> Claude transition revokes service access before
+  # the row changes. Keep the cooperative config lock across both operations;
+  # the digest below also rejects a non-cooperating writer. If the row CAS
+  # loses, restore and verify Codex authority before returning failure.
+  if [ "$EXISTING_ENGINE" = "codex" ] && [ "$ENGINE" = "claude" ]; then
+    if ! swarm_codex_repo_ref_count "$REPO" "$NAME"; then
+      echo "swarm-add: REFUSED — malformed swarm.conf prevents a safe last-reference Codex release." >&2
+      release_engine_switch_lock
+      return 2
+    fi
+    if [ "$SWARM_CODEX_REPO_REF_COUNT" -eq 0 ]; then
+      if [ ! -x "$CODEX_RUNTIME_BIN" ] \
+         || ! "$CODEX_RUNTIME_BIN" release-workspace --repo "$REPO"; then
+        echo "swarm-add: REFUSED — could not release Codex workspace authority; engine remains codex." >&2
+        release_engine_switch_lock
+        return 2
+      fi
+      _released_workspace=1
+      CODEX_RUNTIME_PREPARED=0
+      if ! repo_identity_matches; then
+        echo "swarm-add: CRITICAL — repo identity changed during Codex authority release; engine remains uncommitted." >&2
+        release_engine_switch_lock
+        return 2
+      fi
+    fi
+  fi
+
+  /usr/bin/python3 -I -B - "$CONF" "$NAME" "$EXISTING_ENGINE" "$ENGINE" "$EXISTING_ROW_RAW" "$CHANNEL" "$_conf_digest" "$REPO" "$REPO_IDENTITY" "$CODEX_AUTH_POOL" <<'PY'
+import hashlib, os, stat, sys, tempfile
+path, name, old_engine, new_engine, expected, channel, expected_digest, canonical_repo, expected_identity, codex_auth_pool = sys.argv[1:11]
+expected_dev, expected_ino = (int(v) for v in expected_identity.split(':', 1))
+repo_flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_NOFOLLOW', 0)
+repo_fd = os.open(canonical_repo, repo_flags)
+def repo_matches():
+    try:
+        opened = os.fstat(repo_fd)
+        current = os.lstat(canonical_repo)
+    except OSError:
+        return False
+    return (stat.S_ISDIR(opened.st_mode) and not stat.S_ISLNK(current.st_mode)
+            and (opened.st_dev, opened.st_ino) == (expected_dev, expected_ino)
+            and (current.st_dev, current.st_ino) == (expected_dev, expected_ino)
+            and os.path.realpath(canonical_repo) == canonical_repo)
+if not repo_matches():
+    raise SystemExit(10)
+st = os.lstat(path)
+if not stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode):
+    raise SystemExit(2)
+if hashlib.sha256(open(path, 'rb').read()).hexdigest() != expected_digest:
+    raise SystemExit(9)
+with open(path, "r", newline="") as f:
+    original = f.read()
+lines = original.splitlines(keepends=True)
+named=[]
+for index, raw in enumerate(lines):
+    body=raw[:-2] if raw.endswith("\r\n") else (raw[:-1] if raw.endswith("\n") else raw)
+    if body.lstrip().startswith("#") or not body.strip():
+        continue
+    fields=body.split("|")
+    if fields[0].strip() == name:
+        named.append((index, body, fields, raw[len(body):]))
+if len(named) != 1:
+    raise SystemExit(3)
+index, body, fields, ending = named[0]
+if body != expected:
+    raise SystemExit(4)
+current = fields[6].strip() if len(fields) >= 7 and fields[6].strip() else "claude"
+if current != old_engine:
+    raise SystemExit(5)
+while len(fields) < 4:
+    fields.append(" ")
+current_channel=fields[3].strip()
+if current_channel and current_channel != channel:
+    raise SystemExit(7)
+if not current_channel:
+    if not channel.isdigit():
+        raise SystemExit(8)
+    fields[3] = " " + channel
+while len(fields) < 7:
+    fields.append(" ")
+fields[6] = " " + new_engine
+if new_engine == "codex":
+    while len(fields) < 8:
+        fields.append(" ")
+    fields[7] = " " + codex_auth_pool
+    fields[1] = " " + canonical_repo + " "
+lines[index] = "|".join(fields) + ending
+updated = "".join(lines)
+directory=os.path.dirname(path) or "."
+fd, tmp=tempfile.mkstemp(prefix=".swarm.conf.engine.", dir=directory)
+try:
+    with os.fdopen(fd, "w", newline="") as f:
+        f.writelines(lines)
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(tmp, stat.S_IMODE(st.st_mode))
+    # Best-effort whole-file CAS against non-cooperating writers in addition
+    # to the cooperative lock used by swarm-add migrations.
+    with open(path, "r", newline="") as f:
+        if f.read() != original:
+            raise SystemExit(6)
+    if not repo_matches():
+        raise SystemExit(10)
+    os.replace(tmp, path)
+    # Validate the repository namespace after the config replacement too. If
+    # it changed in the final window, restore the exact prior config while the
+    # lifecycle lock is still held rather than registering an unprepared inode.
+    if not repo_matches():
+        rfd, rollback = tempfile.mkstemp(prefix=".swarm.conf.engine.rollback.", dir=directory)
+        try:
+            with os.fdopen(rfd, "w", newline="") as f:
+                f.write(original)
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(rollback, stat.S_IMODE(st.st_mode))
+            with open(path, "r", newline="") as f:
+                if f.read() != updated:
+                    raise SystemExit(11)
+            os.replace(rollback, path)
+        finally:
+            try: os.unlink(rollback)
+            except FileNotFoundError: pass
+        raise SystemExit(10)
+except BaseException:
+    try: os.unlink(tmp)
+    except FileNotFoundError: pass
+    raise
+PY
+  _rc=$?
+  if [ "$_rc" -ne 0 ] && [ "$_released_workspace" -eq 1 ]; then
+    if ! swarm_codex_repo_ref_count "$REPO"; then
+      echo "swarm-add: CRITICAL — concurrent malformed config prevents safe Codex authority reconciliation; workspace access remains revoked." >&2
+      release_engine_switch_lock
+      return 2
+    fi
+    if [ "$SWARM_CODEX_REPO_REF_COUNT" -gt 0 ] && ! codex_runtime_prepare_and_verify; then
+      echo "swarm-add: CRITICAL — a Codex row still references the repo but workspace authority rollback failed; repair the dedicated runtime before launch." >&2
+      release_engine_switch_lock
+      return 2
+    fi
+  fi
+  release_engine_switch_lock
+  if [ "$_rc" -ne 0 ]; then
+    echo "swarm-add: REFUSED — swarm.conf row changed during setup (CAS rc=$_rc); engine remains uncommitted." >&2
+  fi
+  return "$_rc"
+}
+
+commit_new_row() {  # exact row text, after all setup verifies
+  local _row="$1" _rc
+  swarm_conf_lock_acquire "$CONF" || return 1
+  if ! repo_identity_matches; then
+    echo "swarm-add: REFUSED — repo identity changed before new-row commit." >&2
+    swarm_conf_lock_release
+    return 2
+  fi
+  /usr/bin/python3 -I -B - "$CONF" "$NAME" "$_row" "$REPO" "$REPO_IDENTITY" <<'PY'
+import os, stat, sys, tempfile
+path,name,row,repo,expected_identity=sys.argv[1:6]
+expected_dev,expected_ino=(int(v) for v in expected_identity.split(':',1))
+repo_flags=os.O_RDONLY|getattr(os,'O_DIRECTORY',0)|getattr(os,'O_NOFOLLOW',0)
+repo_fd=os.open(repo,repo_flags)
+def repo_matches():
+    try:
+        opened=os.fstat(repo_fd); current=os.lstat(repo)
+    except OSError:
+        return False
+    return (stat.S_ISDIR(opened.st_mode) and not stat.S_ISLNK(current.st_mode)
+            and (opened.st_dev,opened.st_ino)==(expected_dev,expected_ino)
+            and (current.st_dev,current.st_ino)==(expected_dev,expected_ino)
+            and os.path.realpath(repo)==repo)
+if not repo_matches(): raise SystemExit(5)
+st=os.lstat(path)
+if not stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode): raise SystemExit(2)
+with open(path,'r',newline='') as f: original=f.read()
+for raw in original.splitlines():
+    if raw.lstrip().startswith('#') or not raw.strip(): continue
+    if raw.split('|',1)[0].strip() == name: raise SystemExit(3)
+content=original
+if content and not content.endswith('\n'): content+='\n'
+content+=row+'\n'
+directory=os.path.dirname(path) or '.'
+fd,tmp=tempfile.mkstemp(prefix='.swarm.conf.add.',dir=directory)
+try:
+    with os.fdopen(fd,'w',newline='') as f:
+        f.write(content); f.flush(); os.fsync(f.fileno())
+    os.chmod(tmp,stat.S_IMODE(st.st_mode))
+    with open(path,'r',newline='') as f:
+        if f.read()!=original: raise SystemExit(4)
+    if not repo_matches(): raise SystemExit(5)
+    os.replace(tmp,path)
+    if not repo_matches():
+        rfd,rollback=tempfile.mkstemp(prefix='.swarm.conf.add.rollback.',dir=directory)
+        try:
+            with os.fdopen(rfd,'w',newline='') as f:
+                f.write(original); f.flush(); os.fsync(f.fileno())
+            os.chmod(rollback,stat.S_IMODE(st.st_mode))
+            with open(path,'r',newline='') as f:
+                if f.read()!=content: raise SystemExit(6)
+            os.replace(rollback,path)
+        finally:
+            try: os.unlink(rollback)
+            except FileNotFoundError: pass
+        raise SystemExit(5)
+except BaseException:
+    try: os.unlink(tmp)
+    except FileNotFoundError: pass
+    raise
+PY
+  _rc=$?
+  swarm_conf_lock_release
+  [ "$_rc" -eq 0 ] || echo "swarm-add: REFUSED — swarm.conf changed before new-row commit (rc=$_rc)." >&2
+  return "$_rc"
+}
+
 phase "Phase 0 — preflight"
 
 echo "  name:      $NAME"
 echo "  repo:      $REPO"
 echo "  type:      $EFFECTIVE_TYPE"
 [ -n "$PROFILE" ] && echo "  profile:   $PROFILE"
+echo "  engine:    $ENGINE"
+[ "$ENGINE" = "codex" ] && echo "  auth pool: $CODEX_AUTH_POOL"
 echo "  channel:   ${CHANNEL:-(will prompt in phase 2)}"
 echo "  token var: \$$TOK_VAR (in $TOKENS)"
 if [ "$EFFECTIVE_TYPE" = "engineering-cto" ]; then
@@ -546,6 +1373,30 @@ fi
 # ---------------------------------------------------------------------------
 phase "Phase 4 — Local config writes (idempotent)"
 
+# Treat onboarding, migration, and their repository/runtime side effects as one
+# cooperative lifecycle transaction. The lock starts before the first local
+# write and remains held through the engine-specific setup, runtime authority
+# preparation, and exact row commit. This prevents a concurrent up/remove/add
+# from observing partial adoption state. Token prompting remains outside the
+# lock so an unattended peer cannot be blocked by operator input.
+if ! swarm_conf_lock_acquire "$CONF"; then
+  echo "swarm-add: REFUSED — swarm.conf lifecycle mutation is already in progress; no local setup was changed." >&2
+  exit 2
+fi
+ADD_TRANSACTION_LOCK_HELD=1
+if ! validate_add_registration_snapshot; then
+  echo "swarm-add: REFUSED — the registration row changed before setup began; re-run against the current swarm.conf." >&2
+  exit 2
+fi
+if ! bind_repo_identity; then
+  echo "swarm-add: REFUSED — could not bind setup to the canonical repository identity: $REPO" >&2
+  exit 2
+fi
+if ! snapshot_engine_surface; then
+  echo "swarm-add: REFUSED — could not snapshot AGENTS.md before engine migration." >&2
+  exit 2
+fi
+
 # 4a) tokens.env -----------------------------------------------------------
 if [ -n "$TOKEN" ]; then
   # Create with mode 600 if absent.
@@ -591,9 +1442,10 @@ else
 fi
 
 # 4b) swarm.conf -----------------------------------------------------------
+NEW_ROW_PENDING=0
 if [ ! -e "$CONF" ]; then
   cat > "$CONF" <<'EOF'
-# swarm.conf — one repo per line:  session_name | /path/to/repo | TOKEN_VAR_NAME | CHANNEL_ID | GUILD_ID
+# swarm.conf — one repo per line:  session_name | /path/to/repo | TOKEN_VAR_NAME | CHANNEL_ID | GUILD_ID | ACCOUNT | ENGINE | CODEX_AUTH_POOL
 # session_name: short, no spaces (becomes tmux session "swarm-<name>")
 # TOKEN_VAR_NAME: name of the env var in tokens.env holding that repo's bot token
 # CHANNEL_ID: Discord channel id this swarm is bound to (used by swarm-watch.sh
@@ -602,6 +1454,8 @@ if [ ! -e "$CONF" ]; then
 #   widget to build discord://channels/<guild>/<channel> deep-links per the
 #   frozen swarm-status/v1 contract. Optional (blank → emits null, widget
 #   falls back to opening the app); fill it in as soon as you know it.
+# ACCOUNT is Claude-only. CODEX_AUTH_POOL is a distinct Codex-only selector;
+#   blank means the `default` pool declared in codex-profiles.json.
 #
 # Keep this list short to start — one or two repos. A single Max pool will not feed
 # more than ~1–2 teams running concurrently.
@@ -611,14 +1465,36 @@ EOF
 fi
 
 if [ "$STATE_CONF_PRESENT" -eq 1 ]; then
-  echo "  SKIP swarm.conf append (row for '$NAME' already present)"
+  if [ "$ENGINE_SWITCH_PENDING" -eq 1 ]; then
+    echo "  defer: ENGINE $EXISTING_ENGINE -> $ENGINE until target-engine setup verifies"
+  else
+    echo "  SKIP swarm.conf append (row for '$NAME' already present)"
+  fi
 else
-  # 5-field row. GUILD_ID is left blank — swarm-add doesn't yet prompt for it
-  # (a follow-up to this conformance change). The watcher emits null for an
-  # empty 5th column, which the swarm-status/v1 receiver tolerates during the
-  # transition window. Fill in by hand to unlock iOS-widget deep-links.
-  printf '%s | %s | %s | %s | \n' "$NAME" "$REPO" "$TOK_VAR" "$CHANNEL" >> "$CONF"
-  echo "  appended: '$NAME' -> swarm.conf  (GUILD_ID left blank — fill in by hand for deep-links)"
+  NEW_ROW_PENDING=1
+  echo "  defer: new '$NAME' row until engine-specific setup verifies"
+fi
+
+# AGENTS.md and the Codex ownership ledger are repository-scoped even though
+# engine selection is row-scoped. A Claude row sharing a physical repo with any
+# Codex row must leave the repo on the Codex surface; Claude ignores that
+# additional entrypoint, while rewriting it to the Claude pointer would make
+# every Codex sibling fail its exact managed-surface launch gate. Exclude the
+# row being migrated only when it is itself the current Codex reference.
+SURFACE_ENGINE="$ENGINE"
+if [ "$ENGINE" = "claude" ]; then
+  _surface_exclude=""
+  if [ "$ENGINE_SWITCH_PENDING" -eq 1 ] && [ "$EXISTING_ENGINE" = "codex" ]; then
+    _surface_exclude="$NAME"
+  fi
+  if ! swarm_codex_repo_ref_count "$REPO" "$_surface_exclude"; then
+    echo "swarm-add: REFUSED — malformed swarm.conf prevents safe shared-repo surface selection." >&2
+    exit 2
+  fi
+  if [ "$SWARM_CODEX_REPO_REF_COUNT" -gt 0 ]; then
+    SURFACE_ENGINE="codex"
+    echo "  shared repo: retaining Codex AGENTS/managed surfaces for $SWARM_CODEX_REPO_REF_COUNT configured Codex sibling(s)"
+  fi
 fi
 
 # 4c) swarm-init (already idempotent via manifest) ------------------------
@@ -634,6 +1510,11 @@ echo "  ----------------------------------------------------------------"
 INIT_ARGS=("$REPO")
 [ -n "$TYPE" ]    && INIT_ARGS+=(--type "$TYPE")
 [ -n "$PROFILE" ] && INIT_ARGS+=(--profile "$PROFILE")
+INIT_ARGS+=(--engine "$SURFACE_ENGINE")
+if ! repo_identity_matches; then
+  echo "swarm-add: REFUSED — repo identity changed before swarm-init; no row was committed." >&2
+  exit 2
+fi
 "$SCRIPT_DIR/swarm-init.sh" "${INIT_ARGS[@]}" | sed 's/^/    /'
 INIT_RC=${PIPESTATUS[0]}
 echo "  ----------------------------------------------------------------"
@@ -641,33 +1522,94 @@ if [ "$INIT_RC" -ne 0 ]; then
   echo "swarm-add: FATAL — swarm-init.sh failed (rc=$INIT_RC). Resolve and re-run." >&2
   exit 2
 fi
+if ! repo_identity_matches; then
+  echo "swarm-add: REFUSED — repo identity changed during swarm-init; no row was committed." >&2
+  exit 2
+fi
 
 # 4d) access.json ----------------------------------------------------------
-mkdir -p "$(dirname "$ACCESS")"
+( umask 077; mkdir -p "$(dirname "$ACCESS")" ) || {
+  echo "swarm-add: FATAL — could not create access.json parent" >&2; exit 2; }
 if [ ! -e "$ACCESS" ]; then
-  cat > "$ACCESS" <<EOF
+  ( umask 077; cat > "$ACCESS" <<EOF
 {
   "dmPolicy": "pairing",
+  "loginControlOwnerId": "$OWNER_ID",
   "allowFrom": ["$OWNER_ID"],
   "groups": {},
   "pending": {}
 }
 EOF
+  ) || { echo "swarm-add: FATAL — could not create $ACCESS" >&2; exit 2; }
   echo "  created: $ACCESS"
 fi
-python3 - "$ACCESS" "$CHANNEL" "$OWNER_ID" <<'PY'
-import json, os, sys
-path, channel, owner = sys.argv[1], sys.argv[2], sys.argv[3]
+if [ -L "$ACCESS" ] || [ ! -f "$ACCESS" ]; then
+  echo "swarm-add: FATAL — access.json must be a regular non-symlink: $ACCESS" >&2
+  exit 2
+fi
+if ! /usr/bin/python3 -I -B - "$ACCESS" "$CHANNEL" "$OWNER_ID" "$EFFECTIVE_TYPE" "$SWARM_BUS_CHANNEL" "$CTO_BUS_WATCHER_BOT_ID" "$ENGINE" <<'PY'
+import ctypes, errno, json, os, stat, sys, tempfile
+path, channel, owner, archetype, bus, watcher, engine = sys.argv[1:8]
+st=os.lstat(path)
+if (not stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode)
+        or st.st_uid != os.getuid()):
+    raise SystemExit('unsafe access.json owner/type')
+if engine == 'codex' and sys.platform == 'darwin':
+    libc=ctypes.CDLL(None,use_errno=True)
+    get_acl=libc.acl_get_fd_np
+    get_acl.argtypes=[ctypes.c_int,ctypes.c_int]
+    get_acl.restype=ctypes.c_void_p
+    free_acl=libc.acl_free
+    free_acl.argtypes=[ctypes.c_void_p]
+    for checked,is_dir in ((path,False),(os.path.dirname(path),True)):
+      flags=os.O_RDONLY | getattr(os,'O_NOFOLLOW',0)
+      if is_dir: flags |= getattr(os,'O_DIRECTORY',0)
+      fd=os.open(checked,flags)
+      try:
+        ctypes.set_errno(0)
+        acl=get_acl(fd,0x00000100)
+        if acl:
+            free_acl(acl)
+            raise SystemExit(f'access boundary must not have an extended ACL: {checked}; run chmod -N')
+        if ctypes.get_errno() not in (0,errno.ENOENT):
+            raise SystemExit(f'could not inspect access ACL: {checked}')
+      finally:
+        os.close(fd)
 with open(path) as f: cfg = json.load(f)
+if not isinstance(cfg, dict): raise SystemExit('access.json must be an object')
+top=cfg.setdefault("allowFrom", [])
+if not isinstance(top, list): raise SystemExit('top-level allowFrom must be a list')
+if owner not in top: top.append(owner)
+cfg["loginControlOwnerId"] = owner
 cfg.setdefault("groups", {})[channel] = {"requireMention": False, "allowFrom": [owner]}
-tmp = path + ".tmp"
-with open(tmp, "w") as f:
-    json.dump(cfg, f, indent=2); f.write("\n")
-os.replace(tmp, path)
+if archetype == 'cpo':
+    if bus == channel: raise SystemExit('CPO operator and bus channels must be distinct')
+    grp=cfg.setdefault("groups", {}).setdefault(bus, {"requireMention": False, "allowFrom": []})
+    if not isinstance(grp, dict): raise SystemExit('bus ACL group must be an object')
+    grp["requireMention"] = False
+    allow=grp.setdefault("allowFrom", [])
+    if not isinstance(allow, list): raise SystemExit('bus allowFrom must be a list')
+    for sender in (owner, watcher):
+        if sender not in allow: allow.append(sender)
+fd,tmp=tempfile.mkstemp(prefix='.access.json.',dir=os.path.dirname(path) or '.')
+try:
+    with os.fdopen(fd, "w") as f:
+        json.dump(cfg, f, indent=2); f.write("\n"); f.flush(); os.fsync(f.fileno())
+    os.chmod(tmp,0o600); os.replace(tmp,path)
+except BaseException:
+    try: os.unlink(tmp)
+    except FileNotFoundError: pass
+    raise
 with open(path) as f: json.load(f)  # validate the file we just wrote
 print("  access.json group for channel {} set "
       "(requireMention=false, allowFrom=[{}])".format(channel, owner))
+if archetype == 'cpo':
+    print("  access.json CPO bus group {} ensured (explicit owner + watcher)".format(bus))
 PY
+then
+  echo "swarm-add: FATAL — access.json reconciliation failed; engine row remains unchanged" >&2
+  exit 2
+fi
 
 # 4e) cto-watcher bus registration (engineering-cto only) ------------------
 #
@@ -694,6 +1636,7 @@ else
   CTO_WATCHER_CONFIG="$CTO_WATCHER_CONFIG" \
   CTO_BUS_WATCHER_BOT_ID="$CTO_BUS_WATCHER_BOT_ID" \
   SWARM_ACCESS_FILE="$ACCESS" \
+  SWARM_ACCESS_REQUIRE_NO_ACL="$([ "$ENGINE" = codex ] && printf 1 || printf 0)" \
     "$SCRIPT_DIR/swarm-bus-wire.sh" "$NAME" "$CHANNEL" "$BOT_USER_ID" \
     || { echo "swarm-add: FATAL — bus wiring (swarm-bus-wire.sh) failed" >&2; exit 2; }
 fi
@@ -707,9 +1650,13 @@ fi
 # set to TRUE. If that key is missing or false, the lead comes up with no
 # Discord tools — silent failure mode. Verify (and repair) here.
 # ---------------------------------------------------------------------------
+SETTINGS_FILE="$REPO/.claude/settings.json"
+if [ "$ENGINE" = "codex" ]; then
+  phase "Phase 5 — Claude channel-plugin verification  [SKIPPED: engine=codex]"
+  echo "  Codex uses the standalone codex-bridge daemon; .claude enabledPlugins is not its runtime gate."
+else
 phase "Phase 5 — verify enabledPlugins[\"$PLUGIN_KEY\"] === true"
 
-SETTINGS_FILE="$REPO/.claude/settings.json"
 if [ ! -f "$SETTINGS_FILE" ]; then
   echo "swarm-add: FATAL — $SETTINGS_FILE missing after swarm-init. Something is very wrong; investigate before bringing the swarm up." >&2
   exit 2
@@ -784,12 +1731,101 @@ else
   echo "swarm-add: FATAL — could not parse $SETTINGS_FILE: $VERIFY_OUT" >&2
   exit 2
 fi
+fi
+
+# Codex rows are committed only after the root-attested dedicated runtime can
+# both prepare and verify this exact canonical workspace. This deliberately
+# has no Claude branch: Claude keeps its historical native setup and launch
+# path byte-for-byte. A new/adopting Codex row is transactional; the EXIT trap
+# releases workspace authority if any later config CAS fails.
+if [ "$ENGINE" = "codex" ]; then
+  phase "Phase 5b — dedicated Codex runtime preparation + verification"
+  if [ "$EXISTING_ROW" -eq 0 ] \
+     || { [ "$ENGINE_SWITCH_PENDING" -eq 1 ] && [ "$EXISTING_ENGINE" != "codex" ]; }; then
+    CODEX_ADOPTION_PENDING=1
+  fi
+  if ! codex_runtime_prepare_and_verify; then
+    echo "swarm-add: FATAL — Codex runtime verification failed; no Codex row was committed." >&2
+    exit 2
+  fi
+  echo "  OK — dedicated runtime and workspace authority verified."
+fi
+
+# Commit an engine migration only after target-engine init and verification
+# have both succeeded. A failure before here leaves the old row truthful.
+if [ "$ENGINE_SWITCH_PENDING" -eq 1 ]; then
+  if ! commit_engine_switch; then
+    echo "swarm-add: FATAL — target-engine setup passed but ENGINE row commit failed; old engine remains configured" >&2
+    exit 2
+  fi
+  CODEX_ADOPTION_PENDING=0
+  discard_engine_surface_snapshot
+  echo "  committed: '$NAME' ENGINE $EXISTING_ENGINE -> $ENGINE in swarm.conf"
+fi
+if [ "$EXISTING_ROW" -eq 1 ] && [ "$ENGINE_SWITCH_PENDING" -eq 0 ] \
+   && [ "$ENGINE" = "codex" ] && [ "$CODEX_AUTH_POOL_EXPLICIT" -eq 1 ] \
+   && [ "$CODEX_AUTH_POOL" != "$EXISTING_CODEX_AUTH_POOL" ]; then
+  if ! validate_add_registration_snapshot \
+     || ! swarm_conf_set_codex_auth_pool "$CONF" "$NAME" "$CODEX_AUTH_POOL"; then
+    echo "swarm-add: FATAL — target setup passed but CODEX_AUTH_POOL update could not be committed" >&2
+    exit 2
+  fi
+  EXISTING_ROW_RAW="$(grep -E "^[[:space:]]*${NAME}[[:space:]]*\\|" "$CONF")"
+  echo "  committed: '$NAME' CODEX_AUTH_POOL $EXISTING_CODEX_AUTH_POOL -> $CODEX_AUTH_POOL in swarm.conf"
+fi
+if [ "$NEW_ROW_PENDING" -eq 1 ]; then
+  # GUILD_ID is left blank; preserve the historical five-field Claude row.
+  if [ "$ENGINE" = "codex" ]; then
+    _new_row="$(printf '%s | %s | %s | %s | | | codex | %s' "$NAME" "$REPO" "$TOK_VAR" "$CHANNEL" "$CODEX_AUTH_POOL")"
+  else
+    _new_row="$(printf '%s | %s | %s | %s | ' "$NAME" "$REPO" "$TOK_VAR" "$CHANNEL")"
+  fi
+  if ! commit_new_row "$_new_row"; then
+    echo "swarm-add: FATAL — setup passed but the new row could not be committed" >&2
+    exit 2
+  fi
+  CODEX_ADOPTION_PENDING=0
+  echo "  committed: new '$NAME' row -> swarm.conf (engine=$ENGINE)"
+fi
+
+# No engine/config transaction remains after the exact commit (or a verified
+# idempotent rerun). Release before printing the operator-only checklist.
+if [ "$ADD_TRANSACTION_LOCK_HELD" -eq 1 ]; then
+  swarm_conf_lock_release
+  ADD_TRANSACTION_LOCK_HELD=0
+fi
 
 # ---------------------------------------------------------------------------
 # PHASE 6 — Verification checklist (printed; operator runs it)
 # ---------------------------------------------------------------------------
 phase "Phase 6 — Verification checklist"
 
+if [ "$ENGINE" = "codex" ]; then
+cat <<EOF
+
+Standup is complete on disk. Confirm the Codex lead:
+
+  1) Bring it up (auth preflight requires a ChatGPT subscription login):
+       bin/swarm-up.sh up $NAME
+
+  2) Smoke-test #<your-channel> with an allowed sender. The canonical channel
+     allowFrom is reconciled into the Codex state dir on every launch; launch
+     fails closed if that list is empty. This first successful turn creates the
+     configured channel's resumable thread.
+
+  3) Open the supported operator view:
+       bin/swarm-view.sh $NAME
+     Once the configured channel has a persisted thread and the manager/facade
+     proofs are healthy, this opens the native same-thread Codex TUI through the
+     read-only per-swarm gateway. Before that first successful turn, or whenever
+     a proof is unavailable, it truthfully opens the bounded redacted fallback.
+
+  4) Check the external heartbeat/status feed on the next watcher tick.
+
+Troubleshooting: inspect $HOME/.codex/channels/discord-$NAME/runtime.json and
+events.jsonl through swarm-view; never type into or interrupt the daemon pane.
+EOF
+else
 cat <<EOF
 
 Standup is complete on the host. Confirm the swarm is actually live with
@@ -856,6 +1892,7 @@ TROUBLESHOOTING
         tmux send-keys -t swarm-$NAME Enter
 
 EOF
+fi
 
 # ---------------------------------------------------------------------------
 # PHASE 7 — Summary + alias re-source reminder
@@ -868,15 +1905,26 @@ else
   BUS_SUMMARY="    bus:     n/a ($EFFECTIVE_TYPE is not a CTO)"
 fi
 
+if [ "$ENGINE" = "codex" ]; then
+  ACCESS_SUMMARY="$ACCESS  (group $CHANNEL -> owner $OWNER_ID, direct bound-channel allowlist; requireMention=false)"
+  PLUGIN_SUMMARY="n/a (codex-bridge daemon; Claude channel plugin not used)"
+  ALIAS_SUMMARY="open the supported Codex operator view"
+else
+  ACCESS_SUMMARY="$ACCESS  (group $CHANNEL -> owner $OWNER_ID, mention-gated)"
+  PLUGIN_SUMMARY="$PLUGIN_KEY enabled in $SETTINGS_FILE"
+  ALIAS_SUMMARY="attach-or-launch this swarm"
+fi
+
 cat <<EOF
 
   Swarm '$NAME' registered.
     repo:    $REPO
     type:    $EFFECTIVE_TYPE${PROFILE:+  (profile: $PROFILE)}
+    engine:  $ENGINE
     channel: $CHANNEL
     bot:     \$$TOK_VAR  (token in $TOKENS, chmod 600, gitignored)
-    access:  $ACCESS  (group $CHANNEL -> owner $OWNER_ID, mention-gated)
-    plugin:  $PLUGIN_KEY enabled in $SETTINGS_FILE
+    access:  $ACCESS_SUMMARY
+    plugin:  $PLUGIN_SUMMARY
 $BUS_SUMMARY
 
   A per-swarm shell alias 'swarm-$NAME' is now generated by
@@ -886,7 +1934,7 @@ $BUS_SUMMARY
        source ~/.zshrc        # (or open a new terminal)
 
   Then:
-       swarm-$NAME            # attach-or-launch this swarm
+       swarm-$NAME            # $ALIAS_SUMMARY
 
   The launchd watcher (com.qofi.swarm-watch) picks the new conf row up
   on its next fire — nothing else to wire.

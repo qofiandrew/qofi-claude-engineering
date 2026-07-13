@@ -72,17 +72,39 @@ done
 [ -z "$NAME" ] && { echo "swarm-restart: missing <name>" >&2; usage 1; }
 
 # ---------------------------------------------------------------------------
-# Validate <name> against swarm.conf.
+# Resolve exactly one valid <name> row from swarm.conf.
 # ---------------------------------------------------------------------------
 list_swarm_names() {
   grep -vE '^[[:space:]]*(#|$)' "$CONF" \
     | awk -F'|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $1); if ($1 != "") print $1 }'
 }
-name_in_conf() {
-  list_swarm_names | grep -qxF "$1"
-}
 
-if ! name_in_conf "$NAME"; then
+# Do not validate the name with raw awk and then silently retain the historical
+# ENGINE=claude initializer when the canonical parser rejects field 7. That
+# shape can stop a live session and only then discover that `up` cannot launch
+# the malformed row. Count raw matching names (so a rejected duplicate cannot
+# disappear), but derive every lifecycle field only from the canonical parser.
+REPO=""
+ACCOUNT=""
+ENGINE=""
+FOUND=0
+ROW_INVALID=0
+while IFS= read -r _line || [ -n "$_line" ]; do
+  _trimmed="$(_swarm_trim "$_line")"
+  case "$_trimmed" in ''|'#'*) continue ;; esac
+  _raw_name="$(_swarm_trim "${_line%%|*}")"
+  [ "$_raw_name" = "$NAME" ] || continue
+  FOUND=$((FOUND + 1))
+  if ! swarm_conf_parse_line "$_line"; then
+    ROW_INVALID=1
+    continue
+  fi
+  REPO="$SWARM_CONF_F_REPO"
+  ACCOUNT="$SWARM_CONF_F_ACCOUNT"
+  ENGINE="$SWARM_CONF_F_ENGINE"
+done < "$CONF"
+
+if [ "$FOUND" -eq 0 ]; then
   {
     echo "swarm-restart: no swarm named '$NAME' in $CONF"
     echo "configured swarms:"
@@ -90,33 +112,31 @@ if ! name_in_conf "$NAME"; then
   } >&2
   exit 1
 fi
-
-# Pull this swarm's repo path from swarm.conf so we can probe its activity.
-REPO="$(grep -vE '^[[:space:]]*(#|$)' "$CONF" \
-  | awk -F'|' -v n="$NAME" '
-      { v=$1; gsub(/^[ \t]+|[ \t]+$/, "", v);
-        if (v == n) { r=$2; gsub(/^[ \t]+|[ \t]+$/, "", r); print r; exit } }
-  ')"
+if [ "$FOUND" -ne 1 ]; then
+  echo "swarm-restart: REFUSED — swarm.conf has $FOUND rows named '$NAME'; no session was stopped." >&2
+  exit 2
+fi
+if [ "$ROW_INVALID" -ne 0 ] || [ -z "$ENGINE" ]; then
+  echo "swarm-restart: REFUSED — the configured row for '$NAME' is malformed; no session was stopped." >&2
+  exit 2
+fi
 [ -z "$REPO" ] && { echo "swarm-restart: could not resolve repo path for '$NAME' in $CONF" >&2; exit 1; }
 
-# Resolve THIS swarm's projects dir from ITS account (field 6). We re-parse the
-# matching conf row through swarm_conf_parse_line (the single source of truth for
-# the column schema) to read the account label, then swarm_account_resolve — the
-# SOLE constructor of account paths — maps it to the projects dir. Empty account
+# Resolve THIS swarm's projects dir from ITS account (field 6). The validated
+# target scan above read the account label through swarm_conf_parse_line (the
+# single source of truth for the column schema); swarm_account_resolve — the SOLE
+# constructor of account paths — now maps it to the projects dir. Empty account
 # → ${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects} (default, byte-identical to
 # the pre-partition global); labeled → $HOME/.claude-accounts/<label>/projects.
 # Resolving from NAME's OWN account is what keeps the WORKING safety rail
 # (repo_activity below) from reading another account's transcripts — which would
 # make a working swarm look idle and let restart tear it down.
-ACCOUNT=""
-while IFS= read -r _line; do
-  swarm_conf_parse_line "$_line" || continue
-  if [ "$SWARM_CONF_F_NAME" = "$NAME" ]; then
-    ACCOUNT="$SWARM_CONF_F_ACCOUNT"
-    break
-  fi
-done < <(grep -vE '^[[:space:]]*(#|$)' "$CONF")
-if swarm_account_resolve "$ACCOUNT"; then
+if [ "$ENGINE" = "codex" ]; then
+  # Codex does not use a Claude account/projects dir. Its atomic runtime state
+  # below is the sole working rail; leave this empty so the Claude branch can
+  # never accidentally inspect a stale pre-Codex transcript.
+  CLAUDE_PROJECTS=""
+elif swarm_account_resolve "$ACCOUNT"; then
   CLAUDE_PROJECTS="$SWARM_ACCT_PROJECTS_DIR"
 else
   # Invalid account label in this swarm's conf row → we cannot determine its
@@ -143,6 +163,28 @@ fi
 
 if [ "$ALIVE" -eq 0 ]; then
   echo "swarm-restart: no live session '$SESS' — restart degenerates to up only"
+elif [ "$ENGINE" = "codex" ]; then
+  if swarm_codex_runtime_read "$NAME"; then
+    if [ "$SWARM_CODEX_RUNTIME_ACTIVE" -eq 1 ] || \
+       [ "$SWARM_CODEX_RUNTIME_QUEUE_DEPTH" -gt 0 ] || \
+       [ -n "$SWARM_CODEX_RUNTIME_CHILD_PID" ]; then
+      if [ "$FORCE" -eq 1 ]; then
+        echo "swarm-restart: WARNING — Codex swarm '$NAME' is ACTIVE (active=$SWARM_CODEX_RUNTIME_ACTIVE, queued=$SWARM_CODEX_RUNTIME_QUEUE_DEPTH, child=${SWARM_CODEX_RUNTIME_CHILD_PID:-none}). Proceeding because --force; in-flight work may be lost." >&2
+      else
+        echo "swarm-restart: REFUSED — Codex swarm '$NAME' is ACTIVE (active=$SWARM_CODEX_RUNTIME_ACTIVE, queued=$SWARM_CODEX_RUNTIME_QUEUE_DEPTH, child=${SWARM_CODEX_RUNTIME_CHILD_PID:-none}). Wait for runtime.json to report idle, or pass --force." >&2
+        exit 2
+      fi
+    else
+      echo "swarm-restart: Codex swarm '$NAME' runtime is healthy and idle — safe to cycle"
+    fi
+  else
+    if [ "$FORCE" -eq 1 ]; then
+      echo "swarm-restart: WARNING — Codex runtime state is $SWARM_CODEX_RUNTIME_STATUS ($SWARM_CODEX_RUNTIME_FILE); proceeding because --force." >&2
+    else
+      echo "swarm-restart: REFUSED — live Codex session has $SWARM_CODEX_RUNTIME_STATUS runtime state ($SWARM_CODEX_RUNTIME_FILE). Cannot prove a clean boundary; pass --force only after inspecting the pane." >&2
+      exit 2
+    fi
+  fi
 elif [ ! -d "$CLAUDE_PROJECTS" ]; then
   echo "swarm-restart: NOTE — Claude projects dir not found ($CLAUDE_PROJECTS); cannot probe activity. Proceeding."
 else
@@ -196,10 +238,30 @@ fi
 # ---------------------------------------------------------------------------
 echo ""
 echo "swarm-restart: cycling '$NAME'"
-"$SWARM_UP" down "$NAME"
-"$SWARM_UP" up   "$NAME"
+if [ "$ALIVE" -eq 1 ]; then
+  "$SWARM_UP" down "$NAME"; down_rc=$?
+  if [ "$down_rc" -ne 0 ]; then
+    echo "swarm-restart: ERROR — down failed for '$NAME'; refusing to run up over an unknown live state." >&2
+    exit "$down_rc"
+  fi
+fi
+"$SWARM_UP" up "$NAME"; up_rc=$?
+if [ "$up_rc" -ne 0 ]; then
+  echo "swarm-restart: ERROR — relaunch failed for '$NAME' (exit $up_rc). The swarm may be down; inspect the swarm-up error and retry." >&2
+  exit "$up_rc"
+fi
 
-# Dev-channels racy-prompt reminder — same text as swarm-attach.sh's heads-up.
+# Engine-specific operator handoff. The Codex primary pane is a daemon, while
+# the historical Claude path retains its dev-channels prompt reminder exactly.
+if [ "$ENGINE" = "codex" ]; then
+cat <<EOF
+
+swarm-restart: Codex lead relaunched. Open the supported operator view with:
+
+    "$SCRIPT_DIR/swarm-view.sh" $NAME
+
+EOF
+else
 cat <<EOF
 
 swarm-restart: heads-up — if the dev-channels prompt is still waiting on
@@ -208,3 +270,4 @@ swarm-up.sh can race; this is the manual clear):
 
     tmux send-keys -t $SESS Enter
 EOF
+fi

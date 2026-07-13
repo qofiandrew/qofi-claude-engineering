@@ -25,21 +25,45 @@ import {
   ButtonBuilder,
   ButtonStyle,
   ActionRowBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
   type Message,
   type Attachment,
   type Interaction,
 } from 'discord.js'
 import { forwardedContent, safeAttName } from './normalize.ts'
 import { parseBoundChannels, isBoundDrop } from './binding.ts'
+import { loadSendableAttachment } from './sendable.ts'
+import {
+  LoginControlStore,
+  parseLoginControlCustomId,
+} from './login-control.ts'
 import { randomBytes } from 'crypto'
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
+import { chmodSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
-import { join, sep } from 'path'
+import { join } from 'path'
 
-const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'discord')
+const CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')
+const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(CLAUDE_CONFIG_DIR, 'channels', 'discord')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
 const APPROVED_DIR = join(STATE_DIR, 'approved')
 const ENV_FILE = join(STATE_DIR, '.env')
+// Pin the credential control plane beneath the exact Discord state root. Bun
+// can load a repository .env before this module starts, so an ambient override
+// must not redirect OAuth material into model-readable project storage.
+const LOGIN_CONTROL_DIR = join(STATE_DIR, 'login-control')
+// Secure reauth is additive to the ordinary Discord channel. A legacy or
+// damaged state directory must not take the whole bridge offline: if its
+// private control boundary cannot be established, keep chat serving but do
+// not accept login interactions or publish the readiness marker the relay
+// requires before it will touch /login.
+let loginControl: LoginControlStore | null = null
+try {
+  loginControl = new LoginControlStore(LOGIN_CONTROL_DIR)
+} catch {
+  process.stderr.write('discord channel: secure reauth unavailable; continuing without login-control readiness\n')
+}
 
 // Load ~/.claude/channels/discord/.env into process.env. Real env wins.
 // Plugin-spawned servers don't get an env block — this is where the token lives.
@@ -116,6 +140,8 @@ type GroupPolicy = {
 
 type Access = {
   dmPolicy: 'pairing' | 'allowlist' | 'disabled'
+  /** Host-provisioned operator principal for the private /login controller. */
+  loginControlOwnerId?: string
   allowFrom: string[]
   /** Keyed on channel ID (snowflake), not guild ID. One entry per guild channel. */
   groups: Record<string, GroupPolicy>
@@ -144,28 +170,15 @@ function defaultAccess(): Access {
 const MAX_CHUNK_LIMIT = 2000
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 
-// reply's files param takes any path. .env is ~60 bytes and ships as an
-// upload. Claude can already Read+paste file contents, so this isn't a new
-// exfil channel for arbitrary paths — but the server's own state is the one
-// thing Claude has no reason to ever send.
-function assertSendable(f: string): void {
-  let real, stateReal: string
-  try {
-    real = realpathSync(f)
-    stateReal = realpathSync(STATE_DIR)
-  } catch { return } // statSync will fail properly; or STATE_DIR absent → nothing to leak
-  const inbox = join(stateReal, 'inbox')
-  if (real.startsWith(stateReal + sep) && !real.startsWith(inbox + sep)) {
-    throw new Error(`refusing to send channel state: ${f}`)
-  }
-}
-
 function readAccessFile(): Access {
   try {
     const raw = readFileSync(ACCESS_FILE, 'utf8')
     const parsed = JSON.parse(raw) as Partial<Access>
     return {
       dmPolicy: parsed.dmPolicy ?? 'pairing',
+      loginControlOwnerId: typeof parsed.loginControlOwnerId === 'string'
+        ? parsed.loginControlOwnerId
+        : undefined,
       allowFrom: parsed.allowFrom ?? [],
       groups: parsed.groups ?? {},
       pending: parsed.pending ?? {},
@@ -248,10 +261,12 @@ async function gate(msg: Message): Promise<GateResult> {
   const pruned = pruneExpired(access)
   if (pruned) saveAccess(access)
 
-  if (access.dmPolicy === 'disabled') return { action: 'drop' }
-
   const senderId = msg.author.id
   const isDM = msg.channel.type === ChannelType.DM
+
+  // Historical emergency kill switch: `disabled` stops every ingress path,
+  // including configured guild channels. Keep this before the DM/guild split.
+  if (access.dmPolicy === 'disabled') return { action: 'drop' }
 
   if (isDM) {
     if (access.allowFrom.includes(senderId)) return { action: 'deliver', access }
@@ -654,14 +669,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const ch = await fetchAllowedChannel(chat_id)
         if (!('send' in ch)) throw new Error('channel is not sendable')
 
-        for (const f of files) {
-          assertSendable(f)
-          const st = statSync(f)
-          if (st.size > MAX_ATTACHMENT_BYTES) {
-            throw new Error(`file too large: ${f} (${(st.size / 1024 / 1024).toFixed(1)}MB, max 25MB)`)
-          }
-        }
         if (files.length > 10) throw new Error('Discord allows max 10 attachments per message')
+        const attachments = files.map(file => loadSendableAttachment(file, STATE_DIR, MAX_ATTACHMENT_BYTES))
 
         const access = loadAccess()
         const limit = Math.max(1, Math.min(access.textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
@@ -678,7 +687,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
               (replyMode === 'all' || i === 0)
             const sent = await ch.send({
               content: chunks[i],
-              ...(i === 0 && files.length > 0 ? { files } : {}),
+              ...(i === 0 && attachments.length > 0 ? { files: attachments } : {}),
               ...(shouldReplyTo
                 ? { reply: { messageReference: reply_to, failIfNotExists: false } }
                 : {}),
@@ -768,9 +777,11 @@ await mcp.connect(new StdioServerTransport())
 // When Claude Code closes the MCP connection, stdin gets EOF. Without this
 // the gateway stays connected as a zombie holding resources.
 let shuttingDown = false
+let loginControlHeartbeat: ReturnType<typeof setInterval> | undefined
 function shutdown(): void {
   if (shuttingDown) return
   shuttingDown = true
+  if (loginControlHeartbeat) clearInterval(loginControlHeartbeat)
   process.stderr.write('discord channel: shutting down\n')
   setTimeout(() => process.exit(0), 2000)
   void Promise.resolve(client.destroy()).finally(() => process.exit(0))
@@ -784,10 +795,143 @@ client.on('error', err => {
   process.stderr.write(`discord channel: client error: ${err}\n`)
 })
 
+const DISCORD_SNOWFLAKE_RE = /^[0-9]{1,24}$/
+
+function configuredLoginControlOwner(access: Access): string | undefined {
+  // New installations pin the operator explicitly. For an upgraded ACL that
+  // predates the field, one and only one top-level numeric principal is an
+  // unambiguous fail-safe migration path. Multiple principals require the
+  // host-side provisioning command to pin one; no ambient repo env is trusted.
+  if (access.loginControlOwnerId !== undefined) {
+    return DISCORD_SNOWFLAKE_RE.test(access.loginControlOwnerId)
+      && access.allowFrom.includes(access.loginControlOwnerId)
+      ? access.loginControlOwnerId
+      : undefined
+  }
+  const candidates = [...new Set(access.allowFrom.filter(id => DISCORD_SNOWFLAKE_RE.test(id)))]
+  return candidates.length === 1 ? candidates[0] : undefined
+}
+
+function loginControlOwnerAllowed(access: Access, channelId: string, ownerId: string): boolean {
+  const group = access.groups[channelId]
+  return configuredLoginControlOwner(access) === ownerId
+    && access.dmPolicy !== 'disabled'
+    && access.allowFrom.includes(ownerId)
+    && Array.isArray(group?.allowFrom)
+    && group.allowFrom.includes(ownerId)
+}
+
+function loginControlBinding(
+  nonce: string,
+  interaction: Interaction,
+  messageId?: string,
+) {
+  const access = loadAccess()
+  const canonicalOwnerId = configuredLoginControlOwner(access)
+  return {
+    nonce,
+    ownerId: interaction.user.id,
+    canonicalOwnerId,
+    channelId: interaction.channelId ?? '',
+    botUserId: client.user?.id ?? '',
+    messageId,
+    ownerAllowed: interaction.channelId !== null
+      && loginControlOwnerAllowed(access, interaction.channelId, interaction.user.id),
+    boundChannels: BOUND_CHANNELS,
+  }
+}
+
+function activeLoginControl(): LoginControlStore {
+  if (!loginControl) throw new Error('secure reauth unavailable')
+  return loginControl
+}
+
 // Button-click handler for permission requests. customId is
 // `perm:allow:<id>`, `perm:deny:<id>`, or `perm:more:<id>`.
 // Security mirrors the text-reply path: allowFrom must contain the sender.
 client.on('interactionCreate', async (interaction: Interaction) => {
+  if (interaction.isButton()) {
+    const control = parseLoginControlCustomId(interaction.customId)
+    if (control?.action === 'open') {
+      try {
+        const request = activeLoginControl().readAuthorizedRequest(
+          loginControlBinding(control.nonce, interaction, interaction.message.id),
+        )
+        const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder()
+            .setStyle(ButtonStyle.Link)
+            .setLabel('Open Claude login')
+            .setURL(request.oauth_url),
+          new ButtonBuilder()
+            .setStyle(ButtonStyle.Primary)
+            .setLabel('Enter paste-back code')
+            .setCustomId(`qofi-login:code:v1:${control.nonce}`),
+        )
+        await interaction.reply({
+          content: 'This secure login link is visible only to you. After authorization, use the second button only if the browser displays a paste-back code.',
+          components: [row],
+          ephemeral: true,
+        })
+      } catch {
+        await interaction.reply({
+          content: 'This secure login request is unauthorized, unavailable, or expired.',
+          ephemeral: true,
+        }).catch(() => {})
+      }
+      return
+    }
+    if (control?.action === 'code') {
+      try {
+        // The ephemeral message has a different ID from the public generic
+        // prompt.  The nonce is a capability shown only after the exact public
+        // message passed the owner/channel/message binding above; re-check all
+        // remaining request bindings before rendering the modal.
+        activeLoginControl().readAuthorizedRequest(loginControlBinding(control.nonce, interaction))
+        const input = new TextInputBuilder()
+          .setCustomId('authorization_code')
+          .setLabel('Full browser code (authorization#state)')
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(true)
+          .setMinLength(3)
+          .setMaxLength(2000)
+        const modal = new ModalBuilder()
+          .setCustomId(`qofi-login:submit:v1:${control.nonce}`)
+          .setTitle('Complete Claude Code login')
+          .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input))
+        await interaction.showModal(modal)
+      } catch {
+        await interaction.reply({
+          content: 'This secure login request is unauthorized, unavailable, or expired.',
+          ephemeral: true,
+        }).catch(() => {})
+      }
+      return
+    }
+  }
+
+  if (interaction.isModalSubmit()) {
+    const control = parseLoginControlCustomId(interaction.customId)
+    if (control?.action === 'submit') {
+      try {
+        const code = interaction.fields.getTextInputValue('authorization_code')
+        activeLoginControl().acceptCode(loginControlBinding(control.nonce, interaction), code)
+        await interaction.reply({
+          content: 'Code accepted by the host login relay. It was not sent to the swarm.',
+          ephemeral: true,
+        })
+      } catch {
+        // Never include the submitted value or an exception string in Discord
+        // or process logs.  A duplicate is also a refusal: first valid modal
+        // publication wins and cannot be replayed.
+        await interaction.reply({
+          content: 'Code rejected: invalid, expired, unauthorized, or already submitted. Re-open the secure login prompt and try again.',
+          ephemeral: true,
+        }).catch(() => {})
+      }
+      return
+    }
+  }
+
   if (!interaction.isButton()) return
   const m = /^perm:(allow|deny|more):([a-km-z]{5})$/.exec(interaction.customId)
   if (!m) return
@@ -957,6 +1101,32 @@ async function handleInbound(msg: Message): Promise<void> {
 }
 
 client.once('ready', c => {
+  // A fresh, per-channel v1 marker is the relay's proof that this bridge knows
+  // how to keep OAuth URLs and modal submissions out of model ingress.  An old
+  // plugin never publishes it, so the host refuses before touching /login.
+  if (loginControl) {
+    try {
+      loginControl.publishReady(c.user.id, BOUND_CHANNELS)
+      loginControlHeartbeat = setInterval(() => {
+        if (!client.isReady() || client.user?.id !== c.user.id) return
+        try {
+          activeLoginControl().publishReady(c.user.id, BOUND_CHANNELS)
+        } catch {
+          // Boundary drift disables reauth for the rest of this process. The
+          // relay independently revalidates the directory and readiness file,
+          // so it fails closed even before the old marker ages out.
+          loginControl = null
+          if (loginControlHeartbeat) clearInterval(loginControlHeartbeat)
+          loginControlHeartbeat = undefined
+          process.stderr.write('discord channel: secure reauth disabled after login-control boundary failure\n')
+        }
+      }, 30_000)
+      loginControlHeartbeat.unref()
+    } catch {
+      loginControl = null
+      process.stderr.write('discord channel: secure reauth readiness unavailable; continuing without it\n')
+    }
+  }
   process.stderr.write(`discord channel: gateway connected as ${c.user.tag}\n`)
 })
 

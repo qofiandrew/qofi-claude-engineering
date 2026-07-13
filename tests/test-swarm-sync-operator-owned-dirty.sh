@@ -17,6 +17,9 @@
 #   INTEGRATION (swarm-sync.sh end-to-end):
 #     (A) dirty ONLY under products/ -> PROCEEDS (no REFUSED), syncs the doctrine,
 #         and NEVER stages/commits the products/ dirt
+#     (A2) already-staged products/ work remains staged and outside the sync commit
+#     (A3) configured sync retains the lifecycle lock through its Git commit
+#     (A4) the real engineering manifest's untracked .git hook is not a commit pathspec
 #     (B) dirty on a managed doctrine file -> still REFUSES, commits nothing
 #     (C) --force still overrides a managed-path dirty refusal
 #
@@ -139,6 +142,64 @@ SYNC_TOUCHED_PROD="$(git -C "$REPO" log -1 --name-only --pretty=format:'' 2>/dev
 assert_eq "0" "$SYNC_TOUCHED_PROD" "the sync commit contains NO products/ files"
 assert_has "$(git -C "$REPO" log -1 --name-only --pretty=format:'')" "DOC.md" "the sync commit DID include the doctrine file DOC.md"
 rm -rf "$REPO/products/gamma"; reset_repo
+
+echo ""
+echo "=== INTEGRATION (A2): pre-staged operator work stays staged and uncommitted ==="
+printf 'DOCTRINE v2.1 (bumped)\n' > "$FAKE_HOME/templates/test-oo/doc.md"
+printf 'pre-staged operator edit\n' >> "$REPO/products/.keep"
+git -C "$REPO" add -- products/.keep
+OPERATOR_INDEX_BEFORE="$(git -C "$REPO" show :products/.keep)"
+OUT="$("$ROOT/bin/swarm-sync.sh" "$REPO" 2>&1)"; RC=$?
+assert_eq "0" "$RC" "sync succeeds with pre-staged operator-owned work"
+assert_eq "DOCTRINE v2.1 (bumped)" "$(cat "$REPO/DOC.md")" "managed doctrine still syncs beside a staged operator edit"
+assert_lacks "$(git -C "$REPO" log -1 --name-only --pretty=format:'')" "products/.keep" "sync commit excludes the pre-staged operator path"
+assert_has "$(git -C "$REPO" diff --cached --name-only)" "products/.keep" "pre-staged operator path remains staged after sync"
+assert_eq "$OPERATOR_INDEX_BEFORE" "$(git -C "$REPO" show :products/.keep)" "operator index bytes are preserved"
+assert_lacks "$(git -C "$REPO" show HEAD:products/.keep)" "pre-staged operator edit" "sync HEAD retains the prior operator-owned content"
+git -C "$REPO" reset --hard -q HEAD
+
+echo ""
+echo "=== INTEGRATION (A3): configured sync holds lifecycle lock through commit ==="
+printf 'DOCTRINE v2.2 (bumped)\n' > "$FAKE_HOME/templates/test-oo/doc.md"
+printf 'oo-row | %s | BOT_OO | 123 | | | claude\n' "$REPO" > "$FAKE_HOME/swarm.conf"
+LOCK_MARKER="$FAKE_HOME/lock-observed"
+mkdir -p "$REPO/.git/hooks"
+cat > "$REPO/.git/hooks/pre-commit" <<EOF
+#!/bin/sh
+[ -d '$FAKE_HOME/swarm.conf.mutation.lock' ] || exit 42
+: > '$LOCK_MARKER'
+EOF
+chmod +x "$REPO/.git/hooks/pre-commit"
+OUT="$("$ROOT/bin/swarm-sync.sh" oo-row 2>&1)"; RC=$?
+assert_eq "0" "$RC" "configured sync commits while holding the lifecycle lock"
+if [ -f "$LOCK_MARKER" ]; then
+  pass "pre-commit observed the lifecycle lock"
+else
+  fail "pre-commit did not observe the lifecycle lock"
+fi
+assert_eq "DOCTRINE v2.2 (bumped)" "$(cat "$REPO/DOC.md")" "configured sync committed the intended managed surface"
+rm -f "$REPO/.git/hooks/pre-commit" "$LOCK_MARKER"
+
+echo ""
+echo "=== INTEGRATION (A4): real engineering git-hook target stays outside commit pathset ==="
+ENG_REPO="$FAKE_HOME/engineering-manifest-repo"
+mkdir -p "$ENG_REPO"
+git -C "$ENG_REPO" init -q
+git -C "$ENG_REPO" config user.email "test@example.com"
+git -C "$ENG_REPO" config user.name "Test"
+SWARM_HOME="$ROOT" "$ROOT/bin/swarm-init.sh" "$ENG_REPO" --type engineering-cto >/dev/null 2>&1
+git -C "$ENG_REPO" add -A && git -C "$ENG_REPO" commit -q -m "engineering baseline"
+printf 'intentionally stale doctrine\n' > "$ENG_REPO/CLAUDE.md"
+git -C "$ENG_REPO" add CLAUDE.md && git -C "$ENG_REPO" commit -q -m "make doctrine stale"
+OUT="$(SWARM_HOME="$ROOT" "$ROOT/bin/swarm-sync.sh" "$ENG_REPO" 2>&1)"; RC=$?
+assert_eq "0" "$RC" "real engineering manifest sync commits successfully"
+assert_has "$OUT" "committed:" "engineering sync reports its managed commit"
+assert_lacks "$(git -C "$ENG_REPO" log -1 --name-only --pretty=format:'')" ".git/hooks/pre-commit" "untracked managed Git hook is excluded from commit pathspec"
+if [ -x "$ENG_REPO/.git/hooks/pre-commit" ]; then
+  pass "engineering managed pre-commit hook remains installed"
+else
+  fail "engineering managed pre-commit hook is missing"
+fi
 
 # ===========================================================================
 echo ""

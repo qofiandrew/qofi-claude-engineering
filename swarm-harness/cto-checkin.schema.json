@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "qofi.cto-checkin/v1",
+  "title": "Qofi CTO check-in",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "ping_id",
+    "addressee",
+    "current_task",
+    "status",
+    "progress_since_last_checkin",
+    "blockers",
+    "next_action",
+    "needs_input"
+  ],
+  "properties": {
+    "schema": { "const": "qofi.cto-checkin/v1" },
+    "ping_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+    "addressee": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+    "current_task": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+    "status": { "enum": ["DRIVING", "WAITING_FOR_OPERATOR", "STOOD_DOWN"] },
+    "progress_since_last_checkin": { "type": "string", "minLength": 1, "maxLength": 800 },
+    "blockers": {
+      "type": "array",
+      "maxItems": 8,
+      "items": { "type": "string", "minLength": 1, "maxLength": 300 }
+    },
+    "next_action": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "needs_input": { "type": "boolean" }
+  }
+}

@@ -86,6 +86,8 @@ assert_eq "$CHANNEL" "$(cfg_channel)"   "ctoChannels[$NAME].channelId set"
 assert_eq "$BOT"     "$(cfg_bot)"       "ctoChannels[$NAME].botUserId set"
 assert_eq 1 "$(cfg_count)"              "exactly one ctoChannels entry"
 assert_eq 1 "$(acl_count)"              "watcher id appended once to allowFrom"
+assert_eq 600 "$(stat -f %Lp "$ACC" 2>/dev/null || stat -c %a "$ACC")" "historical access.json is narrowed to mode 0600"
+assert_eq '["1"]' "$(/usr/bin/python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["allowFrom"],separators=(",",":")))' "$ACC")" "bus wiring preserves explicit top-level operators"
 
 # ---------------------------------------------------------------------------
 # 2) SECOND run — idempotent no-op. No dup in allowFrom; entry unchanged.

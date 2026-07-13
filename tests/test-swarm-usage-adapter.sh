@@ -147,18 +147,18 @@ assert_has "$OUT" '"account": "unknown"' "account defaults to unknown when uncon
 
 # ---------------------------------------------------------------------------
 echo "=== 3) END-TO-END through swarm-usage-poll.sh: OK / NEAR / AT reachable ==="
-# OK: 5h 30% (60M/200M), weekly 10% — both under default 85% threshold.
+# OK: 5h 30% (60M/200M), weekly 10% — both under default 95% threshold.
 set_blocks "$(blocks_fixture 60000000)"
 set_weekly "$(weekly_fixture 200000000)"
 poll_via_adapter SWARM_5H_TOKEN_BUDGET=200000000 SWARM_WEEKLY_TOKEN_BUDGET=2000000000
 assert_eq 0 "$rc" "30%/10% via adapter -> poll OK (exit 0)"
 assert_has "$OUT" 'OK' "poll labels OK"
 
-# NEAR: 5h 90% (180M/200M) crosses default 85% threshold.
-set_blocks "$(blocks_fixture 180000000)"
+# NEAR: 5h 96% (192M/200M) crosses default 95% threshold.
+set_blocks "$(blocks_fixture 192000000)"
 set_weekly "$(weekly_fixture 100000000)"
 poll_via_adapter SWARM_5H_TOKEN_BUDGET=200000000 SWARM_WEEKLY_TOKEN_BUDGET=2000000000
-assert_eq 10 "$rc" "5h 90% via adapter -> poll NEAR-LIMIT (exit 10)"
+assert_eq 10 "$rc" "5h 96% via adapter -> poll NEAR-LIMIT (exit 10)"
 assert_has "$OUT" 'NEAR' "poll labels NEAR-LIMIT"
 
 # AT: weekly at/over 100% (2,000M/2,000M) -> AT-LIMIT even with low 5h.

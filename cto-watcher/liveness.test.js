@@ -25,6 +25,16 @@ test('applyState DRIVING then silence past threshold → due once; cooldown supp
   assert.deepEqual(m.tick(SILENCE + COOLDOWN + 2).map((d) => d.name), ['cto-7']); // cooldown elapsed → due again
 });
 
+test('failed structured-ping delivery releases its reserved cooldown slot', () => {
+  const m = mk();
+  m.applyState('cto-7', 'DRIVING', 0);
+  assert.equal(m.stateOf('cto-7'), 'DRIVING');
+  assert.deepEqual(m.tick(SILENCE + 1).map((d) => d.name), ['cto-7']);
+  m.releaseFailedPing('cto-7');
+  assert.deepEqual(m.tick(SILENCE + 2).map((d) => d.name), ['cto-7']);
+  assert.equal(m.stateOf('not-a-cto'), null);
+});
+
 test('heartbeat: re-emit DRIVING while DRIVING → no state change, resets clock, suppresses next ping', () => {
   const m = mk();
   m.applyState('cto-7', 'DRIVING', 0);

@@ -1,0 +1,1091 @@
+#!/usr/bin/python3 -I -B
+"""Fixed root authority for adopted Claude and Codex lifecycle boundaries.
+
+The admin-managed Claude hook invokes this file through one argument-free
+sudoers rule.  Repository hooks are deliberately outside this trust boundary:
+an unregistered checkout is a no-op, while an adopted checkout is resolved
+only through a root-owned registry and an attested, root-owned runtime bundle.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import ctypes
+import hashlib
+import json
+import os
+import pwd
+import re
+import signal
+import socket
+import stat
+import struct
+import subprocess
+import sys
+from pathlib import Path
+from typing import Callable, Mapping, Optional, Sequence
+
+
+ATTESTATION_SCHEMA = "qofi-harness-runtime-attestation/v1"
+REGISTRATION_SCHEMA = "qofi-harness-registration/v1"
+BROKER_REQUEST_SCHEMA = "qofi-harness-broker-request/v1"
+CONFORMANCE_SCHEMA = "qofi-harness-runtime-conformance/v1"
+CONFORMANCE_DECISION_SCHEMA = "qofi-harness-conformance-decision/v1"
+MANAGER_AUTHORITY_SCHEMA = "qofi-codex-manager-authority/v1"
+MANAGER_ADMISSION_SCHEMA = "qofi-codex-manager-admission/v1"
+MANAGER_AUTHORITY = Path("/private/etc/qofi-codex-manager.json")
+MANAGER_ADMISSION = Path("/private/var/db/qofi-codex-manager-admission.json")
+MANAGER_AUTHORITY_KEYS = {
+    "schema", "operator_uid", "operator_user", "operator_home", "node_path",
+    "node_sha256", "manager_bundle_path", "manager_bundle_sha256",
+    "manager_launcher_path", "manager_launcher_sha256", "manager_python_path",
+    "manager_python_sha256", "manager_state_dir", "swarm_home",
+    "manager_environment_sha256",
+}
+MANAGER_ADMISSION_KEYS = {
+    "schema", "nonce", "operator_uid", "launcher_pid", "launcher_started",
+    "manager_pid", "manager_started", "node_path", "node_sha256",
+    "manager_bundle_path", "manager_bundle_sha256", "manager_launcher_path",
+    "manager_launcher_sha256", "manager_python_path", "manager_python_sha256",
+    "manager_state_dir", "swarm_home", "manager_environment_sha256",
+}
+MAX_HOOK_BYTES = 1_048_576
+MAX_CONTROL_BYTES = 64 * 1024
+MAX_TOKEN_BYTES = 8192
+MAX_RUNTIME_OUTPUT_BYTES = 128 * 1024
+MAX_ATTESTED_FILE_BYTES = 512 * 1024 * 1024
+SAFE_SWARM = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+SAFE_SESSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
+CHANNEL = re.compile(r"^\d{16,22}$")
+
+
+@dataclasses.dataclass(frozen=True)
+class BrokerPaths:
+    authority_root: Path
+    attestation: Path
+    registrations: Path
+    conformance: Path
+    installed_broker: Path
+
+
+PRODUCTION_PATHS = BrokerPaths(
+    authority_root=Path("/private/etc/qofi-harness-runtime"),
+    attestation=Path("/private/etc/qofi-harness-runtime/attestation.json"),
+    registrations=Path("/private/etc/qofi-harness-runtime/registrations"),
+    conformance=Path("/private/etc/qofi-harness-runtime/conformance.json"),
+    installed_broker=Path("/Library/PrivilegedHelperTools/qofi-harness-lifecycle-broker"),
+)
+
+
+class BrokerError(RuntimeError):
+    pass
+
+
+@dataclasses.dataclass(frozen=True)
+class RuntimeResult:
+    returncode: int
+    stdout: bytes
+    stderr: bytes
+
+
+@dataclasses.dataclass(frozen=True)
+class DispatchResult:
+    adopted: bool
+    returncode: int
+    stdout: bytes = b""
+    stderr: bytes = b""
+
+
+def canonical_json_bytes(value: object) -> bytes:
+    return (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def digest_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def digest_file(path: Path, maximum: int = MAX_ATTESTED_FILE_BYTES) -> tuple[int, str]:
+    before = os.lstat(path)
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size < 1 or before.st_size > maximum:
+        raise BrokerError("attested file identity is unsafe")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_uid, opened.st_mode) != (
+            before.st_dev, before.st_ino, before.st_size, before.st_uid, before.st_mode
+        ):
+            raise BrokerError("attested file changed while opening")
+        digest = hashlib.sha256()
+        remaining = opened.st_size
+        while remaining:
+            chunk = os.read(fd, min(1024 * 1024, remaining))
+            if not chunk:
+                raise BrokerError("attested file ended before its declared size")
+            digest.update(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(fd)
+        if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns, after.st_nlink) != (
+            opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns, 1
+        ):
+            raise BrokerError("attested file changed while hashing")
+        return opened.st_size, digest.hexdigest()
+    finally:
+        os.close(fd)
+
+
+def _assert_directory(path: Path, owner_uid: int, *, exact_mode: int | None = None) -> os.stat_result:
+    info = os.lstat(path)
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != owner_uid:
+        raise BrokerError("authority directory is not owner-real")
+    mode = stat.S_IMODE(info.st_mode)
+    if exact_mode is not None and mode != exact_mode:
+        raise BrokerError("authority directory mode is invalid")
+    if mode & 0o022:
+        raise BrokerError("authority directory is writable outside its owner")
+    return info
+
+
+def assert_root_controlled_path(path: Path, owner_uid: int, *, final_directory: bool = False) -> None:
+    absolute = Path(os.path.abspath(path))
+    if absolute != path:
+        raise BrokerError("authority path is not canonical absolute")
+    cursor = Path(absolute.anchor)
+    for index, part in enumerate(absolute.parts[1:]):
+        cursor /= part
+        info = os.lstat(cursor)
+        final = index == len(absolute.parts[1:]) - 1
+        if stat.S_ISLNK(info.st_mode):
+            # macOS may expose root-owned system aliases.  Their resolved target
+            # must remain root-controlled and the final authority object itself
+            # is never permitted to be a link.
+            if final or info.st_uid not in (0, owner_uid):
+                raise BrokerError("authority path contains a linked component")
+            target = Path(os.path.realpath(cursor))
+            target_info = os.lstat(target)
+            if not stat.S_ISDIR(target_info.st_mode) or target_info.st_uid not in (0, owner_uid) or stat.S_IMODE(target_info.st_mode) & 0o022:
+                raise BrokerError("authority path contains an unsafe system link")
+            continue
+        if not final or final_directory:
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, owner_uid) or stat.S_IMODE(info.st_mode) & 0o022:
+                raise BrokerError("authority path parent is not root controlled")
+
+
+def read_secure_file(path: Path, owner_uid: int, mode: int, maximum: int) -> bytes:
+    assert_root_controlled_path(path, owner_uid)
+    parent_before = _assert_directory(path.parent, owner_uid)
+    before = os.lstat(path)
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_uid != owner_uid:
+        raise BrokerError("authority file is not owner-regular single-link")
+    if stat.S_IMODE(before.st_mode) != mode or before.st_size < 1 or before.st_size > maximum:
+        raise BrokerError("authority file mode or size is invalid")
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino, opened.st_uid, opened.st_mode, opened.st_nlink, opened.st_size) != (
+            before.st_dev, before.st_ino, before.st_uid, before.st_mode, 1, before.st_size
+        ):
+            raise BrokerError("authority file changed while opening")
+        chunks: list[bytes] = []
+        remaining = opened.st_size
+        while remaining:
+            chunk = os.read(fd, min(64 * 1024, remaining))
+            if not chunk:
+                raise BrokerError("authority file ended before its declared size")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(fd)
+        parent_after = os.lstat(path.parent)
+        if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns, after.st_nlink) != (
+            opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns, 1
+        ) or (parent_after.st_dev, parent_after.st_ino) != (parent_before.st_dev, parent_before.st_ino):
+            raise BrokerError("authority file changed while reading")
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+def read_canonical_json(path: Path, owner_uid: int, mode: int, maximum: int) -> Mapping[str, object]:
+    raw = read_secure_file(path, owner_uid, mode, maximum)
+    try:
+        text = raw.decode("utf-8", "strict")
+        value = json.loads(text)
+    except (UnicodeDecodeError, ValueError) as error:
+        raise BrokerError("authority JSON is invalid") from error
+    if not isinstance(value, dict) or raw != canonical_json_bytes(value):
+        raise BrokerError("authority JSON is not canonical")
+    return value
+
+
+def exact_keys(value: Mapping[str, object], keys: Sequence[str]) -> bool:
+    return set(value) == set(keys) and len(value) == len(keys)
+
+
+def canonical_existing_directory(value: object) -> Path:
+    if not isinstance(value, str) or not value.startswith("/") or os.path.abspath(value) != value:
+        raise BrokerError("repository path is invalid")
+    canonical = Path(os.path.realpath(value))
+    if str(canonical) != value:
+        raise BrokerError("repository path contains indirection")
+    info = os.lstat(canonical)
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        raise BrokerError("repository path is not a real directory")
+    return canonical
+
+
+def repo_digest(path: Path) -> str:
+    return hashlib.sha256(os.fsencode(str(path))).hexdigest()
+
+
+def _parse_attestation(value: Mapping[str, object], paths: BrokerPaths, owner_uid: int) -> tuple[Path, Path]:
+    keys = ["schema", "broker", "bun", "bundle_root", "bundle_sha256", "runtime_entry", "runtime_files"]
+    if not exact_keys(value, keys) or value.get("schema") != ATTESTATION_SCHEMA:
+        raise BrokerError("runtime attestation has an invalid schema")
+    broker = value.get("broker")
+    bun = value.get("bun")
+    files = value.get("runtime_files")
+    if not isinstance(broker, dict) or not isinstance(bun, dict) or not isinstance(files, list) or not 1 <= len(files) <= 256:
+        raise BrokerError("runtime attestation is malformed")
+    identity_keys = ["path", "size", "sha256", "mode"]
+    if not exact_keys(broker, identity_keys) or not exact_keys(bun, identity_keys):
+        raise BrokerError("runtime attestation identity is malformed")
+
+    def verify_identity(identity: Mapping[str, object], *, executable: bool) -> Path:
+        path_value = identity.get("path")
+        size_value = identity.get("size")
+        sha_value = identity.get("sha256")
+        mode_value = identity.get("mode")
+        if not isinstance(path_value, str) or not path_value.startswith("/") or os.path.abspath(path_value) != path_value:
+            raise BrokerError("attested path is invalid")
+        path = Path(path_value)
+        assert_root_controlled_path(path, owner_uid)
+        info = os.lstat(path)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != owner_uid or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) & 0o022:
+            raise BrokerError("attested file is not root controlled")
+        if executable and not stat.S_IMODE(info.st_mode) & 0o111:
+            raise BrokerError("attested executable is not executable")
+        actual_size, actual_sha = digest_file(path)
+        if size_value != actual_size or sha_value != actual_sha or mode_value != stat.S_IMODE(info.st_mode):
+            raise BrokerError("attested file bytes or metadata changed")
+        return path
+
+    broker_path = verify_identity(broker, executable=True)
+    if broker_path != paths.installed_broker:
+        raise BrokerError("attestation points at the wrong broker")
+    bun_path = verify_identity(bun, executable=True)
+    bundle_root_value = value.get("bundle_root")
+    bundle_sha = value.get("bundle_sha256")
+    entry_value = value.get("runtime_entry")
+    if not isinstance(bundle_root_value, str) or not bundle_root_value.startswith("/") or os.path.abspath(bundle_root_value) != bundle_root_value:
+        raise BrokerError("runtime bundle root is invalid")
+    bundle_root = Path(bundle_root_value)
+    assert_root_controlled_path(bundle_root, owner_uid, final_directory=True)
+    if not isinstance(bundle_sha, str) or not SHA256.fullmatch(bundle_sha):
+        raise BrokerError("runtime bundle digest is invalid")
+    hash_input = hashlib.sha256()
+    seen: set[str] = set()
+    for item in files:
+        if not isinstance(item, dict) or not exact_keys(item, ["path", "size", "sha256", "mode"]):
+            raise BrokerError("runtime file identity is malformed")
+        rel = item.get("path")
+        if not isinstance(rel, str) or rel.startswith("/") or rel.startswith("./") or ".." in Path(rel).parts or rel in seen:
+            raise BrokerError("runtime file path is invalid")
+        seen.add(rel)
+        absolute = bundle_root / rel
+        identity = dict(item)
+        identity["path"] = str(absolute)
+        verify_identity(identity, executable=False)
+        file_bytes = read_secure_file(absolute, owner_uid, int(item["mode"]), MAX_ATTESTED_FILE_BYTES)
+        encoded = rel.encode("utf-8")
+        hash_input.update(encoded)
+        hash_input.update(b"\0")
+        hash_input.update(str(len(file_bytes)).encode())
+        hash_input.update(b"\0")
+        hash_input.update(file_bytes)
+    if hash_input.hexdigest() != bundle_sha:
+        raise BrokerError("runtime bundle digest changed")
+    if not isinstance(entry_value, str) or entry_value not in seen:
+        raise BrokerError("runtime entry is not attested")
+    runtime_entry = bundle_root / entry_value
+    return bun_path, runtime_entry
+
+
+def load_attested_runtime(paths: BrokerPaths, owner_uid: int) -> tuple[Path, Path]:
+    value = read_canonical_json(paths.attestation, owner_uid, 0o600, MAX_CONTROL_BYTES)
+    return _parse_attestation(value, paths, owner_uid)
+
+
+def attested_bundle_sha256(paths: BrokerPaths, owner_uid: int) -> str:
+    value = read_canonical_json(paths.attestation, owner_uid, 0o600, MAX_CONTROL_BYTES)
+    _parse_attestation(value, paths, owner_uid)
+    digest = value.get("bundle_sha256")
+    if not isinstance(digest, str) or not SHA256.fullmatch(digest):
+        raise BrokerError("runtime attestation bundle digest is invalid")
+    return digest
+
+
+def _parse_registration(value: Mapping[str, object], repo: Path, owner_uid: int) -> Mapping[str, object]:
+    keys = [
+        "schema", "enabled", "operator_uid", "operator_user", "operator_home",
+        "repo_root", "repo_root_sha256", "roadmap_repo_root", "swarm", "dr_refs",
+        "receipt_path", "receipt_sha256", "completion_policy_sha256", "state_root", "channel_id",
+        "fallback_channel_id", "token_path", "token_sha256", "manager_socket",
+    ]
+    if not exact_keys(value, keys) or value.get("schema") != REGISTRATION_SCHEMA or value.get("enabled") is not True:
+        raise BrokerError("harness registration is malformed")
+    if value.get("repo_root") != str(repo) or value.get("repo_root_sha256") != repo_digest(repo):
+        raise BrokerError("harness registration has the wrong repository scope")
+    if not isinstance(value.get("operator_uid"), int) or value["operator_uid"] < 1:
+        raise BrokerError("harness registration has an invalid operator")
+    operator_user = value.get("operator_user")
+    if not isinstance(operator_user, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}", operator_user):
+        raise BrokerError("harness registration has an invalid operator user")
+    operator_home = value.get("operator_home")
+    if not isinstance(operator_home, str) or not operator_home.startswith("/"):
+        raise BrokerError("harness registration has an invalid operator home")
+    try:
+        by_uid = pwd.getpwuid(int(value["operator_uid"]))
+        by_name = pwd.getpwnam(operator_user)
+    except KeyError as error:
+        raise BrokerError("harness registration operator does not exist") from error
+    if (by_uid.pw_uid != by_name.pw_uid or by_uid.pw_name != by_name.pw_name
+            or by_uid.pw_dir != operator_home):
+        raise BrokerError("harness registration operator identity changed")
+    repo_info = os.lstat(repo)
+    if repo_info.st_uid != by_uid.pw_uid:
+        raise BrokerError("harness worker repository is not owned by its registered operator")
+    if not isinstance(value.get("swarm"), str) or not SAFE_SWARM.fullmatch(str(value["swarm"])):
+        raise BrokerError("harness registration has an invalid swarm")
+    dr_refs = value.get("dr_refs")
+    if (not isinstance(dr_refs, list) or len(dr_refs) > 32
+            or any(not isinstance(item, str) or not re.fullmatch(r"ADR-[0-9]{4}", item) for item in dr_refs)
+            or dr_refs != sorted(set(dr_refs))):
+        raise BrokerError("harness registration decision-record scope is invalid")
+    for field in ["receipt_sha256", "completion_policy_sha256", "token_sha256"]:
+        if not isinstance(value.get(field), str) or not SHA256.fullmatch(str(value[field])):
+            raise BrokerError("harness registration digest is invalid")
+    channel = value.get("channel_id")
+    fallback = value.get("fallback_channel_id")
+    if not isinstance(channel, str) or not CHANNEL.fullmatch(channel):
+        raise BrokerError("harness registration channel is invalid")
+    if fallback is not None and (not isinstance(fallback, str) or not CHANNEL.fullmatch(fallback) or fallback == channel):
+        raise BrokerError("harness registration fallback is invalid")
+    for field in ["receipt_path", "state_root", "token_path"]:
+        candidate = value.get(field)
+        if not isinstance(candidate, str) or not candidate.startswith("/") or os.path.abspath(candidate) != candidate:
+            raise BrokerError("harness registration authority path is invalid")
+    roadmap_repo = canonical_existing_directory(value.get("roadmap_repo_root"))
+    if roadmap_repo != repo:
+        raise BrokerError("harness roadmap repository scope differs from the worker repository")
+    manager_socket = value.get("manager_socket")
+    if manager_socket is not None and (
+        not isinstance(manager_socket, str) or not manager_socket.startswith("/")
+        or os.path.abspath(manager_socket) != manager_socket
+    ):
+        raise BrokerError("harness manager socket path is invalid")
+    receipt_path = Path(str(value["receipt_path"]))
+    token_path = Path(str(value["token_path"]))
+    state_root = Path(str(value["state_root"]))
+    receipt = read_secure_file(receipt_path, owner_uid, 0o600, MAX_CONTROL_BYTES)
+    token = read_secure_file(token_path, owner_uid, 0o600, MAX_TOKEN_BYTES)
+    # State is lifecycle authority, not merely private storage.  A root-owned
+    # leaf under a worker-writable ancestor can be exchanged by renaming the
+    # ancestor, so bind every component before accepting the registration.
+    assert_root_controlled_path(state_root, owner_uid, final_directory=True)
+    _assert_directory(state_root, owner_uid, exact_mode=0o700)
+    if digest_bytes(receipt) != value["receipt_sha256"] or digest_bytes(token) != value["token_sha256"]:
+        raise BrokerError("harness registration authority bytes changed")
+    if not token or b"\n" in token or b"\r" in token or b"\0" in token:
+        raise BrokerError("harness registration token is malformed")
+    return {**value, "_token": token.decode("utf-8", "strict")}
+
+
+def lookup_registration(paths: BrokerPaths, repo: Path, owner_uid: int) -> Mapping[str, object] | None:
+    try:
+        _assert_directory(paths.registrations, owner_uid, exact_mode=0o700)
+    except (FileNotFoundError, BrokerError):
+        return None
+    path = paths.registrations / f"{repo_digest(repo)}.json"
+    try:
+        value = read_canonical_json(path, owner_uid, 0o600, MAX_CONTROL_BYTES)
+    except FileNotFoundError:
+        return None
+    return _parse_registration(value, repo, owner_uid)
+
+
+def lookup_registration_for_swarm(
+    paths: BrokerPaths, swarm: str, owner_uid: int,
+) -> tuple[Path, Mapping[str, object]] | None:
+    try:
+        _assert_directory(paths.registrations, owner_uid, exact_mode=0o700)
+        names = sorted(os.listdir(paths.registrations))
+    except (FileNotFoundError, BrokerError, OSError):
+        return None
+    if len(names) > 128:
+        raise BrokerError("harness registration count exceeds its bound")
+    found: tuple[Path, Mapping[str, object]] | None = None
+    for name in names:
+        if not re.fullmatch(r"[0-9a-f]{64}\.json", name):
+            raise BrokerError("harness registration directory contains an unknown entry")
+        raw = read_canonical_json(paths.registrations / name, owner_uid, 0o600, MAX_CONTROL_BYTES)
+        candidate_swarm = raw.get("swarm")
+        if candidate_swarm != swarm:
+            continue
+        repo = canonical_existing_directory(raw.get("repo_root"))
+        registration = _parse_registration(raw, repo, owner_uid)
+        if found is not None:
+            raise BrokerError("harness swarm has multiple root registrations")
+        found = (repo, registration)
+    return found
+
+
+def parse_hook_scope(raw: bytes) -> tuple[Mapping[str, object], Path]:
+    if not raw or len(raw) > MAX_HOOK_BYTES:
+        raise BrokerError("Claude hook input is missing or oversized")
+    try:
+        value = json.loads(raw.decode("utf-8", "strict"))
+    except (UnicodeDecodeError, ValueError) as error:
+        raise BrokerError("Claude hook input is invalid JSON") from error
+    if not isinstance(value, dict):
+        raise BrokerError("Claude hook input is not an object")
+    cwd = value.get("cwd")
+    repo = canonical_existing_directory(cwd)
+    return value, repo
+
+
+def validate_adopted_hook(value: Mapping[str, object], registration: Mapping[str, object], repo: Path) -> None:
+    event = value.get("hook_event_name")
+    if event not in ("UserPromptSubmit", "SubagentStart", "Stop", "SubagentStop"):
+        raise BrokerError("adopted Claude hook event is invalid")
+    session = value.get("session_id")
+    if not isinstance(session, str) or not SAFE_SESSION.fullmatch(session):
+        raise BrokerError("adopted Claude hook session is invalid")
+    transcript_field = "agent_transcript_path" if event == "SubagentStop" else "transcript_path"
+    transcript = value.get(transcript_field)
+    # SubagentStart does not consistently carry an agent transcript yet.  Its
+    # root baseline is bound to session_id + agent_id and the parent transcript.
+    if event == "SubagentStart" and not isinstance(transcript, str):
+        transcript = value.get("transcript_path")
+    if not isinstance(transcript, str) or not transcript.startswith("/") or os.path.abspath(transcript) != transcript:
+        raise BrokerError("adopted Claude hook transcript path is invalid")
+    path = Path(transcript)
+    before = os.lstat(path)
+    if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode) or before.st_nlink != 1:
+        raise BrokerError("adopted Claude hook transcript is not a real single-link file")
+    if before.st_uid != registration["operator_uid"] or stat.S_IMODE(before.st_mode) & 0o022:
+        raise BrokerError("adopted Claude hook transcript is outside operator authority")
+    canonical = Path(os.path.realpath(path))
+    if canonical != path:
+        raise BrokerError("adopted Claude hook transcript contains indirection")
+    if canonical_existing_directory(value.get("cwd")) != repo:
+        raise BrokerError("adopted Claude hook repository changed")
+    if event in ("SubagentStart", "SubagentStop"):
+        agent = value.get("agent_id")
+        if not isinstance(agent, str) or not SAFE_SESSION.fullmatch(agent):
+            raise BrokerError("adopted Claude subagent identity is invalid")
+
+
+def parse_broker_request(value: Mapping[str, object]) -> tuple[str, str, str]:
+    if not exact_keys(value, ["schema", "operation", "runtime", "swarm", "payload"]):
+        raise BrokerError("lifecycle broker request has an invalid shape")
+    if value.get("schema") != BROKER_REQUEST_SCHEMA:
+        raise BrokerError("lifecycle broker request has an invalid schema")
+    operation = value.get("operation")
+    runtime = value.get("runtime")
+    if operation not in (
+        "conformance-check", "task-start", "runtime-activity", "task-complete", "task-fail",
+    ) or runtime not in ("claude", "codex"):
+        raise BrokerError("lifecycle broker request discriminator is invalid")
+    swarm = value.get("swarm")
+    if not isinstance(swarm, str) or not SAFE_SWARM.fullmatch(swarm):
+        raise BrokerError("lifecycle broker request swarm is invalid")
+    if not isinstance(value.get("payload"), dict):
+        raise BrokerError("lifecycle broker request payload is invalid")
+    return str(operation), str(runtime), str(swarm)
+
+
+def _parse_conformance_identity(value: object, owner_uid: int) -> Mapping[str, object]:
+    if not isinstance(value, dict) or not exact_keys(
+        value, ["path", "size", "mode", "sha256", "version", "argv_prefix"],
+    ):
+        raise BrokerError("conformance execution identity is malformed")
+    path = value.get("path")
+    if not isinstance(path, str) or not path.startswith("/") or os.path.abspath(path) != path:
+        raise BrokerError("conformance execution path is invalid")
+    candidate = Path(path)
+    assert_root_controlled_path(candidate, owner_uid)
+    info = os.lstat(candidate)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != owner_uid or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) & 0o022 or not stat.S_IMODE(info.st_mode) & 0o111):
+        raise BrokerError("conformance execution path is not root-controlled executable")
+    size, digest = digest_file(candidate)
+    if (value.get("size") != size or value.get("mode") != stat.S_IMODE(info.st_mode)
+            or value.get("sha256") != digest):
+        raise BrokerError("conformance execution identity drifted")
+    version = value.get("version")
+    argv_prefix = value.get("argv_prefix")
+    if (not isinstance(version, str) or not 1 <= len(version) <= 256
+            or any(ord(char) < 32 or ord(char) == 127 for char in version)
+            or not isinstance(argv_prefix, list) or len(argv_prefix) > 32
+            or any(
+                not isinstance(item, str) or not item or len(item) > 512
+                or any(ord(char) < 32 or ord(char) == 127 for char in item)
+                for item in argv_prefix
+            )):
+        raise BrokerError("conformance execution version or argv is invalid")
+    return value
+
+
+def load_conformance(paths: BrokerPaths, owner_uid: int) -> tuple[Mapping[str, object], str]:
+    raw = read_secure_file(paths.conformance, owner_uid, 0o600, MAX_CONTROL_BYTES)
+    try:
+        value = json.loads(raw.decode("utf-8", "strict"))
+    except (UnicodeDecodeError, ValueError) as error:
+        raise BrokerError("runtime conformance manifest is invalid") from error
+    if not isinstance(value, dict) or raw != canonical_json_bytes(value) or not exact_keys(value, [
+        "schema", "contract", "suite_bundle_sha256", "completion_policy_sha256",
+        "receipt_contract", "tested_at", "passed_runtimes", "claude", "codex",
+    ]):
+        raise BrokerError("runtime conformance manifest is not canonical v1")
+    if (value.get("schema") != CONFORMANCE_SCHEMA or value.get("contract") != "claude-codex-v1"
+            or value.get("receipt_contract") != "claude-codex-v1"
+            or value.get("passed_runtimes") != ["claude", "codex"]):
+        raise BrokerError("runtime conformance manifest does not attest atomic parity")
+    for field in ("suite_bundle_sha256", "completion_policy_sha256"):
+        if not isinstance(value.get(field), str) or not SHA256.fullmatch(str(value[field])):
+            raise BrokerError("runtime conformance manifest digest is invalid")
+    tested_at = value.get("tested_at")
+    if not isinstance(tested_at, str) or not re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z", tested_at,
+    ):
+        raise BrokerError("runtime conformance manifest timestamp is invalid")
+    _parse_conformance_identity(value.get("claude"), owner_uid)
+    _parse_conformance_identity(value.get("codex"), owner_uid)
+    return value, digest_bytes(raw)
+
+
+def conformance_decision(
+    paths: BrokerPaths,
+    registration: Mapping[str, object],
+    runtime: str,
+    owner_uid: int,
+) -> bytes:
+    try:
+        manifest, manifest_sha = load_conformance(paths, owner_uid)
+        execution = manifest[runtime]
+        if manifest.get("completion_policy_sha256") != registration.get("completion_policy_sha256"):
+            raise BrokerError("completion policy differs from conformance proof")
+        if manifest.get("suite_bundle_sha256") != attested_bundle_sha256(paths, owner_uid):
+            raise BrokerError("conformance suite differs from the installed attested bundle")
+        # A JSON identity cannot bind a later same-UID exec across a concurrent
+        # root installer replacement.  Admission stays closed until a fixed
+        # root exec wrapper consumes the generation and executes the already-
+        # opened binary.  Parsing above remains useful to distinguish drift
+        # from this explicit missing control point without admitting a launch.
+        del execution, manifest_sha
+        raise BrokerError("fixed root exec wrapper is unavailable")
+    except (BrokerError, OSError, KeyError):
+        value = {
+            "schema": CONFORMANCE_DECISION_SCHEMA,
+            "allowed": False,
+            "reason_code": "root-exec-wrapper-unavailable",
+            "manifest_sha256": None,
+            "execution": None,
+        }
+    return canonical_json_bytes(value)
+
+
+def process_record(pid: int) -> tuple[int, int, str] | None:
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-p", str(pid), "-o", "uid=", "-o", "ppid=", "-o", "lstart="],
+            capture_output=True, text=True, timeout=2,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    fields = result.stdout.strip().split(maxsplit=2)
+    if result.returncode != 0 or len(fields) != 3 or not fields[0].isdigit() or not fields[1].isdigit():
+        return None
+    return int(fields[0]), int(fields[1]), fields[2]
+
+
+def process_executable_path(pid: int) -> str | None:
+    if sys.platform != "darwin" or pid <= 1:
+        return None
+    libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    function = libproc.proc_pidpath
+    function.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+    function.restype = ctypes.c_int
+    buffer = ctypes.create_string_buffer(4096)
+    if function(pid, buffer, len(buffer)) <= 0:
+        return None
+    try:
+        return buffer.value.decode("utf-8", "strict")
+    except UnicodeDecodeError:
+        return None
+
+
+def process_arguments(pid: int) -> list[str] | None:
+    if sys.platform != "darwin" or pid <= 1:
+        return None
+    libc = ctypes.CDLL(None, use_errno=True)
+    sysctl = libc.sysctl
+    sysctl.argtypes = [
+        ctypes.POINTER(ctypes.c_int), ctypes.c_uint, ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t,
+    ]
+    sysctl.restype = ctypes.c_int
+    mib = (ctypes.c_int * 3)(1, 49, pid)
+    size = ctypes.c_size_t(0)
+    if sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0 or not 8 <= size.value <= 256 * 1024:
+        return None
+    buffer = ctypes.create_string_buffer(size.value)
+    if sysctl(mib, 3, buffer, ctypes.byref(size), None, 0) != 0:
+        return None
+    raw = bytes(buffer.raw[:size.value])
+    width = ctypes.sizeof(ctypes.c_int)
+    argc = int.from_bytes(raw[:width], byteorder=sys.byteorder, signed=True)
+    if not 1 <= argc <= 64:
+        return None
+    offset = raw.find(b"\0", width)
+    if offset < width:
+        return None
+    offset += 1
+    while offset < len(raw) and raw[offset] == 0:
+        offset += 1
+    args: list[str] = []
+    try:
+        for _ in range(argc):
+            end = raw.find(b"\0", offset)
+            if end < offset:
+                return None
+            args.append(raw[offset:end].decode("utf-8", "strict"))
+            offset = end + 1
+    except UnicodeDecodeError:
+        return None
+    return args
+
+
+def validate_live_manager(registration: Mapping[str, object], owner_uid: int) -> tuple[Path, int]:
+    authority = read_canonical_json(MANAGER_AUTHORITY, owner_uid, 0o644, MAX_CONTROL_BYTES)
+    admission = read_canonical_json(MANAGER_ADMISSION, owner_uid, 0o600, MAX_CONTROL_BYTES)
+    if set(authority) != MANAGER_AUTHORITY_KEYS or authority.get("schema") != MANAGER_AUTHORITY_SCHEMA:
+        raise BrokerError("Codex manager root authority is malformed")
+    if set(admission) != MANAGER_ADMISSION_KEYS or admission.get("schema") != MANAGER_ADMISSION_SCHEMA:
+        raise BrokerError("Codex manager admission is malformed")
+    shared = MANAGER_ADMISSION_KEYS - {
+        "schema", "nonce", "launcher_pid", "launcher_started", "manager_pid", "manager_started",
+    }
+    if any(admission.get(key) != authority.get(key) for key in shared):
+        raise BrokerError("Codex manager admission differs from root authority")
+    if authority.get("operator_uid") != registration.get("operator_uid"):
+        raise BrokerError("Codex manager operator differs from harness registration")
+    launcher_pid = admission.get("launcher_pid")
+    manager_pid = admission.get("manager_pid")
+    if type(launcher_pid) is not int or launcher_pid <= 1 or type(manager_pid) is not int or manager_pid <= 1:
+        raise BrokerError("Codex manager process identity is invalid")
+    launcher = process_record(launcher_pid)
+    manager = process_record(manager_pid)
+    if (launcher is None or manager is None or launcher[0] != owner_uid
+            or manager[0] != registration.get("operator_uid") or manager[1] != launcher_pid
+            or launcher[2] != admission.get("launcher_started")
+            or manager[2] != admission.get("manager_started")):
+        raise BrokerError("Codex manager processes differ from root admission")
+    if (process_executable_path(launcher_pid) != authority.get("manager_python_path")
+            or process_executable_path(manager_pid) != authority.get("node_path")):
+        raise BrokerError("Codex manager executable identity changed")
+    expected_launcher = [
+        str(authority["manager_python_path"]), "-I", str(authority["manager_launcher_path"]),
+    ]
+    expected_manager = [
+        str(authority["node_path"]), "--disable-sigusr1", str(authority["manager_bundle_path"]),
+        "--state-dir", str(authority["manager_state_dir"]),
+        "--swarm-home", str(authority["swarm_home"]),
+    ]
+    if process_arguments(launcher_pid) != expected_launcher or process_arguments(manager_pid) != expected_manager:
+        raise BrokerError("Codex manager argv identity changed")
+    socket_path = Path(str(authority["manager_state_dir"])) / "control.sock"
+    if registration.get("manager_socket") != str(socket_path):
+        raise BrokerError("harness registration manager socket is not root-derived")
+    return socket_path, manager_pid
+
+
+def _validate_manager_receipt(value: object, registration: Mapping[str, object], task_id: str) -> Mapping[str, object]:
+    keys = [
+        "schema", "swarm", "profile", "taskId", "repoRoot", "reviewedDiffSha256",
+        "verdict", "artifactName", "artifactSha256",
+    ]
+    if not isinstance(value, dict) or not exact_keys(value, keys):
+        raise BrokerError("Codex completion receipt has an invalid shape")
+    if (value.get("schema") != "qofi-codex-completion-review-receipt/v1"
+            or value.get("swarm") != registration.get("swarm")
+            or value.get("repoRoot") != registration.get("repo_root")
+            or value.get("taskId") != task_id
+            or value.get("verdict") not in ("approve", "needs-changes", "block", "review-unavailable")):
+        raise BrokerError("Codex completion receipt has the wrong registered scope")
+    for field in ("reviewedDiffSha256", "artifactSha256"):
+        if not isinstance(value.get(field), str) or not SHA256.fullmatch(str(value[field])):
+            raise BrokerError("Codex completion receipt digest is invalid")
+    for field in ("profile", "artifactName"):
+        item = value.get(field)
+        if (not isinstance(item, str) or not 1 <= len(item) <= 255
+                or any(ord(char) < 32 or ord(char) == 127 for char in item)
+                or "/" in item or "\\" in item or item in (".", "..")):
+            raise BrokerError("Codex completion receipt label is invalid")
+    return value
+
+
+def consume_manager_completion(
+    request: Mapping[str, object], registration: Mapping[str, object], owner_uid: int = 0,
+) -> Mapping[str, object]:
+    payload = request.get("payload")
+    if not isinstance(payload, dict) or not exact_keys(
+        payload, ["completion_token", "task_id", "turn_id", "summary"],
+    ):
+        raise BrokerError("Codex completion broker payload is malformed")
+    token = payload.get("completion_token")
+    task_id = payload.get("task_id")
+    turn_id = payload.get("turn_id")
+    summary = payload.get("summary")
+    if (not isinstance(token, str) or not SHA256.fullmatch(token)
+            or not isinstance(task_id, str) or not SAFE_SESSION.fullmatch(task_id)
+            or not isinstance(turn_id, str) or not SAFE_SESSION.fullmatch(turn_id)
+            or not isinstance(summary, str) or len(summary.encode("utf-8", "strict")) > 16 * 1024
+            or any((ord(char) < 32 and char not in "\n\t") or ord(char) == 127 for char in summary)):
+        raise BrokerError("Codex completion broker payload values are invalid")
+    socket_path, manager_pid = validate_live_manager(registration, owner_uid)
+    before = os.lstat(socket_path)
+    if (not stat.S_ISSOCK(before.st_mode) or before.st_uid != registration.get("operator_uid")
+            or stat.S_IMODE(before.st_mode) != 0o600):
+        raise BrokerError("Codex manager socket identity is unsafe")
+    body = canonical_json_bytes({
+        "schema": "qofi-codex-completion-review-consume-request/v1",
+        "completionToken": token,
+        "repoRoot": registration["repo_root"],
+        "taskId": task_id,
+    }).rstrip(b"\n")
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(10.0)
+    try:
+        client.connect(str(socket_path))
+        after = os.lstat(socket_path)
+        if (before.st_dev, before.st_ino, before.st_mode, before.st_uid, before.st_gid) != (
+            after.st_dev, after.st_ino, after.st_mode, after.st_uid, after.st_gid,
+        ):
+            raise BrokerError("Codex manager socket changed while connecting")
+        peer = client.getsockopt(0, 0x002, 4)
+        if len(peer) != 4 or struct.unpack("=i", peer)[0] != manager_pid:
+            raise BrokerError("Codex manager socket peer is not root-admitted")
+        request_bytes = (
+            b"POST /v1/reviewer/completion/consume HTTP/1.1\r\nHost: localhost\r\n"
+            b"Content-Type: application/json\r\nAccept: application/json\r\nConnection: close\r\n"
+            + f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body
+        )
+        client.sendall(request_bytes)
+        response = bytearray()
+        while b"\r\n\r\n" not in response:
+            chunk = client.recv(4096)
+            if not chunk:
+                raise BrokerError("Codex manager response ended before headers")
+            response.extend(chunk)
+            if len(response) > MAX_CONTROL_BYTES:
+                raise BrokerError("Codex manager response headers exceeded their bound")
+        header_raw, response_body = bytes(response).split(b"\r\n\r\n", 1)
+        lines = header_raw.decode("ascii", "strict").split("\r\n")
+        if not lines or not re.fullmatch(r"HTTP/1\.[01] 200(?: .*)?", lines[0]):
+            raise BrokerError("Codex manager refused completion consumption")
+        headers: dict[str, str] = {}
+        for line in lines[1:]:
+            name, separator, item = line.partition(":")
+            if not separator or name.lower() in headers:
+                raise BrokerError("Codex manager response headers are malformed")
+            headers[name.lower()] = item.strip()
+        length = headers.get("content-length", "")
+        if (headers.get("content-type", "").split(";", 1)[0].strip() != "application/json"
+                or not length.isdecimal() or not 2 <= int(length) <= MAX_CONTROL_BYTES):
+            raise BrokerError("Codex manager response metadata is invalid")
+        expected = int(length)
+        while len(response_body) < expected:
+            chunk = client.recv(min(4096, expected - len(response_body)))
+            if not chunk:
+                raise BrokerError("Codex manager response ended before body")
+            response_body += chunk
+        if len(response_body) != expected:
+            raise BrokerError("Codex manager response length is invalid")
+        value = json.loads(response_body.decode("utf-8", "strict"))
+    except (OSError, UnicodeError, ValueError) as error:
+        if isinstance(error, BrokerError):
+            raise
+        raise BrokerError("Codex manager completion consumption failed") from error
+    finally:
+        client.close()
+    return _validate_manager_receipt(value, registration, task_id)
+
+
+def _stop_and_reap_process_group(
+    process: subprocess.Popen[bytes], *, grace_seconds: float = 2.0,
+) -> tuple[bytes, bytes]:
+    if process.poll() is None:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    try:
+        return process.communicate(timeout=grace_seconds)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        # Always reap the direct child.  It owns a fresh process group, so the
+        # preceding KILL also reaches descendants which did not honor TERM.
+        return process.communicate()
+
+
+def run_runtime_process(
+    bun: Path,
+    entry: Path,
+    raw: bytes,
+    env: Mapping[str, str],
+    cwd: Path,
+    *,
+    timeout_seconds: float = 55.0,
+    terminate_grace_seconds: float = 2.0,
+) -> RuntimeResult:
+    process = subprocess.Popen(
+        [str(bun), str(entry)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=str(cwd),
+        env=dict(env),
+        start_new_session=True,
+    )
+    received_signal: int | None = None
+
+    def forward_termination(signum: int, _frame: object) -> None:
+        nonlocal received_signal
+        received_signal = signum
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+    old_handlers: dict[int, object] = {}
+    for selected in (signal.SIGTERM, signal.SIGINT):
+        old_handlers[selected] = signal.getsignal(selected)
+        signal.signal(selected, forward_termination)
+    try:
+        stdout, stderr = process.communicate(raw, timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        stdout, stderr = _stop_and_reap_process_group(
+            process, grace_seconds=terminate_grace_seconds,
+        )
+        return RuntimeResult(
+            2,
+            b'{"decision":"block","reason":"root stop runtime timed out"}\n',
+            b"qofi-harness-lifecycle-broker: runtime timeout\n",
+        )
+    finally:
+        for selected, previous in old_handlers.items():
+            signal.signal(selected, previous)
+    if received_signal is not None:
+        if process.poll() is None:
+            _stop_and_reap_process_group(process, grace_seconds=terminate_grace_seconds)
+        return RuntimeResult(
+            2,
+            b'{"decision":"block","reason":"root lifecycle broker was interrupted"}\n',
+            b"qofi-harness-lifecycle-broker: interrupted and reaped runtime\n",
+        )
+    if len(stdout) > MAX_RUNTIME_OUTPUT_BYTES or len(stderr) > MAX_RUNTIME_OUTPUT_BYTES:
+        return RuntimeResult(2, b'{"decision":"block","reason":"root stop runtime output exceeded its bound"}\n', b"qofi-claude-stop-broker: runtime output overflow\n")
+    return RuntimeResult(process.returncode, stdout, stderr)
+
+
+RuntimeInvoker = Callable[[Path, Path, bytes, Mapping[str, str], Path], RuntimeResult]
+CodexAuthorizer = Callable[[Mapping[str, object], Mapping[str, object]], Optional[Mapping[str, object]]]
+ClaudeHookAuthorizer = Callable[[Mapping[str, object], Mapping[str, object]], bool]
+LifecycleAuthorizer = Callable[[str, Mapping[str, object]], bool]
+
+
+def refuse_unintegrated_codex(
+    _request: Mapping[str, object], _registration: Mapping[str, object],
+) -> Mapping[str, object] | None:
+    # Production is deliberately closed until the root broker can consume a
+    # one-time receipt directly from the root-admitted manager.  A caller-held
+    # daemon token or verdict is never treated as lifecycle authority.
+    return None
+
+
+def authorize_codex_completion(
+    request: Mapping[str, object], registration: Mapping[str, object],
+) -> Mapping[str, object] | None:
+    if request.get("operation") != "task-complete":
+        return None
+    return consume_manager_completion(request, registration)
+
+
+def refuse_untrusted_claude_hook(
+    _request: Mapping[str, object], _registration: Mapping[str, object],
+) -> bool:
+    # Native Claude hook input has no unforgeable same-UID provenance. Adopted
+    # completion is supported only by the separately admitted print supervisor.
+    return False
+
+
+def refuse_unpublished_lifecycle(
+    _runtime: str, _registration: Mapping[str, object],
+) -> bool:
+    # Atomic parity has no safe publication/exec consumer yet.  Registration,
+    # manager receipts, and an attested bundle are necessary but insufficient.
+    return False
+
+
+def dispatch_hook(
+    paths: BrokerPaths,
+    raw: bytes,
+    *,
+    owner_uid: int = 0,
+    runtime_invoker: RuntimeInvoker = run_runtime_process,
+    codex_authorizer: CodexAuthorizer = authorize_codex_completion,
+    claude_hook_authorizer: ClaudeHookAuthorizer = refuse_untrusted_claude_hook,
+    lifecycle_authorizer: LifecycleAuthorizer = refuse_unpublished_lifecycle,
+) -> DispatchResult:
+    request: Mapping[str, object] | None = None
+    try:
+        value, repo = parse_hook_scope(raw)
+    except BrokerError:
+        try:
+            parsed = json.loads(raw.decode("utf-8", "strict"))
+            if not isinstance(parsed, dict) or raw != canonical_json_bytes(parsed):
+                raise BrokerError("broker request is not canonical")
+            try:
+                _, _, requested_swarm = parse_broker_request(parsed)
+            except BrokerError:
+                claimed = parsed.get("swarm")
+                if (parsed.get("schema") == BROKER_REQUEST_SCHEMA
+                        and isinstance(claimed, str) and SAFE_SWARM.fullmatch(claimed)
+                        and lookup_registration_for_swarm(paths, claimed, owner_uid) is not None):
+                    return DispatchResult(
+                        True, 2,
+                        b'{"decision":"block","reason":"root lifecycle broker refused malformed operation"}\n',
+                        b"qofi-harness-lifecycle-broker: malformed adopted request\n",
+                    )
+                raise
+            value = parsed
+            request = parsed
+        except (BrokerError, UnicodeDecodeError, ValueError):
+            # No trustworthy repository scope means there is no proof this
+            # event is adopted. The managed Claude hook stays inert elsewhere.
+            return DispatchResult(False, 0)
+    if request is None:
+        registration = lookup_registration(paths, repo, owner_uid)
+        if registration is None:
+            return DispatchResult(False, 0)
+    else:
+        selected = lookup_registration_for_swarm(paths, requested_swarm, owner_uid)
+        if selected is None:
+            return DispatchResult(False, 0)
+        repo, registration = selected
+    try:
+        if request is None:
+            validate_adopted_hook(value, registration, repo)
+            if not lifecycle_authorizer("claude", registration):
+                raise BrokerError("atomic runtime parity admission is unavailable")
+            if not claude_hook_authorizer(value, registration):
+                raise BrokerError("native Claude hook lacks supervised-process authority")
+            operation = "claude-hook"
+            runtime = "claude"
+        else:
+            operation, runtime, _ = parse_broker_request(request)
+            if request.get("swarm") != registration.get("swarm"):
+                raise BrokerError("broker request has the wrong registered swarm")
+            if operation == "conformance-check":
+                return DispatchResult(
+                    True, 0, conformance_decision(paths, registration, runtime, owner_uid), b"",
+                )
+            if not lifecycle_authorizer(runtime, registration):
+                raise BrokerError("atomic runtime parity admission is unavailable")
+            receipt = codex_authorizer(request, registration) if runtime == "codex" else None
+            if receipt is None:
+                raise BrokerError("Codex lifecycle request lacks root-admitted manager proof")
+            raw = canonical_json_bytes({
+                "schema": "qofi-harness-internal-codex-completion/v1",
+                "request": request,
+                "manager_receipt": receipt,
+            })
+        bun, entry = load_attested_runtime(paths, owner_uid)
+        clean_env = {
+            "HOME": str(registration["operator_home"]),
+            "PATH": f"{bun.parent}:/usr/bin:/bin:/usr/sbin:/sbin",
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "SWARM_NAME": str(registration["swarm"]),
+            "SWARM_HARNESS_BROKER_OPERATION": operation,
+            "SWARM_HARNESS_BROKER_RUNTIME": runtime,
+            "SWARM_HARNESS_AUTHORITY_UID": str(owner_uid),
+            "SWARM_HARNESS_OPERATOR_UID": str(registration["operator_uid"]),
+            "SWARM_HARNESS_OPERATOR_USER": str(registration["operator_user"]),
+            "SWARM_HARNESS_STATE_ROOT": str(registration["state_root"]),
+            "SWARM_HARNESS_ROADMAP_REPO_ROOT": str(registration["roadmap_repo_root"]),
+            "SWARM_HARNESS_DR_REFS": ",".join(str(item) for item in registration["dr_refs"]),
+            "CLAUDE_PROJECT_DIR": str(repo),
+            "SWARM_HARNESS_PARITY_RECEIPT": str(registration["receipt_path"]),
+            "DISCORD_BOUND_CHANNEL": str(registration["channel_id"]),
+            "DISCORD_BOT_TOKEN": str(registration["_token"]),
+        }
+        fallback = registration.get("fallback_channel_id")
+        if isinstance(fallback, str):
+            clean_env["SWARM_STOP_FALLBACK_CHANNEL"] = fallback
+        manager_socket = registration.get("manager_socket")
+        if isinstance(manager_socket, str):
+            clean_env["SWARM_HARNESS_MANAGER_SOCKET"] = manager_socket
+        result = runtime_invoker(bun, entry, raw, clean_env, repo)
+        if result.returncode not in (0, 2):
+            raise BrokerError("root stop runtime returned an unsupported status")
+        return DispatchResult(True, result.returncode, result.stdout, result.stderr)
+    except (BrokerError, OSError, UnicodeError) as error:
+        # Do not expose root paths, token bytes, or parser details to the worker.
+        diagnostic = type(error).__name__
+        return DispatchResult(
+            True,
+            2,
+            b'{"decision":"block","reason":"root harness lifecycle authority refused this boundary"}\n',
+            f"qofi-harness-lifecycle-broker: authority refusal ({diagnostic})\n".encode(),
+        )
+
+
+def read_stdin_bounded() -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = os.read(0, 64 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_HOOK_BYTES:
+            return b"x" * (MAX_HOOK_BYTES + 1)
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def main() -> int:
+    os.umask(0o077)
+    if len(sys.argv) != 1 or os.geteuid() != 0:
+        sys.stderr.write("qofi-harness-lifecycle-broker: fixed root invocation required\n")
+        return 77
+    if Path(os.path.realpath(sys.argv[0])) != PRODUCTION_PATHS.installed_broker:
+        sys.stderr.write("qofi-harness-lifecycle-broker: installed path identity mismatch\n")
+        return 77
+    result = dispatch_hook(PRODUCTION_PATHS, read_stdin_bounded())
+    if result.stdout:
+        os.write(1, result.stdout)
+    if result.stderr:
+        os.write(2, result.stderr)
+    return result.returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,5 +1,7 @@
 // Tests for the inbound channel binding. Run with: `bun test` in bridge/.
 import { test, expect } from 'bun:test'
+import { readFileSync } from 'fs'
+import { join } from 'path'
 import { parseBoundChannels, isBoundDrop } from './binding.ts'
 
 const OP = '1508921858165047390' // #qofi-product (operator)
@@ -42,4 +44,14 @@ test('CPO bound to [operator, bus]: both pass, a third channel drops', () => {
 test('unbound (empty list) → nothing dropped on this rule (legacy)', () => {
   expect(isBoundDrop([], BUS)).toBe(false)
   expect(isBoundDrop([], CTO)).toBe(false)
+})
+
+test('disabled DM policy remains a global Claude ingress kill switch', () => {
+  const source = readFileSync(join(import.meta.dir, 'server.ts'), 'utf8')
+  const gate = source.slice(source.indexOf('async function gate('), source.indexOf('function isMentioned('))
+  const disabled = gate.indexOf("if (access.dmPolicy === 'disabled')")
+  const dmSplit = gate.indexOf('if (isDM)')
+  expect(disabled).toBeGreaterThanOrEqual(0)
+  expect(dmSplit).toBeGreaterThan(disabled)
+  expect(gate.slice(dmSplit).includes("if (access.dmPolicy === 'disabled')")).toBe(false)
 })

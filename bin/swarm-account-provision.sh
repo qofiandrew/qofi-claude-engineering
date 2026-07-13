@@ -62,6 +62,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONF="${SWARM_CONF:-$SWARM_HOME/swarm.conf}"
 OWNER_ID="${SWARM_OWNER_DISCORD_ID:-1507069153335443608}"
 WATCHER_ID="${CTO_BUS_WATCHER_BOT_ID:-1510298728148369448}"
+case "$OWNER_ID" in ''|*[!0-9]*) echo "$PROG: SWARM_OWNER_DISCORD_ID must be numeric" >&2; exit 2 ;; esac
+case "$WATCHER_ID" in ''|*[!0-9]*) echo "$PROG: CTO_BUS_WATCHER_BOT_ID must be numeric" >&2; exit 2 ;; esac
 
 log()  { printf '%s: %s\n' "$PROG" "$*"; }
 warn() { printf '%s: %s\n' "$PROG" "$*" >&2; }
@@ -134,7 +136,7 @@ fi
 # ---------------------------------------------------------------------------
 # 1) Directory skeleton.
 # ---------------------------------------------------------------------------
-mkdir -p "$PROJECTS_DIR" "$PLUGINS_DIR" "$(dirname "$ACCESS_FILE")" \
+( umask 077; mkdir -p "$PROJECTS_DIR" "$PLUGINS_DIR" "$(dirname "$ACCESS_FILE")" ) \
   || { echo "$PROG: FATAL — could not create the config-dir skeleton under $CONFIG_DIR" >&2; exit 3; }
 log "config-dir skeleton ensured: $CONFIG_DIR"
 
@@ -195,29 +197,40 @@ PY
 #    group superset, preserve any existing top-level keys/pending.
 # ---------------------------------------------------------------------------
 CHANNELS_CSV="$(printf '%s' "$CHANNELS" | tr '\n' ',' | sed 's/,$//')"
-python3 - "$ACCESS_FILE" "$OWNER_ID" "$WATCHER_ID" "$CHANNELS_CSV" <<'PY' || { echo "$PROG: FATAL — could not write access.json" >&2; exit 3; }
-import json, os, sys
+/usr/bin/python3 -I -B - "$ACCESS_FILE" "$OWNER_ID" "$WATCHER_ID" "$CHANNELS_CSV" <<'PY' || { echo "$PROG: FATAL — could not write access.json" >&2; exit 3; }
+import json, os, stat, sys, tempfile
 path, owner, watcher, channels_csv = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 channels = [c for c in channels_csv.split(",") if c]
 cfg = {"dmPolicy": "pairing", "allowFrom": [], "groups": {}, "pending": {}}
-if os.path.exists(path):
+if os.path.lexists(path):
+    st=os.lstat(path)
+    if (not stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode) or st.st_uid != os.getuid()):
+        raise SystemExit('unsafe access.json owner/type')
     try:
         cur = json.load(open(path))
         if isinstance(cur, dict): cfg = cur
     except Exception:
         pass
 cfg.setdefault("dmPolicy", "pairing")
-cfg.setdefault("allowFrom", [])
+top=cfg.setdefault("allowFrom", [])
+if not isinstance(top,list): raise SystemExit('top-level allowFrom must be a list')
+if owner not in top: top.append(owner)
+cfg["loginControlOwnerId"] = owner
 cfg.setdefault("groups", {})
 cfg.setdefault("pending", {})
 allow = [owner]
 if watcher and watcher not in allow: allow.append(watcher)
 for ch in channels:
     cfg["groups"][ch] = {"requireMention": False, "allowFrom": list(allow)}
-tmp = path + ".tmp"
-with open(tmp, "w") as f:
-    json.dump(cfg, f, indent=2); f.write("\n")
-os.replace(tmp, path)
+fd,tmp=tempfile.mkstemp(prefix='.access.json.',dir=os.path.dirname(path) or '.')
+try:
+    with os.fdopen(fd, "w") as f:
+        json.dump(cfg, f, indent=2); f.write("\n"); f.flush(); os.fsync(f.fileno())
+    os.chmod(tmp,0o600); os.replace(tmp,path)
+except BaseException:
+    try: os.unlink(tmp)
+    except FileNotFoundError: pass
+    raise
 json.load(open(path))  # validate
 print("  symmetric access.json: {} group(s), allowFrom=[owner{}]".format(
     len(channels), "+watcher" if watcher else ""))

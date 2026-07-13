@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
-import { mkdtempSync, rmSync, readFileSync, existsSync } from 'fs'
+import { chmodSync, mkdtempSync, rmSync, readFileSync, existsSync, statSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { runCli } from './cli.ts'
@@ -18,6 +18,31 @@ describe('cli', () => {
     expect(out).toContain('allowFrom (0)')
   })
 
+  test('status renders only profile labels, headroom, leases, and cooldowns', () => {
+    writeFileSync(join(dir, 'rotation-state.json'), JSON.stringify({
+      schema: 'qofi-codex-profile-rotation/v1',
+      swarm: 'alpha', pool: 'rotating', threshold_percent: 85,
+      active_profile: 'max_b', parked_until_ms: null,
+      profiles: [
+        {
+          label: 'default', shared: false, leased_by: [], cooldown_until_ms: Date.now() + 60_000,
+          telemetry_status: 'fresh', observed_at_ms: Date.now(), headroom_percent: 14, five_hour: null, weekly: null,
+        },
+        {
+          label: 'max_b', shared: false, leased_by: ['alpha'], cooldown_until_ms: null,
+          telemetry_status: 'fresh', observed_at_ms: Date.now(), headroom_percent: 72.5, five_hour: null, weekly: null,
+        },
+      ],
+    }) + '\n', { mode: 0o600 })
+    chmodSync(join(dir, 'rotation-state.json'), 0o600)
+    const out = runCli(['status'], dir)
+    expect(out).toContain('codex auth pool: rotating')
+    expect(out).toContain('active profile: max_b')
+    expect(out).toContain('max_b: headroom=72.5% leased_by=alpha cooldown=ready')
+    expect(out).not.toContain('auth.json')
+    expect(out).not.toContain('token')
+  })
+
   test('pair approves a pending sender and drops the approval marker with the DM chat id', () => {
     const store = new AccessStore(dir)
     const a = defaultAccess()
@@ -33,6 +58,7 @@ describe('cli', () => {
     expect(load().pending['abc123']).toBeUndefined()
     // approved/<senderId> contents = DM channel id — the daemon polls this
     expect(readFileSync(join(dir, 'approved', 'u9'), 'utf8')).toBe('dm-77')
+    expect(statSync(join(dir, 'approved', 'u9')).mode & 0o777).toBe(0o600)
   })
 
   test('pair rejects unknown and expired codes', () => {

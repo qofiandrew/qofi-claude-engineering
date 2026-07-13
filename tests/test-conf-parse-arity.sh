@@ -70,11 +70,13 @@ assert_eq "BOT_ACME"            "$SWARM_CONF_F_TOKVAR"  "tokvar"
 assert_eq "111222333444555666" "$SWARM_CONF_F_CHANNEL" "channel is JUST the channel (the bug)"
 assert_eq "999888777666555444" "$SWARM_CONF_F_GUILD"   "guild_id"
 assert_eq ""                    "$SWARM_CONF_F_ACCOUNT" "account empty in a 5-column (no ACCOUNT) row"
+assert_eq "claude"              "$SWARM_CONF_F_ENGINE" "legacy blank engine resolves to Claude"
+assert_eq "default"             "$SWARM_CONF_F_CODEX_AUTH_POOL" "legacy blank field 8 resolves to default pool"
 
 # ---------------------------------------------------------------------------
 # 2) ACCOUNT is field 6 — a 6-column row populates SWARM_CONF_F_ACCOUNT and
-#    leaves guild_id (field 5) clean. The FUTURE-COLUMN GUARANTEE now sits at
-#    field 7: a 7th column must not corrupt ACCOUNT (it lands in _rest).
+#    leaves guild_id (field 5) clean. ENGINE is field 7, CODEX_AUTH_POOL is
+#    field 8, and the FUTURE-COLUMN GUARANTEE sits at field 9.
 # ---------------------------------------------------------------------------
 echo "=== 6-column row (ACCOUNT is field 6) ==="
 swarm_conf_parse_line "acme | /p | BOT_ACME | 111222333444555666 | 999888777666555444 | max-a"
@@ -82,10 +84,22 @@ assert_eq "111222333444555666" "$SWARM_CONF_F_CHANNEL" "channel uncorrupted by t
 assert_eq "999888777666555444" "$SWARM_CONF_F_GUILD"   "guild_id uncorrupted by the ACCOUNT column"
 assert_eq "max-a"              "$SWARM_CONF_F_ACCOUNT" "ACCOUNT captured from field 6"
 
-echo "=== 7-column row (a hypothetical future column lands in _rest) ==="
-swarm_conf_parse_line "acme | /p | BOT_ACME | 111222333444555666 | 999888777666555444 | max-a | future"
-assert_eq "max-a"              "$SWARM_CONF_F_ACCOUNT" "ACCOUNT uncorrupted by a 7th column (future → _rest)"
-assert_eq "999888777666555444" "$SWARM_CONF_F_GUILD"   "guild_id still clean with a 7th column"
+echo "=== 7/8/9-column rows (ENGINE, CODEX_AUTH_POOL, future catch-all) ==="
+swarm_conf_parse_line "acme | /p | BOT_ACME | 111222333444555666 | 999888777666555444 | max-a | codex"
+assert_eq "max-a"              "$SWARM_CONF_F_ACCOUNT" "ACCOUNT uncorrupted by ENGINE field 7"
+assert_eq "codex"              "$SWARM_CONF_F_ENGINE" "ENGINE captured from field 7"
+assert_eq "default"            "$SWARM_CONF_F_CODEX_AUTH_POOL" "missing field 8 resolves to default pool"
+
+swarm_conf_parse_line "acme | /p | BOT_ACME | 111222333444555666 | 999888777666555444 | max-a | codex | premium_a"
+assert_eq "max-a"              "$SWARM_CONF_F_ACCOUNT" "ACCOUNT remains distinct from field 8"
+assert_eq "premium_a"          "$SWARM_CONF_F_CODEX_AUTH_POOL" "CODEX_AUTH_POOL captured from field 8"
+
+swarm_conf_parse_line "acme | /p | BOT_ACME | 111222333444555666 | 999888777666555444 | max-a | codex | premium_a | future-v1"
+assert_eq "premium_a"          "$SWARM_CONF_F_CODEX_AUTH_POOL" "field 9 cannot corrupt CODEX_AUTH_POOL"
+assert_eq "999888777666555444" "$SWARM_CONF_F_GUILD" "guild remains clean with field 9"
+
+swarm_conf_parse_line "acme | /p | BOT_ACME | 1 | | | codex | ../escape" >/dev/null 2>&1
+assert_rc 1 "$?" "unsafe CODEX_AUTH_POOL makes the row fail closed"
 
 # ---------------------------------------------------------------------------
 # 3) Legacy 4-column row (no guild_id yet) — back-compat: channel still clean,
@@ -143,6 +157,11 @@ if [ -f "$CONF" ]; then
       *) clean_acct=1 ;;
     esac
     assert_eq 1 "$clean_acct" "live row '$nm': ACCOUNT has no embedded '|'"
+    case "$SWARM_CONF_F_CODEX_AUTH_POOL" in
+      [!a-z]*|*[!a-z0-9_-]*) clean_pool=0 ;;
+      *) clean_pool=1 ;;
+    esac
+    assert_eq 1 "$clean_pool" "live row '$nm': CODEX_AUTH_POOL is canonical/default"
   done < <(grep -vE '^[[:space:]]*(#|$)' "$CONF")
 else
   echo "  (skip: $CONF not present)"

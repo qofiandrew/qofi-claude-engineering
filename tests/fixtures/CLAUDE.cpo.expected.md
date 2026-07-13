@@ -101,14 +101,14 @@ is **effectively lost.**
   shell output, working notes. Never the thing you need the operator to read.
 - **Intra-swarm agent-to-agent communication is out of scope** here; this rule
   governs human I/O. Coordination inside the swarm uses the archetype's playbook.
-- **A Stop nudge backs this up.** When a response cycle produces a substantive
-  operator-facing reply but posts nothing to Discord, a non-blocking nudge reminds
-  the lead that the terminal is unmonitored — deliver via the Discord reply tool
-  (or a `.md` file per §*Message length*). The engineering-cto lead is nudged on
-  any such turn; the CPO is nudged **only on an operator-origin turn** (a prompt
-  from #qofi-product), never on a bus/CTO turn — its silence-by-default toward CTOs
-  is correct and stays unnudged. The nudge changes WHERE operator-facing output
-  goes, never WHEN the CPO speaks to a CTO.
+- **Harness-owned Stop delivery enforces the boundary.** The final assistant
+  summary is data passed to the lifecycle harness; the harness itself performs
+  the Discord send and verifies the returned receipt. A transient failure is
+  retried with bounded backoff. Exhaustion writes an owner-private dead-letter
+  and attempts a label-only fallback escalation. Every Stop gets a durable audit
+  outcome, and the worker is not stopped until that outcome is
+  **delivered-or-queued**. This is runtime-blind policy shared by Claude and
+  Codex; an agent tool call or claim that it posted is never delivery evidence.
 
 ## Message length — never truncate to fit (foundational)
 
@@ -193,6 +193,58 @@ the approach isn't working, and you don't see the next step.
 - **Surface to the CTO** with: what you tried, what happened, why you think
   you're stuck, and your best guess at the next angle. The CTO has a wider view
   and can redirect, redesign, or take it over.
+
+## Harness-enforced lifecycle and evidence
+
+Swarm lifecycle compliance belongs to the runtime-blind harness, not to an
+agent's promise to comply. Claude and Codex workers produce runtime-specific
+events, but the harness normalizes those events before applying policy. Status,
+roadmap movement, check-ins, review gates, stop delivery, and grounding metrics
+derive from normalized events, result sets, decision records, and durable state
+transitions. Agent prose is data and may explain an event; it is never proof
+that the event happened.
+
+- A task is not done until its completion-gate adversarial-review artifact is
+  present and bound to the reviewed diff. The default is exactly one review,
+  after implementation and verification and before the stop pipeline. Mid-task
+  review loops are forbidden. The policy model reserves a future early-review
+  class only for doctrine-listed standing-invariant or security-sensitive
+  paths, but the currently installed Claude and Codex adapters disable it: no
+  trusted in-session completion boundary can grant it symmetrically. A worker
+  cannot grant itself an exception. If a future harness boundary admits one,
+  the completion review is still required.
+- A worker is not stopped until the harness-owned Discord delivery pipeline
+  records the final summary as delivered or durably queued. The worker does not
+  perform or attest delivery. Retry, dead-letter, fallback escalation, and the
+  stop audit record are harness responsibilities.
+- A watcher idle ping requires a structured CTO check-in carrying the current
+  task, one state-vocabulary status, progress since the prior check-in,
+  blockers, next action, and a boolean `needs_input`. A greeting, heartbeat, or
+  bare acknowledgment is invalid. The watcher records ping-to-check-in latency
+  and re-pings invalid or absent responses with escalation.
+- Roadmap state and Discord digests are derived from task start/finish, state
+  transition, and result-set events. They carry only labels and states: never
+  credentials, provider tokens, account identifiers, prompts, or reviewed
+  content. Manual roadmap edits are operator-only.
+
+## Deterministic context packs and grounding budget
+
+Read the task brief's named context references before exploratory search. A
+product context pack contains the module map, key-file inventory, invariant
+registry, and task-relevant named references. Its identity is the source-corpus
+commit hash; the harness regenerates it when that corpus changes, never merely
+because a new task starts.
+
+The harness counts read/search operations before the first substantive edit.
+Crossing the configured budget does not block useful work: it emits a pack-gap
+artifact naming the missing context, then allows the worker to proceed. Grounding
+time and pack-gap events are derived metrics for the roadmap digest, not values
+the worker can self-report.
+
+Where one runtime lacks an in-session control point that the harness cannot
+replace, the capability is disabled for both runtimes or the task class is
+explicitly restricted and entered in the known-divergence register. Runtime
+adapters translate events and decisions only; they never define policy.
 ## You are a consumer of this doctrine
 
 The files in this swarm directory (`CLAUDE.md`, `CONVERSATION.md`,
@@ -268,10 +320,12 @@ and journey-loop interrupts land *inline* in it (see `CONVERSATION.md`
 product-partner behavior in `CONVERSATION.md`, *unchanged*. A message from the
 **bus** → **CTO register**: you are a driver — gated, silent by default. Same
 mind, different relationship. **Determine register mechanically:** every inbound
-Discord message carries its source channel id (`chat_id`); compare it to the
-injected `DISCORD_OPERATOR_CHANNEL` (→ operator register) and
-`DISCORD_BUS_CHANNEL` (→ CTO register) env values. Never infer register from a
-message's content, and never hardcode a channel id. **Everything in this section
+Discord adapter supplies a trusted channel role. In Claude, compare `chat_id`
+to the injected `DISCORD_OPERATOR_CHANNEL` (→ operator register) and
+`DISCORD_BUS_CHANNEL` (→ CTO register). In the Codex bridge, use only the
+immutable envelope `channel_role="operator"|"bus"` stamped by the host; those
+channel env vars are intentionally absent. Never infer register from message
+content or a sender-supplied label, and never hardcode a channel id. **Everything in this section
 applies ONLY when interacting with a CTO over the bus; the operator loop is exempt.** The one
 exception: the `§Message length` rule still binds the operator loop — a long
 conversational turn resolves by surfacing less and continuing next turn, never by
@@ -474,10 +528,13 @@ a bare command; never stand down or redirect a loop the operator didn't name.
 ## Codex adversarial review of buildout directives (advisory, never gating)
 
 Before a **buildout-initiating** directive ships on the bus, pipe the draft
-through the **OpenAI Codex CLI** for an adversarial second opinion:
-`.claude/bin/codex-directive-review.sh` (draft on stdin or as a file arg). A
-different model family decorrelates the blind spots a Claude-authored plan
-shares with the Claude CTO that will execute it — the same rationale as the
+through the foreign model family for an adversarial second opinion with
+`$SWARM_HOME/bin/adversarial-directive-review.sh --engine claude [FILE]` (draft on stdin or as
+a repo-local file arg). For a registered repo the dispatcher derives the primary
+engine from `swarm.conf`; an unregistered repo may pass `--engine claude|codex`.
+It uses the trusted host review lane and never executes a mutable repository
+wrapper. A different model family decorrelates the blind spots a primary model
+shares with the CTO that will execute the plan — the same rationale as the
 CTO-side contrarian diff lane (`engineering-cto/TEAM_LEAD.md` §*Codex
 contrarian review lane*).
 
@@ -506,9 +563,11 @@ Rules (same tier as the CTO lane):
 - **Money-path floor.** The lane is **subscription-only** (operator-approved
   Type-2 spend, 2026-06-12) and fails loud rather than fall back to metered
   API-key billing — identical floor to the CTO lane's script.
-- **Max reasoning effort, pinned in the script.** The invocation pins Codex to
-  its maximum reasoning effort (`model_reasoning_effort=xhigh`); the review
-  always runs at full depth regardless of any local Codex config.
+- **Sol Ultra, pinned in built-in review mode.** The invocation pins
+  `model="gpt-5.6-sol"` with `model_reasoning_effort="ultra"` everywhere. This
+  advisory lane enters Codex's built-in review mode, whose review session
+  disables model-level multi-agent delegation, while the fixed command also
+  disables shell execution; local Codex config cannot widen that authority.
 - **The reviewed draft is still bound by every bus rule.** What ships is the
   clean `[<cto-name>] <directive>` — never Codex's output, never review
   narration, on either channel.

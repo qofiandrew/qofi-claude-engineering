@@ -8,6 +8,8 @@ launchd/rotate-tick.env.local
 # Bridge (bun/node) build artifacts
 node_modules
 bun.lock
+!bridge/bun.lock
+!codex-bridge/bun.lock
 
 # OS / editor cruft
 .DS_Store
@@ -24,3 +26,7 @@ bun.lock
 # the first failover so --reset can restore the operator's intended account split.
 # Machine-local, never tracked (ADR-0018).
 .swarm-accounts-default
+
+# Account-usage verifier snapshot — profile labels and usage counters captured
+# on this host; runtime state, never source.
+.swarm-account-usage-baseline

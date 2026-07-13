@@ -118,6 +118,7 @@ snapshot_default_if_absent() {
     while IFS= read -r _line; do
       swarm_conf_parse_line "$_line" || continue
       [ -z "$SWARM_CONF_F_NAME" ] && continue
+      [ "$SWARM_CONF_F_ENGINE" = "codex" ] && continue
       printf '%s\t%s\n' "$SWARM_CONF_F_NAME" "$SWARM_CONF_F_ACCOUNT"
     done < <(grep -vE '^[[:space:]]*(#|$)' "$CONF")
   } > "$_tmp" 2>/dev/null && mv "$_tmp" "$SNAPSHOT" 2>/dev/null || { rm -f "$_tmp"; warn "could not write default-split snapshot $SNAPSHOT (--reset will be unavailable)"; return 1; }
@@ -138,11 +139,16 @@ if [ "$RESET" -eq 1 ]; then
   while IFS="$(printf '\t')" read -r _sname _sacct; do
     case "$_sname" in '#'*|'') continue ;; esac
     # Current account for this swarm.
-    _cur=""
+    _cur=""; _engine=""
     while IFS= read -r _line; do
       swarm_conf_parse_line "$_line" || continue
-      if [ "$SWARM_CONF_F_NAME" = "$_sname" ]; then _cur="$SWARM_CONF_F_ACCOUNT"; break; fi
+      if [ "$SWARM_CONF_F_NAME" = "$_sname" ]; then
+        _cur="$SWARM_CONF_F_ACCOUNT"; _engine="$SWARM_CONF_F_ENGINE"; break
+      fi
     done < <(grep -vE '^[[:space:]]*(#|$)' "$CONF")
+    # ACCOUNT is a Claude-auth partition only. Ignore legacy snapshot rows for
+    # Codex so reset preserves field 6 for a possible future engine switch.
+    [ "$_engine" = "codex" ] && continue
     if [ "$_cur" != "$_sacct" ]; then
       if swarm_conf_set_account "$CONF" "$_sname" "$_sacct"; then
         changed="$changed $_sname(->${_sacct:-default})"
@@ -168,14 +174,18 @@ fi
 [ -z "$ACCOUNT" ] && { echo "$PROG: empty <account> — use --reset to return a swarm to the default account" >&2; usage 1; }
 
 # Find the swarm's row: capture its repo + current account.
-REPO=""; CUR_ACCOUNT=""; FOUND=0
+REPO=""; CUR_ACCOUNT=""; ENGINE=""; FOUND=0
 while IFS= read -r _line; do
   swarm_conf_parse_line "$_line" || continue
   if [ "$SWARM_CONF_F_NAME" = "$NAME" ]; then
-    REPO="$SWARM_CONF_F_REPO"; CUR_ACCOUNT="$SWARM_CONF_F_ACCOUNT"; FOUND=1; break
+    REPO="$SWARM_CONF_F_REPO"; CUR_ACCOUNT="$SWARM_CONF_F_ACCOUNT"; ENGINE="$SWARM_CONF_F_ENGINE"; FOUND=1; break
   fi
 done < <(grep -vE '^[[:space:]]*(#|$)' "$CONF")
 [ "$FOUND" -eq 0 ] && { echo "$PROG: no swarm named '$NAME' in $CONF" >&2; exit 1; }
+if [ "$ENGINE" = "codex" ]; then
+  echo "$PROG: REFUSED — '$NAME' uses engine=codex; ACCOUNT and Claude Max failover do not apply. No checkpoint, auth probe, config rewrite, or restart was performed." >&2
+  exit 1
+fi
 case "$REPO" in "~"*) REPO="$HOME${REPO#\~}" ;; esac
 
 # Validate the target label + resolve its paths/token-var (the SOLE constructor).

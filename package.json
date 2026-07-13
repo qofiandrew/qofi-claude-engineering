@@ -3,7 +3,9 @@
   "version": "0.0.0",
   "private": true,
   "scripts": {
-    "_comment_test": "Bun is the canonical runner (matches .claude/test-cmd): it runs BOTH the bun:test files (bridge/) and the node:test files (cto-watcher/) green. `node --test` cannot load bun:test and produced perennial false-reds on bridge/*.test.ts — do not reintroduce it.",
-    "test": "bun test"
+    "_comment_test": "The repository's canonical check runs Bun tests and every shell integration test through .claude/test-cmd.",
+    "test": "bash .claude/test-cmd",
+    "test:unit": "bun test",
+    "audit:production": "cd bridge && bun audit --production && cd ../codex-bridge && bun audit --production"
   }
 }

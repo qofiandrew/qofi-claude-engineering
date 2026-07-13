@@ -1,0 +1,7 @@
+diff --git a/src/check.ts b/src/check.ts
+index 1111111..2222222 100644
+--- a/src/check.ts
++++ b/src/check.ts
+@@ -1 +1 @@
+-export const ready = false
++export const ready = true

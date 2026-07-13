@@ -139,6 +139,22 @@ export class LivenessMonitor {
     return [...this.cto.entries()];
   }
 
+  /** Read the declared state for one named loop; overlays remain observational. */
+  stateOf(name) {
+    return this.cto.get(name)?.state ?? null;
+  }
+
+  /**
+   * tick() reserves a cooldown slot before the asynchronous delivery starts.
+   * If policy rendering or the retry queue fails terminally, release that slot
+   * so the next watcher interval retries instead of hiding the failed ping for
+   * a full cooldown window.
+   */
+  releaseFailedPing(name) {
+    const c = this.cto.get(name);
+    if (c) c.lastPingAt = 0;
+  }
+
   /**
    * Which DRIVING loops are due for a revival ping right now. Due iff DRIVING,
    * silent past the threshold, and not pinged within the cooldown. Records the ping.

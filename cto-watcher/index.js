@@ -16,7 +16,7 @@ import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { config as loadDotenv } from 'dotenv';
 import { Client, GatewayIntentBits, Events, Partials, AttachmentBuilder } from 'discord.js';
-import { prepareContext, decideRoute } from './routing.js';
+import { prepareContext, decideRoute, harnessDraftSurfaceEnabled } from './routing.js';
 import { relayMessage } from './attachments.js';
 import { DeliveryQueue } from './queue.js';
 import { writeDeadLetter } from './deadletter.js';
@@ -25,6 +25,10 @@ import { LivenessMonitor, renderStateReadout } from './liveness.js';
 import { readTokenFromEnvFile } from './token.js';
 import { readSwarmLimitStates } from './swarmstatus.js';
 import { authorizeDm, readOperatorAllowFrom, KillSwitch } from './killswitch.js';
+import { HarnessPolicyClient } from './harness-policy-client.js';
+import { CheckInCoordinator } from './checkin-coordinator.js';
+import { CheckInMetricJournal } from './checkin-metrics.js';
+import { RoadmapCoordinator } from './roadmap-coordinator.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Recoverable dead-letter dir (gitignored; chmod-600 files) — ADR-0010.
@@ -43,6 +47,8 @@ const ACCESS_PATH =
 const SWARM_STATUS_PATH =
   process.env.CTO_WATCHER_SWARM_STATUS_JSON ||
   join(process.env.SWARM_STATE_DIR || join(homedir(), '.config', 'swarm'), 'status.json');
+
+const SWARM_STATE_DIR = process.env.SWARM_STATE_DIR || join(homedir(), '.config', 'swarm');
 
 const killswitch = new KillSwitch(); // in-memory; pm2 restart → ACTIVE (safe default)
 
@@ -111,8 +117,10 @@ const client = new Client({
 let ctx = null;
 let monitor = null; // AUTO-mode liveness monitor; null unless livenessEnabled
 let deliveries = null; // serial delivery queue; set at ClientReady
+let checkins = null; // authenticated CTO check-in correlation + harness validation
+let roadmaps = null; // harness-derived roadmap query/digest surface
 
-client.once(Events.ClientReady, (c) => {
+client.once(Events.ClientReady, async (c) => {
   try {
     ctx = prepareContext(rawConfig, c.user.id);
   } catch (err) {
@@ -131,13 +139,27 @@ client.once(Events.ClientReady, (c) => {
     onDropped: async (job, err, attempts) => {
       // Recoverable dead-letter FIRST (never lose the body), then the operator DM.
       let path = null;
+      const harnessVisibility = isHarnessVisibilityJob(job);
       try {
-        path = writeDeadLetter({ dir: DEADLETTER_DIR, job, err, attempts });
-        log(`[queue] dead-lettered ${job.label} → ${path}`);
+        path = writeDeadLetter({
+          dir: DEADLETTER_DIR,
+          job,
+          err: harnessVisibility ? new Error('harness visibility delivery failed') : err,
+          attempts,
+        });
+        log(harnessVisibility
+          ? `[queue] dead-lettered ${job.label} (private recovery record)`
+          : `[queue] dead-lettered ${job.label} → ${path}`);
       } catch (e) {
         log(`[error] failed to write dead-letter for ${job.label}: ${e.message}`);
       }
-      await alertDeliveryDropped(job.label, err, attempts, path);
+      try {
+        if (checkins && await checkins.deliveryDropped(job, err)) monitor?.releaseFailedPing(job.watcherName);
+        roadmaps?.deliveryDropped(job);
+      } catch (e) {
+        log(`[error] failed to reconcile dropped ${job.label}: ${e.message}`);
+      }
+      await alertDeliveryDropped(job.label, err, attempts, path, job);
     },
   });
   log(`[ready] logged in as ${c.user.tag} (${c.user.id})`);
@@ -164,9 +186,78 @@ client.once(Events.ClientReady, (c) => {
     silenceThresholdMs: ctx.silenceThresholdMs,
     pingCooldownMs: ctx.pingCooldownMs,
   });
+
+  // Node remains the long-lived Discord runtime. A bounded Bun helper imports
+  // the shared TypeScript contracts so watcher transport cannot fork lifecycle
+  // policy. A helper failure disables only these draft surfaces; relay routing
+  // remains available and the failure is loud.
+  const draftSurfaceEnabled = harnessDraftSurfaceEnabled(ctx);
+  if (draftSurfaceEnabled) {
+    const policy = new HarnessPolicyClient();
+    const roadmapStore = {
+      repoRoot: resolve(rawConfig.roadmapRepoRoot || join(__dirname, '..')),
+      authorityFile: resolve(
+        rawConfig.roadmapAuthorityFile || join(SWARM_STATE_DIR, 'roadmap', 'authority.json'),
+      ),
+      eventStoreDirectory: resolve(
+        rawConfig.normalizedEventStoreDirectory || join(SWARM_STATE_DIR, 'events'),
+      ),
+    };
+    roadmaps = new RoadmapCoordinator({
+      policy,
+      store: roadmapStore,
+      enqueue: (job, label) => deliveries.enqueue(job, label),
+      deliver: send,
+      digestChannelId: ctx.roadmapDigestChannelId,
+      digestIntervalMs: ctx.roadmapDigestIntervalMs,
+      enabled: ctx.roadmapEnabled,
+      queryEnabled: ctx.roadmapQueriesEnabled,
+      log,
+    });
+    try {
+      const contract = await roadmaps.initialize();
+      log(`[harness] contract ${contract.contract_sha256}; checkin=${contract.checkin_schema} roadmap=${contract.roadmap_schema}`);
+    } catch (err) {
+      log(`[error] shared harness policy unavailable; check-ins/roadmap disabled: ${err.message}`);
+      roadmaps = null;
+    }
+    if (roadmaps) {
+      if (ctx.structuredCheckInsEnabled) {
+        try {
+          const metricJournal = new CheckInMetricJournal(
+            resolve(process.env.CTO_WATCHER_CHECKIN_METRICS || join(SWARM_STATE_DIR, 'checkin', 'metrics.jsonl')),
+          );
+          checkins = new CheckInCoordinator({
+            policy,
+            enqueue: (job, label) => deliveries.enqueue(job, label),
+            deliver: send,
+            metricSink: metric => metricJournal.append(metric),
+            onEscalate: event => enqueueCheckInEscalation(event),
+            maxAttempts: ctx.checkInMaxAttempts,
+            log,
+          });
+          log('[checkin] structured idle contract ENABLED by explicit operator opt-in');
+        } catch (err) {
+          log(`[error] structured check-in opt-in cannot start: ${err.message}`);
+          checkins = null;
+        }
+      } else {
+        log('[checkin] structured idle contract OFF (adoption guard); existing legacy ping remains active');
+      }
+      if (ctx.roadmapEnabled) {
+        log(`[roadmap] scheduled digest ON every ${Math.round(ctx.roadmapDigestIntervalMs / 1000)}s → ${ctx.roadmapDigestChannelId}`);
+        void roadmaps.tick(Date.now());
+        setInterval(() => void roadmaps.tick(Date.now()), ctx.checkIntervalMs);
+      } else {
+        log(`[roadmap] scheduled digest OFF; authenticated query=${ctx.roadmapQueriesEnabled ? 'ON' : 'OFF'}`);
+      }
+    }
+  } else {
+    log('[harness] ADR-0023 check-in/roadmap surfaces OFF; no Bun helper launched (adoption guard)');
+  }
   log(`[liveness] usage-limit feed: ${SWARM_STATUS_PATH} (resume buffer ${Math.round(ctx.resumeBufferMs / 1000)}s, max feed age ${Math.round(ctx.swarmStatusMaxAgeMs / 1000)}s)`);
   if (ctx.livenessEnabled) {
-    log(`[liveness] ON — monitoring ${ctx.ctoByName.size} CTO(s) on the bus`);
+    log(`[liveness] ON — monitoring ${ctx.ctoByName.size} CTO(s) on the bus; idle mode=${ctx.structuredCheckInsEnabled ? 'structured-checkin (explicit opt-in)' : 'legacy-ping (adoption guard)'}`);
     setInterval(async () => {
       const now = Date.now();
       // TRACKING (no emission) — refresh the usage-limit overlay even while paused.
@@ -193,16 +284,52 @@ client.once(Events.ClientReady, (c) => {
       // Revival pings (DRIVING-but-quiet loops; limited loops are skipped in tick).
       for (const d of monitor.tick(now)) {
         const mins = Math.round(d.silenceMs / 60000);
-        const text =
-          `⏱️ **${d.name}**: DRIVING and quiet ~${mins}m — still working, blocked, or should you correct the state? ` +
-          `Reply on the bus with the STATE grammar, e.g. \`STATE: ${d.name} DRIVING\` (heartbeat) ` +
-          `or \`STATE: ${d.name} WAITING_FOR_OPERATOR\`.`;
         try {
-          // Pings go to the BUS, @mentioning the CPO bot (its bridge only acts on mentions).
-          await send(ctx.busChannelId, text, ctx.cpoBotUserId);
-          log(`[liveness] pinged ${d.name} (silent ~${mins}m)`);
+          if (ctx.structuredCheckInsEnabled) {
+            if (!checkins || !roadmaps) throw new Error('shared check-in policy is unavailable');
+            const task = await roadmaps.resolveTask(
+              d.name,
+              monitor.stateOf(d.name),
+              `${d.name}:${now}:${d.silenceMs}`,
+            );
+            const target = ctx.ctoByName.get(d.name);
+            if (!target?.channelId || !target?.botUserId) {
+              throw new Error('named CTO has no direct channel/bot binding');
+            }
+            await checkins.issue({
+              name: d.name,
+              targetChannelId: target.channelId,
+              targetBotUserId: target.botUserId,
+              currentTask: task.current_task,
+              status: monitor.stateOf(d.name),
+              sentAtMs: now,
+            });
+            if (!task.bound) log(`[checkin] ${d.name} has no unambiguous active task in the private event journal; opaque pending label requested`);
+            log(`[liveness] structured check-in queued for ${d.name} (silent ~${mins}m)`);
+          } else {
+            // Adoption guard: an existing livenessEnabled deployment keeps its
+            // ratified legacy ping until the operator explicitly opts into the
+            // ADR-0023 draft contract.
+            const text =
+              `⏱️ **${d.name}**: DRIVING and quiet ~${mins}m — still working, blocked, or should you correct the state? ` +
+              `Reply on the bus with the STATE grammar, e.g. \`STATE: ${d.name} DRIVING\` (heartbeat) ` +
+              `or \`STATE: ${d.name} WAITING_FOR_OPERATOR\`.`;
+            await send(ctx.busChannelId, text, ctx.cpoBotUserId);
+            log(`[liveness] legacy pinged ${d.name} (structuredCheckInsEnabled=false; silent ~${mins}m)`);
+          }
         } catch (err) {
-          log(`[liveness] failed to ping ${d.name}: ${err.message}`);
+          monitor.releaseFailedPing(d.name);
+          if (ctx.structuredCheckInsEnabled) {
+            log(`[liveness] failed to queue structured check-in for ${d.name}: ${err.message}`);
+            enqueueCheckInEscalation({
+              name: d.name,
+              currentTask: 'pending-unavailable',
+              errors: ['shared check-in policy unavailable'],
+              latencyMs: null,
+            });
+          } else {
+            log(`[liveness] legacy ping delivery failed for ${d.name}: ${err.message}`);
+          }
         }
       }
     }, ctx.checkIntervalMs);
@@ -251,8 +378,16 @@ async function alertOperators(name, kind) {
 // A relay delivery that exhausted its retries is surfaced to operators rather
 // than silently lost — the permanent fix for the missing-message bug is "never
 // drop quietly". Mirrors alertOperators' fail-closed DM fan-out.
-async function alertDeliveryDropped(label, err, attempts, path = null) {
-  log(`[queue] giving up on ${label} after ${attempts} attempt(s): ${err?.message ?? err}; DMing ${ctx.alertUserIds.length} operator(s)`);
+function isHarnessVisibilityJob(job) {
+  return typeof job?.watcherKind === 'string'
+    && (job.watcherKind.startsWith('checkin-') || job.watcherKind.startsWith('roadmap-'));
+}
+
+async function alertDeliveryDropped(label, err, attempts, path = null, job = null) {
+  const labelOnly = isHarnessVisibilityJob(job);
+  log(labelOnly
+    ? `[queue] giving up on ${label} after ${attempts} attempt(s); DMing ${ctx.alertUserIds.length} operator(s)`
+    : `[queue] giving up on ${label} after ${attempts} attempt(s): ${err?.message ?? err}; DMing ${ctx.alertUserIds.length} operator(s)`);
   if (ctx.alertUserIds.length === 0) {
     log('[warn] alertUserIds empty — no one to DM about the dropped delivery');
     return;
@@ -263,14 +398,40 @@ async function alertDeliveryDropped(label, err, attempts, path = null) {
   await Promise.all(ctx.alertUserIds.map(async (uid) => {
     try {
       const user = await client.users.fetch(uid);
-      await user.send(
-        `⚠️ cto-watcher: a relay delivery (${label}) FAILED after ${attempts} attempt(s) ` +
-        `(${err?.message ?? err}) and was DROPPED. The message did NOT reach its destination. ${recoverable}`,
-      );
+      const message = labelOnly
+        ? `⚠️ cto-watcher: **${label}** failed after ${attempts} attempt(s). ` +
+          `A private recovery record was ${path ? 'queued' : 'not available'}; inspect watcher state.`
+        : `⚠️ cto-watcher: a relay delivery (${label}) FAILED after ${attempts} attempt(s) ` +
+          `(${err?.message ?? err}) and was DROPPED. The message did NOT reach its destination. ${recoverable}`;
+      await user.send(message);
     } catch (e) {
       log(`[error] failed to DM operator ${uid} about a dropped delivery: ${e.message}`);
     }
   }));
+}
+
+// Queue operator escalation through the same serialized/retrying transport as
+// relay and roadmap delivery. Only labels/state are surfaced; candidate content,
+// tokens, and account identifiers are never included.
+function enqueueCheckInEscalation({ name, currentTask, errors = [], latencyMs = null }) {
+  const reason = errors.map(error => String(error).slice(0, 120)).join('; ') || 'validation failed';
+  for (const uid of ctx?.alertUserIds ?? []) {
+    const body =
+      `⚠️ cto-watcher: structured check-in for **${name}** · ${currentTask} requires operator attention. ` +
+      `${reason}${latencyMs === null ? '' : ` · latency ${latencyMs}ms`}`;
+    const job = {
+      watcherKind: 'checkin-operator-escalation',
+      label: `check-in operator escalation "${name}"`,
+      channelId: `dm:${uid}`,
+      body,
+      mention: null,
+      run: async () => {
+        const user = await client.users.fetch(uid);
+        await user.send(body);
+      },
+    };
+    deliveries?.enqueue(job, job.label);
+  }
 }
 
 // DM kill switch. Authorized ONLY against the operator group's allowFrom in
@@ -279,6 +440,18 @@ async function alertDeliveryDropped(label, err, attempts, path = null) {
 async function handleDmCommand(message) {
   const senderId = message.author?.id;
   const allowFrom = readOperatorAllowFrom(ACCESS_PATH, ctx.operatorChannelId); // fresh read, fail-closed []
+  if (roadmaps?.matchesQuery(message.content ?? '')) {
+    if (!senderId || !allowFrom.includes(senderId)) {
+      log(`[roadmap] ignored unauthorized DM query from ${senderId ?? 'unknown'}`);
+      return;
+    }
+    await roadmaps.enqueueQuery({
+      channelId: message.channelId,
+      reply: text => message.reply(text),
+      label: 'operator DM roadmap query',
+    });
+    return;
+  }
   const d = authorizeDm({ isDM: !message.guildId, senderId, content: message.content ?? '', allowFrom });
   if (!d.command) return; // not one of our commands — ignore silently
   if (!d.authorized) {
@@ -332,6 +505,19 @@ client.on(Events.MessageCreate, async (message) => {
     attachments: extractAttachments(message),
   };
 
+  // Authenticated CPO bus query. It is an observability command, not a routable
+  // directive; reply through the existing DeliveryQueue and stop here.
+  if (message.channelId === ctx.busChannelId
+    && message.author?.id === ctx.cpoBotUserId
+    && roadmaps?.matchesQuery(message.content ?? '')) {
+    await roadmaps.enqueueQuery({
+      channelId: ctx.busChannelId,
+      reply: text => send(ctx.busChannelId, text),
+      label: 'CPO bus roadmap query',
+    });
+    return;
+  }
+
   let decision;
   try {
     decision = decideRoute(msg, ctx);
@@ -349,6 +535,7 @@ client.on(Events.MessageCreate, async (message) => {
       for (const s of decision.states) {
         const r = monitor.applyState(s.name, s.state, now); // also resets the clock (heartbeat)
         if (r && r.changed) { changed = true; log(`[state] ${s.name} ${r.from} -> ${r.to}`); }
+        if (r && r.to !== 'DRIVING') checkins?.cancel(s.name, `state changed to ${r.to}`);
       }
       if (changed) log(`[state] map: ${monitor.snapshot()}`);
     }
@@ -356,6 +543,27 @@ client.on(Events.MessageCreate, async (message) => {
 
   // SOFT-PAUSE gate: tracked above; emit NOTHING below while paused.
   if (killswitch.relayHalted()) return;
+
+  // Only decideRoute's authenticated `shuttle` path reaches this validator: the
+  // channel id and author id are already bound to sourceName. Validation does
+  // not replace the relay; accepted or rejected evidence still reaches the CPO,
+  // while a rejected reply deterministically queues the structured re-ping.
+  if (decision.action === 'shuttle' && checkins?.hasPending(decision.sourceName)) {
+    try {
+      const outcome = await checkins.receive(decision.sourceName, message.content ?? '', now);
+      if (outcome && !outcome.accepted) {
+        log(`[checkin] invalid reply from ${decision.sourceName}: ${outcome.errors.join('; ')}`);
+      }
+    } catch (err) {
+      log(`[checkin] validator unavailable for ${decision.sourceName}: ${err.message}`);
+      enqueueCheckInEscalation({
+        name: decision.sourceName,
+        currentTask: checkins.currentTask(decision.sourceName) ?? 'pending-unavailable',
+        errors: ['check-in validation unavailable'],
+        latencyMs: null,
+      });
+    }
+  }
 
   switch (decision.action) {
     case 'ignore':

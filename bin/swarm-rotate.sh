@@ -236,6 +236,28 @@ fi
 
 echo "swarm-rotate: plan — active='${ACTIVE:-<unset>}'  ->  next='$NEXT'  (ring: $ACCOUNTS)"
 
+# The global rotation is destructive to every Claude auth/session boundary.
+# Validate every data row before the first checkpoint, credential swap, or
+# relaunch action. `swarm_conf_parse_line` returns nonzero for both comments and
+# malformed rows, so skip comments here explicitly; any remaining failure is a
+# real config error (including an unknown ENGINE) and must not disappear through
+# the `parse || continue` idiom used by the read loops below.
+swarm_rotate_validate_config() {
+  local _line _trimmed
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    _trimmed="$(_swarm_trim "$_line")"
+    case "$_trimmed" in ''|'#'*) continue ;; esac
+    if ! swarm_conf_parse_line "$_line"; then
+      echo "swarm-rotate: REFUSED — malformed swarm.conf row prevents a safe fleet credential/session rotation." >&2
+      return 1
+    fi
+  done < "$CONF"
+  return 0
+}
+if ! swarm_rotate_validate_config; then
+  exit 2
+fi
+
 # ---------------------------------------------------------------------------
 # CLEAN-BOUNDARY guard — refuse to rotate while any swarm is WORKING.
 # ---------------------------------------------------------------------------
@@ -259,6 +281,17 @@ while IFS= read -r _line; do
   if command -v "$TMUX_BIN" >/dev/null 2>&1 && "$TMUX_BIN" has-session -t "$_sess" 2>/dev/null; then
     :
   else
+    continue
+  fi
+  # Claude account rotation must never tear down an unrelated Codex lead.
+  # Read its runtime state for an honest operator note, then exclude it from
+  # both the clean-boundary decision and the relaunch set below.
+  if [ "$SWARM_CONF_F_ENGINE" = "codex" ]; then
+    if swarm_codex_runtime_read "$_name"; then
+      echo "swarm-rotate: NOTE — leaving Codex swarm '$_name' untouched (active=$SWARM_CODEX_RUNTIME_ACTIVE, queued=$SWARM_CODEX_RUNTIME_QUEUE_DEPTH)."
+    else
+      echo "swarm-rotate: NOTE — leaving Codex swarm '$_name' untouched (runtime=$SWARM_CODEX_RUNTIME_STATUS)."
+    fi
     continue
   fi
   # Resolve from THIS swarm's account (sole constructor). Empty account →
@@ -317,6 +350,7 @@ run_checkpoint() {
   local failed=""
   while IFS= read -r _line; do
     swarm_conf_parse_line "$_line" || continue
+    [ "$SWARM_CONF_F_ENGINE" = "codex" ] && continue
     _repo="$SWARM_CONF_F_REPO"
     [ -z "$_repo" ] && continue
     if [ "$DRY_RUN" -eq 1 ]; then
@@ -408,6 +442,10 @@ fi
 # ---------------------------------------------------------------------------
 # FLEET RELAUNCH — bring everything back up on the new account.
 # ---------------------------------------------------------------------------
+if ! swarm_rotate_validate_config; then
+  echo "swarm-rotate: credential changed, but swarm.conf drifted during the swap; fleet was NOT relaunched. Repair config and relaunch explicitly." >&2
+  exit 5
+fi
 echo ""
 echo "swarm-rotate: step 3/3 — relaunch the fleet on '$NEXT'"
 run_relaunch() {
@@ -420,13 +458,38 @@ run_relaunch() {
     sh -c "$hook"
     return $?
   fi
-  # Default relaunch: fleet down then up via swarm-up.sh (no name filter = all).
+  # Default relaunch: down/up CLAUDE rows only. Codex owns a separate auth and
+  # runtime lane; rotating a Claude account must leave its daemon and turns
+  # untouched. Keep the historical fleet-wide boundary for Claude by completing
+  # the whole down pass before beginning the up pass.
   if [ "$DRY_RUN" -eq 1 ]; then
-    echo "  would run: $SWARM_UP down   (whole fleet)"
-    echo "  would run: $SWARM_UP up     (whole fleet on new account)"
+    echo "  would cycle all Claude-engine swarms (Codex rows left untouched)"
     return 0
   fi
-  "$SWARM_UP" down && "$SWARM_UP" up
+  local _line _name _failed="" _down_failed=""
+  while IFS= read -r _line; do
+    swarm_conf_parse_line "$_line" || continue
+    [ "$SWARM_CONF_F_ENGINE" = "codex" ] && continue
+    _name="$SWARM_CONF_F_NAME"
+    [ -z "$_name" ] && continue
+    "$SWARM_UP" down "$_name" || _down_failed="$_down_failed $_name"
+  done < <(grep -vE '^[[:space:]]*(#|$)' "$CONF")
+  if [ -n "$_down_failed" ]; then
+    echo "swarm-rotate: Claude shutdown failed for:$_down_failed — refusing the up pass; old auth may still be live" >&2
+    return 1
+  fi
+  while IFS= read -r _line; do
+    swarm_conf_parse_line "$_line" || continue
+    [ "$SWARM_CONF_F_ENGINE" = "codex" ] && continue
+    _name="$SWARM_CONF_F_NAME"
+    [ -z "$_name" ] && continue
+    "$SWARM_UP" up "$_name" || _failed="$_failed $_name"
+  done < <(grep -vE '^[[:space:]]*(#|$)' "$CONF")
+  [ -z "$_failed" ] || {
+    echo "swarm-rotate: Claude relaunch failed for:$_failed" >&2
+    return 1
+  }
+  return 0
 }
 if ! run_relaunch; then
   echo "swarm-rotate: WARNING — fleet relaunch returned non-zero; check 'swarm-up.sh status'." >&2

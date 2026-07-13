@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # swarm-login-relay.sh — USER-ASSISTED re-auth: run `/login` in a swarm's live
-# Claude TUI pane, relay the OAuth URL to the operator over Discord, wait for
-# the operator to authenticate in their browser, then resume the session and
+# Claude TUI pane, expose its OAuth URL through an owner-only ephemeral Discord
+# interaction, wait for browser authentication, then resume the session and
 # VERIFY the credential. This replaces the blob-swap credential model
 # (swarm-credswap-keychain.sh) for deployments where credential blobs cannot be
 # provisioned out-of-band — Claude Code auth requires the interactive `/login`
@@ -11,8 +11,12 @@
 # ONE swarm pane is enough. The fleet's default account is SHARED keychain
 # state (~/.claude): re-authing in one pane re-auths the credential fleet-wide.
 # Default target pane: the `qofi-product` swarm (override with the positional
-# arg or SWARM_LOGIN_RELAY_SWARM). There is deliberately NO per-account /
-# multi-swarm relay logic (v2 if ever needed).
+# arg or SWARM_LOGIN_RELAY_SWARM). The selected Claude swarm MUST therefore
+# have an EMPTY ACCOUNT field in swarm.conf. A labeled ACCOUNT is an isolated
+# per-account lane, not the shared ~/.claude keychain; it is refused before any
+# tmux or Discord-control effect, in both default and --dedicated modes. Use the
+# per-account failover/account tooling for labeled lanes. There is deliberately
+# NO per-account / multi-swarm relay logic here (v2 if ever needed).
 #
 # Observed `/login` behavior this is built against (falsifiable — if the TUI
 # shows something else, STOP and escalate rather than guess):
@@ -20,14 +24,18 @@
 #      (possibly after a method-picker menu — subscription vs console account —
 #      where one Enter accepts the default).
 #   2. The operator opens the URL in a browser and authenticates.
-#   3. After browser auth completes, the pane only needs ENTER pressed to
-#      finish and resume the session. No code paste-back is required.
+#   3. If that browser can reach Claude Code's localhost callback, success is
+#      automatic and the pane only needs Enter to resume. If it cannot (phone,
+#      SSH/container/other host), the browser displays an authorization#state
+#      value. The canonical owner submits that value through a Discord modal;
+#      the bridge writes it once to private host state and this relay pipes it
+#      into the fresh TUI prompt through `tmux load-buffer -` stdin.
 #
 # ── STALE-CONTENT DISCIPLINE (the pane is only SEMI-trusted) ─────────────────
 # capture-pane returns the WHOLE visible pane — including conversation content
 # from before /login was sent (old URLs, old "Login successful" lines, prose
 # that happens to contain a pattern word). Pattern-matching that stale content
-# mis-drives the flow: a stray picker-Enter, a stale/foreign URL posted to the
+# mis-drives the flow: a stray picker-Enter, a stale/foreign URL exposed to the
 # operator, or a false login-success. So every detector here is FRESHNESS-
 # gated against a BASELINE frame captured immediately BEFORE /login is sent:
 #   - URL: only a URL that does NOT appear in the baseline counts, and the
@@ -36,7 +44,7 @@
 #     EXCEEDS the baseline's count (position-independent, survives scrolling).
 # This also closes the phishing angle where pre-existing pane text (model
 # output is semi-untrusted) plants a look-alike oauth URL for the relay to
-# forward to the operator: pre-existing == in the baseline == never posted.
+# expose to the operator: pre-existing == in the baseline == never used.
 #
 # ── HOW swarm-rotate CALLS US (the credswap seam contract) ───────────────────
 # This script drops into swarm-rotate.sh's existing SWARM_CREDSWAP_CMD seam
@@ -51,7 +59,8 @@
 # CHOICE happens in the operator's browser — whatever account they log into IS
 # the next active account. Rotation then becomes: checkpoint → login-relay
 # (operator authenticates the next account) → fleet relaunch on the fresh
-# shared-keychain credential.
+# shared-keychain credential. The target swarm row must have ACCOUNT blank;
+# this relay never writes or authenticates ~/.claude-accounts/<label>.
 #
 # Known mapping nuance (documented, accepted): rotate's hook contract only
 # distinguishes 0 / 7 / other, so our clean-boundary refusal (exit 3) surfaces
@@ -84,13 +93,14 @@
 #      for a FRESH login URL. If a method-picker renders (fresh), send Enter
 #      ONCE to accept the default and keep polling. Timeout → send Escape to
 #      back out of the login UI, exit non-zero.
-#   3. Post the URL to the swarm's Discord channel (direct REST curl with the
-#      swarm's own bot token — the exact swarm-watch.sh pattern). If the post
-#      fails the operator never sees the link: Escape out of the login UI and
-#      exit LOUD (never leave a login modal open that nobody knows about).
-#   4. Poll the pane for FRESH login success (long timeout — the operator is
-#      a human). On success send Enter to resume the session. On timeout:
-#      post a timeout notice to the channel, Escape, exit non-zero.
+#   3. Post only a generic nonce-bound button to the channel. The updated bridge
+#      validates the exact owner/channel/bot/message/expiry and reveals the URL
+#      ephemerally. Old bridges have no fresh readiness marker, so we refuse
+#      before `/login` instead of falling back to ordinary chat.
+#   4. Poll for FRESH login success and the FRESH paste-code prompt. Automatic
+#      callback success wins. A modal response is accepted only at the fresh
+#      prompt, consumed once, and never enters Discord history/model ingress,
+#      shell argv/env, tmux argv, or logs. Timeout posts a notice and Escapes.
 #   5. VERIFY via the auth probe and map to the credswap exit-code contract
 #      (see EXIT CODES).
 #   6. On the success (exit-0) path only: re-check the CLEAN BOUNDARY fleet-
@@ -136,6 +146,14 @@
 #                               (deliberately excludes bare "logged in", which
 #                               substring-matches "NOT logged in" and ordinary
 #                               prose).
+#   SWARM_LOGIN_PASTE_PATTERNS  paste-code prompt detector, same format. Default:
+#                               "Paste code here if prompted".
+#   SWARM_LOGIN_CONTROL_POST_CMD / SWARM_LOGIN_CONTROL_DELETE_CMD
+#                               test seams for creating/removing the generic
+#                               Discord component message. Production uses REST.
+#   SWARM_LOGIN_CONTROL_BOT_ID  test seam for the posting bot identity.
+#                               Production resolves `/users/@me` using the same
+#                               row token that posts the button.
 #   SWARM_LOGIN_URL_TIMEOUT     seconds to wait for the URL to render. Default 45.
 #   SWARM_LOGIN_AUTH_TIMEOUT    seconds to wait for the OPERATOR to finish the
 #                               browser auth. Default 900 (15 min).
@@ -144,6 +162,10 @@
 #                               rotate's relaunch. Default 900. 0 disables the
 #                               re-check.
 #   SWARM_LOGIN_POLL_INTERVAL   seconds between capture-pane polls. Default 2.
+#   SWARM_LOGIN_VERIFY_ATTEMPTS maximum post-login auth-probe attempts. Default
+#                               5. Only exit 1 (credential not verified) is retried;
+#                               capped (75) and unexpected verdicts are immediate.
+#   SWARM_LOGIN_VERIFY_INTERVAL seconds between those attempts. Default 2.
 #   SWARM_LOGIN_AUTHCHECK_CMD   the post-login verify, run via `sh -c`. Default:
 #                               bin/swarm-auth-probe.sh (3-way: 0 good / 75
 #                               capped / other bad). Its verdict maps to the
@@ -157,9 +179,11 @@
 #   7 — re-auth complete, probe says authed-BUT-RATE-LIMITED (probe exit 75).
 #       The ring-exhaustion signal, identical to swarm-credswap-keychain.sh
 #       exit 7 — swarm-rotate maps it to its own exit 6 and does NOT relaunch.
-#   2 — refused / config error: bad usage, unknown swarm, session absent,
-#       missing channel/token wiring, bad timeout/interval value, or another
-#       relay instance holds the lock. Nothing was sent to the pane.
+#   2 — refused / config error: bad usage, unknown swarm, nonempty ACCOUNT
+#       (labeled lanes are outside this shared-default-keychain actuator),
+#       session absent, missing channel/token wiring, bad timeout/interval
+#       value, or another relay instance holds the lock. Nothing was sent to
+#       the pane.
 #   3 — REFUSED: pane is WORKING (or unverifiable) and --force absent. Nothing
 #       was sent to the pane. (Mirrors swarm-rotate's clean-boundary exit 3;
 #       under rotation it surfaces as rotate's generic "swap failed" — see the
@@ -168,16 +192,21 @@
 #       NOT authenticate. Loud; manual attention.
 #   5 — login URL never rendered within SWARM_LOGIN_URL_TIMEOUT. Pane backed
 #       out (Escape).
-#   6 — Discord post of the URL FAILED. Pane backed out (Escape) — we never
-#       leave a login modal open that the operator doesn't know about.
+#   6 — secure Discord control publication FAILED. Pane backed out (Escape).
 #   8 — operator did not complete the browser auth within
 #       SWARM_LOGIN_AUTH_TIMEOUT. Timeout notice posted, pane backed out.
+#   9 — re-auth completed, but swarm.conf became malformed during the operator
+#       window. Credential is valid; fleet relaunch is held for explicit repair.
+#   10 — a private response failed validation or stdin-buffer injection.
 #   (Any non-0/non-7 code reads as "swap failed" to swarm-rotate → its exit 5,
 #   fleet NOT relaunched. That is the correct fail-safe.)
 #
-# SECRET DISCIPLINE: this script never prints/logs a token value and never puts
-# a secret on argv beyond what the existing swarm-watch.sh curl pattern already
-# does (the Authorization header of the in-process curl call).
+# SECRET DISCIPLINE: OAuth URLs live only in a private 0600 request and an
+# owner-only ephemeral interaction. Paste-back values live only in a private
+# atomic 0600 response and the pipe to `tmux load-buffer -`; they never become a
+# shell variable, process argument/environment, ordinary message, model event,
+# or log. The Discord bot Authorization header follows the existing watcher REST
+# pattern and is the only credential present in an in-process curl argv.
 #
 # ── DEDICATED MODE (--dedicated) — the no-restart re-auth model ──────────────
 # --dedicated (or SWARM_LOGIN_RELAY_DEDICATED=1) runs /login in an ISOLATED
@@ -186,8 +215,8 @@
 # across rotations. Because that session does NO CTO work and NO fleet relaunch
 # follows a re-auth, the two CTO-pane guards are SKIPPED: the step-1 clean-
 # boundary guard (nothing to interrupt) and the step-6 fleet-idle re-check
-# (nothing to relaunch). The URL still posts to the swarm's channel (the row's
-# field-3 token + field-4 channel). This is how swarm-reauth.sh drives us: a
+# (nothing to relaunch). A generic secure-control button posts to the swarm's
+# channel; its URL remains ephemeral. This is how swarm-reauth.sh drives us: a
 # re-auth that re-authes the shared keychain WITHOUT restarting a single lead.
 # The stuck-pane safety net (a lead that didn't adopt the fresh credential) is
 # swarm-reauth-verify.sh, run standing by the tick — not this script's concern.
@@ -271,12 +300,22 @@ URL_REQUIRE="${SWARM_LOGIN_URL_REQUIRE-state=}"
 # must not invite it. Both remain seams.
 PICKER_PATTERNS="${SWARM_LOGIN_PICKER_PATTERNS:-select login method}"
 SUCCESS_PATTERNS="${SWARM_LOGIN_SUCCESS_PATTERNS:-login successful|successfully logged in}"
+PASTE_PATTERNS="${SWARM_LOGIN_PASTE_PATTERNS:-Paste code here if prompted}"
 URL_TIMEOUT="${SWARM_LOGIN_URL_TIMEOUT:-45}"
 AUTH_TIMEOUT="${SWARM_LOGIN_AUTH_TIMEOUT:-900}"
 IDLE_TIMEOUT="${SWARM_LOGIN_IDLE_TIMEOUT:-900}"
 POLL_INTERVAL="${SWARM_LOGIN_POLL_INTERVAL:-2}"
+VERIFY_ATTEMPTS="${SWARM_LOGIN_VERIFY_ATTEMPTS:-5}"
+VERIFY_INTERVAL="${SWARM_LOGIN_VERIFY_INTERVAL:-2}"
 STALE_SECONDS="${SWARM_STALE_SECONDS:-300}"
 AUTHCHECK="${SWARM_LOGIN_AUTHCHECK_CMD:-$SCRIPT_DIR/swarm-auth-probe.sh}"
+# Optional explicit host override. When absent, the private access.json owner
+# record is authoritative; an upgraded file with exactly one numeric top-level
+# principal is accepted as an unambiguous migration fallback.
+OWNER_ID="${SWARM_OWNER_DISCORD_ID:-}"
+LOGIN_CONTROL_READY_MAX_AGE="${SWARM_LOGIN_CONTROL_READY_MAX_AGE:-90}"
+CONTROL_POST_CMD="${SWARM_LOGIN_CONTROL_POST_CMD:-}"
+CONTROL_DELETE_CMD="${SWARM_LOGIN_CONTROL_DELETE_CMD:-}"
 
 # ── DEDICATED-MODE knobs (only consulted when DEDICATED=1) ────────────────────
 # The isolated login session mirrors swarm-usage-adapter-tui.sh's probe: a plain
@@ -312,8 +351,18 @@ for _tv in "$URL_TIMEOUT" "$AUTH_TIMEOUT" "$IDLE_TIMEOUT" "$STALE_SECONDS"; do
     ''|*[!0-9]*) echo "$PROG: timeout values must be plain integers (got '$_tv') — check SWARM_LOGIN_URL_TIMEOUT / SWARM_LOGIN_AUTH_TIMEOUT / SWARM_LOGIN_IDLE_TIMEOUT / SWARM_STALE_SECONDS" >&2; exit 2 ;;
   esac
 done
+case "$VERIFY_ATTEMPTS" in
+  ''|*[!0-9]*) echo "$PROG: SWARM_LOGIN_VERIFY_ATTEMPTS must be a plain integer from 1 through 30 (got '$VERIFY_ATTEMPTS')" >&2; exit 2 ;;
+esac
+if [ "$VERIFY_ATTEMPTS" -lt 1 ] || [ "$VERIFY_ATTEMPTS" -gt 30 ]; then
+  echo "$PROG: SWARM_LOGIN_VERIFY_ATTEMPTS must be from 1 through 30 (got '$VERIFY_ATTEMPTS')" >&2
+  exit 2
+fi
 case "$POLL_INTERVAL" in
   ''|.|*[!0-9.]*|*.*.*) echo "$PROG: SWARM_LOGIN_POLL_INTERVAL must be a number in seconds (got '$POLL_INTERVAL')" >&2; exit 2 ;;
+esac
+case "$VERIFY_INTERVAL" in
+  ''|.|*[!0-9.]*|*.*.*) echo "$PROG: SWARM_LOGIN_VERIFY_INTERVAL must be a number in seconds (got '$VERIFY_INTERVAL')" >&2; exit 2 ;;
 esac
 # The dedicated-session knobs feed $((...)) / tmux geometry only in --dedicated
 # mode; validate them there so a bad value fails loud BEFORE we create anything.
@@ -335,20 +384,38 @@ fi
 # ---------------------------------------------------------------------------
 # Resolve the swarm's row: session name, bot-token var (field 3), channel (4).
 # ---------------------------------------------------------------------------
+swarm_login_validate_config() {
+  local _line _trimmed
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    _trimmed="$(_swarm_trim "$_line")"
+    case "$_trimmed" in ''|'#'*) continue ;; esac
+    if ! swarm_conf_parse_line "$_line"; then
+      echo "$PROG: REFUSED — malformed swarm.conf row makes a shared credential handoff unsafe." >&2
+      return 1
+    fi
+  done < "$CONF"
+  return 0
+}
+
+swarm_login_validate_config || exit 2
+
 TOKVAR=""
 CHANNEL=""
+ENGINE=""
+ACCOUNT=""
 FOUND=0
-while IFS= read -r _line; do
+while IFS= read -r _line || [ -n "$_line" ]; do
   swarm_conf_parse_line "$_line" || continue
   if [ "$SWARM_CONF_F_NAME" = "$SWARM" ]; then
     TOKVAR="$SWARM_CONF_F_TOKVAR"
     CHANNEL="$SWARM_CONF_F_CHANNEL"
-    FOUND=1
-    break
+    ENGINE="$SWARM_CONF_F_ENGINE"
+    ACCOUNT="$SWARM_CONF_F_ACCOUNT"
+    FOUND=$((FOUND + 1))
   fi
 done < <(grep -vE '^[[:space:]]*(#|$)' "$CONF")
 
-if [ "$FOUND" -ne 1 ]; then
+if [ "$FOUND" -eq 0 ]; then
   echo "$PROG: REFUSED — no swarm named '$SWARM' in $CONF." >&2
   if [ -n "${SWARM_ROTATE_TO_ACCOUNT:-}" ] && [ "$SWARM" = "${SWARM_ROTATE_TO_ACCOUNT:-}" ]; then
     echo "$PROG: it matches SWARM_ROTATE_TO_ACCOUNT — SWARM_CREDSWAP_CMD is probably wired with a \"\$1\"" >&2
@@ -357,8 +424,109 @@ if [ "$FOUND" -ne 1 ]; then
   fi
   exit 2
 fi
+if [ "$FOUND" -ne 1 ]; then
+  echo "$PROG: REFUSED — swarm.conf has $FOUND rows named '$SWARM'; shared re-auth is ambiguous." >&2
+  exit 2
+fi
+if [ "$ENGINE" = "codex" ]; then
+  echo "$PROG: REFUSED — swarm '$SWARM' uses engine=codex; /login and Claude Max credential rotation do not apply. Choose a Claude-engine swarm for the login relay." >&2
+  exit 2
+fi
+# This actuator authenticates only Claude Code's shared DEFAULT keychain
+# (~/.claude). A labeled row is a different credential/config partition under
+# ~/.claude-accounts/<label>; accepting it here would bind the control surface
+# to one lane while `/login` (especially the plain dedicated probe) changes
+# another. Refuse before resolving access state, checking/creating a tmux
+# session, taking the relay lock, publishing control state, or posting Discord.
+if [ -n "$ACCOUNT" ]; then
+  echo "$PROG: REFUSED — swarm '$SWARM' has ACCOUNT='$ACCOUNT', but this relay only re-authenticates the shared default Claude keychain." >&2
+  echo "$PROG: ACCOUNT must be empty; use the per-account failover/account tooling for labeled lanes. No pane or Discord control was touched." >&2
+  exit 2
+fi
 if [ -z "$CHANNEL" ]; then
   echo "$PROG: REFUSED — swarm '$SWARM' has no CHANNEL_ID in swarm.conf; cannot relay a login URL nobody would see." >&2
+  exit 2
+fi
+case "$CHANNEL" in ''|*[!0-9]*) echo "$PROG: REFUSED — channel id for '$SWARM' must be numeric for secure login control." >&2; exit 2 ;; esac
+
+if ! swarm_account_resolve ""; then
+  echo "$PROG: REFUSED — could not resolve the shared default Claude account for swarm '$SWARM'." >&2
+  exit 2
+fi
+LOGIN_ACCESS_FILE="${SWARM_LOGIN_ACCESS_FILE:-$SWARM_ACCT_ACCESS_FILE}"
+# The bridge pins login control immediately beside the canonical access file.
+# Do not accept a second ambient path override: it could split the relay from
+# the bridge or redirect OAuth material into a model-readable repository.
+LOGIN_CONTROL_DIR="$(dirname "$LOGIN_ACCESS_FILE")/login-control"
+
+# The canonical owner must be pinned by private host state (or supplied by the
+# host and agree with it) and present in BOTH ACL layers. A watcher/bot that is
+# allowed to speak in the channel is not the human credential principal.
+resolve_login_control_owner() {
+  /usr/bin/python3 -I -B - "$LOGIN_ACCESS_FILE" "$CHANNEL" "$OWNER_ID" <<'PY'
+import json, os, stat, subprocess, sys
+path, channel, requested = sys.argv[1:]
+def reject_symlinked_ancestors(candidate):
+    allowed={'/var':'/private/var','/tmp':'/private/tmp','/etc':'/private/etc'} if sys.platform=='darwin' else {}
+    cursor=os.path.abspath(candidate)
+    while True:
+        try: st=os.lstat(cursor)
+        except FileNotFoundError: st=None
+        if st is not None and stat.S_ISLNK(st.st_mode):
+            if cursor not in allowed or os.path.abspath(os.path.realpath(cursor))!=allowed[cursor]:
+                raise ValueError()
+        parent=os.path.dirname(cursor)
+        if parent==cursor: break
+        cursor=parent
+try:
+    if requested and not requested.isdigit(): raise ValueError()
+    before=os.lstat(path); parent=os.path.dirname(path); pst=os.lstat(parent)
+    if (not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode)
+            or before.st_uid != os.getuid() or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_nlink != 1 or before.st_size > 65536): raise ValueError()
+    if (not stat.S_ISDIR(pst.st_mode) or stat.S_ISLNK(pst.st_mode)
+            or pst.st_uid != os.getuid() or stat.S_IMODE(pst.st_mode) & 0o022): raise ValueError()
+    # Reject both a redirected state leaf and a symlinked account/config
+    # ancestor while tolerating macOS's fixed root aliases.
+    reject_symlinked_ancestors(parent)
+    expected_parent=os.path.join(os.path.realpath(os.path.dirname(parent)),os.path.basename(parent))
+    if os.path.realpath(parent)!=expected_parent: raise ValueError()
+    if sys.platform=='darwin':
+        for p in (path,parent):
+            if subprocess.check_output(['/bin/ls','-lde',p],text=True).split()[0].endswith('+'): raise ValueError()
+    fd=os.open(path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))
+    try:
+        opened=os.fstat(fd); raw=os.read(fd,65537); after=os.fstat(fd)
+    finally: os.close(fd)
+    if ((opened.st_dev,opened.st_ino,opened.st_size,opened.st_uid,stat.S_IMODE(opened.st_mode),opened.st_nlink,opened.st_ctime_ns)!=(before.st_dev,before.st_ino,before.st_size,before.st_uid,stat.S_IMODE(before.st_mode),before.st_nlink,before.st_ctime_ns)
+            or (after.st_dev,after.st_ino,after.st_size,after.st_uid,stat.S_IMODE(after.st_mode),after.st_nlink,after.st_ctime_ns,after.st_mtime_ns)!=(opened.st_dev,opened.st_ino,opened.st_size,opened.st_uid,stat.S_IMODE(opened.st_mode),opened.st_nlink,opened.st_ctime_ns,opened.st_mtime_ns)
+            or len(raw)>65536): raise ValueError()
+    cfg=json.loads(raw)
+    if not isinstance(cfg,dict): raise ValueError()
+    top=cfg.get('allowFrom'); groups=cfg.get('groups'); pinned=cfg.get('loginControlOwnerId')
+    if (not isinstance(top,list) or not all(isinstance(v,str) for v in top)
+            or not isinstance(groups,dict)): raise ValueError()
+    if pinned is not None:
+        if not isinstance(pinned,str) or not pinned.isdigit() or pinned not in top: raise ValueError()
+        owner=pinned
+    elif requested:
+        owner=requested
+    else:
+        candidates=list(dict.fromkeys(v for v in top if v.isdigit()))
+        if len(candidates)!=1: raise ValueError()
+        owner=candidates[0]
+    if requested and requested!=owner: raise ValueError()
+    group=groups.get(channel)
+    if owner not in top: raise ValueError()
+    if not isinstance(group,dict) or owner not in (group.get('allowFrom') or []): raise ValueError()
+    print(owner)
+except Exception: raise SystemExit(1)
+PY
+}
+OWNER_ID="$(resolve_login_control_owner)"
+_owner_rc=$?
+if [ "$_owner_rc" -ne 0 ] || [ -z "$OWNER_ID" ]; then
+  echo "$PROG: REFUSED — canonical Discord ACL has no unambiguous login-control owner bound to channel $CHANNEL ($LOGIN_ACCESS_FILE)." >&2
   exit 2
 fi
 
@@ -399,12 +567,75 @@ post_discord() {  # content -> 0 delivered / 1 not
   )
 }
 
+# Resolve the Discord bot identity from the same private token that will create
+# the login-control message.  Readiness is keyed by channel+bot, so a different
+# bot bound to the same channel cannot satisfy this relay's capability check.
+discord_bot_id() {
+  (
+    . "$TOKENS" >/dev/null 2>&1 || exit 1
+    _token="${!TOKVAR:-}"; [ -n "$_token" ] || exit 1
+    _body="$(curl --max-time "$CURL_MAX_TIME" -sS \
+      -H "Authorization: Bot $_token" "$API/users/@me")" || exit 1
+    printf '%s' "$_body" | /usr/bin/python3 -I -B -c '
+import json,sys
+try:
+    value=json.load(sys.stdin); ident=value.get("id")
+    if not isinstance(ident,str) or not ident.isdigit(): raise ValueError()
+    print(ident)
+except Exception: raise SystemExit(1)
+' 2>/dev/null
+  )
+}
+
+login_control_ready() {
+  /usr/bin/python3 -I -B - "$LOGIN_CONTROL_DIR" "$CHANNEL" "$DISCORD_BOT_ID" "$LOGIN_CONTROL_READY_MAX_AGE" <<'PY'
+import json, os, re, stat, subprocess, sys, time
+root, channel, bot, max_age = sys.argv[1:]
+try:
+    max_age=int(max_age)
+    if max_age < 1 or max_age > 600: raise ValueError()
+    rst=os.lstat(root); parent=os.path.dirname(root); pst=os.lstat(parent)
+    if (not stat.S_ISDIR(rst.st_mode) or stat.S_ISLNK(rst.st_mode)
+            or rst.st_uid != os.getuid() or stat.S_IMODE(rst.st_mode) != 0o700): raise ValueError()
+    if (not stat.S_ISDIR(pst.st_mode) or stat.S_ISLNK(pst.st_mode)
+            or pst.st_uid != os.getuid() or stat.S_IMODE(pst.st_mode) & 0o022): raise ValueError()
+    expected_parent=os.path.join(os.path.realpath(os.path.dirname(parent)),os.path.basename(parent))
+    expected_root=os.path.join(os.path.realpath(parent),os.path.basename(root))
+    if os.path.realpath(parent)!=expected_parent or os.path.realpath(root)!=expected_root: raise ValueError()
+    if sys.platform=='darwin':
+        for p in (root,parent):
+            if subprocess.check_output(['/bin/ls','-lde',p],text=True).split()[0].endswith('+'): raise ValueError()
+    name='ready-%s-%s.json' % (channel,bot); path=os.path.join(root,name)
+    before=os.lstat(path)
+    if (not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode)
+            or before.st_uid != os.getuid() or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_nlink != 1 or before.st_size > 4096): raise ValueError()
+    if sys.platform=='darwin' and subprocess.check_output(['/bin/ls','-lde',path],text=True).split()[0].endswith('+'): raise ValueError()
+    fd=os.open(path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))
+    try:
+        opened=os.fstat(fd); raw=os.read(fd,4097); after=os.fstat(fd)
+    finally: os.close(fd)
+    if ((opened.st_dev,opened.st_ino,opened.st_size,opened.st_uid,stat.S_IMODE(opened.st_mode),opened.st_nlink,opened.st_ctime_ns)!=(before.st_dev,before.st_ino,before.st_size,before.st_uid,stat.S_IMODE(before.st_mode),before.st_nlink,before.st_ctime_ns)
+            or (after.st_dev,after.st_ino,after.st_size,after.st_uid,stat.S_IMODE(after.st_mode),after.st_nlink,after.st_ctime_ns,after.st_mtime_ns)!=(opened.st_dev,opened.st_ino,opened.st_size,opened.st_uid,stat.S_IMODE(opened.st_mode),opened.st_nlink,opened.st_ctime_ns,opened.st_mtime_ns)
+            or len(raw)>4096): raise ValueError()
+    value=json.loads(raw); now=int(time.time())
+    if (value.get('schema')!='qofi-login-control-ready/v1' or value.get('protocol')!=1
+            or value.get('channel_id')!=channel or value.get('bot_user_id')!=bot
+            or not re.fullmatch(r'[a-f0-9]{32}',value.get('instance',''))): raise ValueError()
+    pid=value.get('pid'); updated=value.get('updated_at')
+    if not isinstance(pid,int) or pid < 2 or not isinstance(updated,int): raise ValueError()
+    if updated > now+5 or now-updated > max_age: raise ValueError()
+    os.kill(pid,0)
+except Exception: raise SystemExit(1)
+PY
+}
+
 # Pre-flight the post path BEFORE touching the pane: if we could never relay
 # the URL, opening the login UI would only wedge the pane for nobody. With the
 # override seam set we trust the operator's transport; otherwise the tokens
 # file must exist and the swarm's var must be non-empty (checked in a scoped
 # subshell — the value never enters this process).
-if [ -z "${SWARM_LOGIN_POST_CMD:-}" ]; then
+if [ -z "${SWARM_LOGIN_POST_CMD:-}" ] || [ -z "$CONTROL_POST_CMD" ]; then
   if [ ! -f "$TOKENS" ]; then
     echo "$PROG: REFUSED — tokens file not found ($TOKENS); could not relay a login URL. Not touching the pane." >&2
     exit 2
@@ -414,6 +645,129 @@ if [ -z "${SWARM_LOGIN_POST_CMD:-}" ]; then
     exit 2
   fi
 fi
+
+case "$LOGIN_CONTROL_READY_MAX_AGE" in ''|*[!0-9]*) echo "$PROG: REFUSED — SWARM_LOGIN_CONTROL_READY_MAX_AGE must be an integer." >&2; exit 2 ;; esac
+DISCORD_BOT_ID="${SWARM_LOGIN_CONTROL_BOT_ID:-}"
+if [ -z "$DISCORD_BOT_ID" ]; then
+  if ! DISCORD_BOT_ID="$(discord_bot_id)"; then
+    echo "$PROG: REFUSED — could not resolve the Discord bot identity for secure login control. Not touching the pane." >&2
+    exit 2
+  fi
+fi
+case "$DISCORD_BOT_ID" in ''|*[!0-9]*) echo "$PROG: REFUSED — secure login-control bot id must be numeric." >&2; exit 2 ;; esac
+if ! login_control_ready; then
+  echo "$PROG: REFUSED — fresh v1 Discord login-control readiness is not live for channel $CHANNEL and bot $DISCORD_BOT_ID." >&2
+  echo "$PROG: restart the Claude swarm so the updated bridge is active; no OAuth URL or paste-back code will be sent through ordinary chat." >&2
+  exit 2
+fi
+
+post_login_control() { # nonce -> prints message_id|bot_id|channel_id
+  local nonce="$1" content result response code payload
+  content="🔐 **Secure re-auth ready** (swarm '$SWARM'). Only the configured owner can open the private login interaction. The OAuth URL and any paste-back code are never posted to this channel or sent to the swarm."
+  if [ -n "$CONTROL_POST_CMD" ]; then
+    result="$(sh -c "$CONTROL_POST_CMD" _ "$CHANNEL" "$content" "qofi-login:open:v1:$nonce")" || return 1
+  else
+    response="$(mktemp "$LOGIN_CONTROL_DIR/.post.XXXXXX")" || return 1
+    payload="$(printf '%s\n%s\n' "$content" "qofi-login:open:v1:$nonce" | /usr/bin/python3 -I -B -c '
+import json,sys
+content=sys.stdin.readline().rstrip("\n"); custom=sys.stdin.readline().rstrip("\n")
+print(json.dumps({"content":content,"allowed_mentions":{"parse":[]},"components":[{"type":1,"components":[{"type":2,"style":1,"label":"Open secure login","custom_id":custom}]}]}))
+')" || { rm -f "$response"; return 1; }
+    code="$(
+      (
+      . "$TOKENS" >/dev/null 2>&1 || exit 1
+      _token="${!TOKVAR:-}"; [ -n "$_token" ] || exit 1
+      curl --max-time "$CURL_MAX_TIME" -sS -o "$response" -w '%{http_code}' -X POST \
+        -H "Authorization: Bot $_token" -H "Content-Type: application/json" \
+        -d "$payload" "$API/channels/$CHANNEL/messages"
+      )
+    )" || { rm -f "$response"; return 1; }
+    case "$code" in 200|201) : ;; *) rm -f "$response"; return 1 ;; esac
+    result="$(/usr/bin/python3 -I -B - "$response" "$CHANNEL" "$DISCORD_BOT_ID" <<'PY'
+import json,sys
+try:
+    value=json.load(open(sys.argv[1])); mid=value.get('id'); channel=value.get('channel_id')
+    author=(value.get('author') or {}).get('id')
+    if not all(isinstance(v,str) and v.isdigit() for v in (mid,channel,author)): raise ValueError()
+    if channel!=sys.argv[2] or author!=sys.argv[3]: raise ValueError()
+    print('%s|%s|%s' % (mid,author,channel))
+except Exception: raise SystemExit(1)
+PY
+)" || { rm -f "$response"; return 1; }
+    rm -f "$response"
+  fi
+  printf '%s\n' "$result" | /usr/bin/python3 -I -B -c '
+import json,re,sys
+raw=sys.stdin.read().strip()
+try:
+    if raw.startswith("{"):
+        v=json.loads(raw); vals=(v.get("id"),(v.get("author") or {}).get("id"),v.get("channel_id"))
+    else: vals=tuple(raw.split("|"))
+    if len(vals)!=3 or not all(isinstance(x,str) and x.isdigit() for x in vals): raise ValueError()
+    print("|".join(vals))
+except Exception: raise SystemExit(1)
+' 2>/dev/null
+}
+
+write_login_control_request() { # URL on stdin; nonce message bot expires args
+  /usr/bin/python3 -I -B - "$LOGIN_CONTROL_DIR" "$1" "$OWNER_ID" "$CHANNEL" "$2" "$3" "$4" 3<&0 <<'PY'
+import json, os, re, stat, sys
+root, nonce, owner, channel, message, bot, expires = sys.argv[1:]
+url=os.fdopen(3,encoding='utf-8').read()
+dfd=None; tmp=None
+try:
+    expires=int(expires)
+    if not re.fullmatch(r'[a-f0-9]{32}',nonce): raise ValueError()
+    if not all(v.isdigit() for v in (owner,channel,message,bot)): raise ValueError()
+    if len(url)<20 or len(url)>8192 or not url.startswith('https://'): raise ValueError()
+    rst=os.lstat(root)
+    if (not stat.S_ISDIR(rst.st_mode) or stat.S_ISLNK(rst.st_mode)
+            or rst.st_uid!=os.getuid() or stat.S_IMODE(rst.st_mode)!=0o700): raise ValueError()
+    value={'schema':'qofi-login-control-request/v1','protocol':1,'nonce':nonce,
+           'owner_id':owner,'channel_id':channel,'message_id':message,'bot_user_id':bot,
+           'expires_at':expires,'oauth_url':url}
+    name='request-%s.json' % nonce; tmp='.request-%s.%d.tmp' % (nonce,os.getpid())
+    dfd=os.open(root,os.O_RDONLY|getattr(os,'O_DIRECTORY',0))
+    flags=os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0)
+    fd=os.open(tmp,flags,0o600,dir_fd=dfd)
+    try:
+        data=memoryview((json.dumps(value,separators=(',',':'))+'\n').encode())
+        while data:
+            written=os.write(fd,data)
+            if written <= 0: raise OSError('short login-control request write')
+            data=data[written:]
+        os.fsync(fd)
+    finally: os.close(fd)
+    os.rename(tmp,name,src_dir_fd=dfd,dst_dir_fd=dfd)
+    try: os.fsync(dfd)
+    except OSError: pass
+except Exception:
+    raise SystemExit(1)
+finally:
+    if dfd is not None:
+        if tmp is not None:
+            try: os.unlink(tmp,dir_fd=dfd)
+            except FileNotFoundError: pass
+            except OSError: pass
+        os.close(dfd)
+PY
+}
+
+delete_login_control_message() {
+  local message="$1"
+  [ -z "$message" ] && return 0
+  if [ -n "$CONTROL_DELETE_CMD" ]; then
+    sh -c "$CONTROL_DELETE_CMD" _ "$CHANNEL" "$message" >/dev/null 2>&1 || return 1
+    return 0
+  fi
+  (
+    . "$TOKENS" >/dev/null 2>&1 || exit 1
+    _token="${!TOKVAR:-}"; [ -n "$_token" ] || exit 1
+    _code="$(curl --max-time "$CURL_MAX_TIME" -s -o /dev/null -w '%{http_code}' -X DELETE \
+      -H "Authorization: Bot $_token" "$API/channels/$CHANNEL/messages/$message")"
+    case "$_code" in 200|204) exit 0 ;; *) exit 1 ;; esac
+  )
+}
 
 # ---------------------------------------------------------------------------
 # Single-instance lock (the swarm-watch.sh mkdir idiom). Two relays driving
@@ -448,7 +802,22 @@ if ! acquire_lock; then
   echo "$PROG: remove the lock dir and re-run." >&2
   exit 2
 fi
-trap 'rm -rf "$LOCK"' EXIT
+CONTROL_NONCE=""
+CONTROL_MESSAGE_ID=""
+cleanup_login_control() {
+  if [ -n "$CONTROL_NONCE" ]; then
+    rm -f "$LOGIN_CONTROL_DIR/request-$CONTROL_NONCE.json" \
+      "$LOGIN_CONTROL_DIR/response-$CONTROL_NONCE.json" 2>/dev/null || true
+  fi
+  if [ -n "$CONTROL_MESSAGE_ID" ]; then
+    delete_login_control_message "$CONTROL_MESSAGE_ID" >/dev/null 2>&1 || true
+  fi
+}
+relay_cleanup() {
+  cleanup_login_control
+  rm -rf "$LOCK"
+}
+trap relay_cleanup EXIT
 
 # ---------------------------------------------------------------------------
 # Pane helpers.
@@ -460,6 +829,67 @@ pane_send()    { "$TMUX_BIN" send-keys -t "$SESS" "$@"; }
 # back_out — leave the pane OUT of the login UI on every failure path. Never
 # lets its own failure mask the primary error.
 back_out()     { pane_send Escape >/dev/null 2>&1 || true; }
+
+consume_login_control_response() { # take|discard; take prints code only
+  local action="$1"
+  /usr/bin/python3 -I -B - "$LOGIN_CONTROL_DIR" "$CONTROL_NONCE" "$OWNER_ID" "$CHANNEL" \
+    "$CONTROL_MESSAGE_ID" "$DISCORD_BOT_ID" "$action" <<'PY'
+import json, os, re, stat, subprocess, sys, time
+root, nonce, owner, channel, message, bot, action=sys.argv[1:]
+name='response-%s.json' % nonce; path=os.path.join(root,name)
+if action not in ('take','discard'): raise SystemExit(2)
+try: before=os.lstat(path)
+except FileNotFoundError: raise SystemExit(1)
+try:
+    if (not re.fullmatch(r'[a-f0-9]{32}',nonce) or not stat.S_ISREG(before.st_mode)
+            or stat.S_ISLNK(before.st_mode) or before.st_uid!=os.getuid()
+            or stat.S_IMODE(before.st_mode)!=0o600 or before.st_nlink!=1
+            or before.st_size<1 or before.st_size>8192): raise ValueError()
+    if sys.platform=='darwin' and subprocess.check_output(['/bin/ls','-lde',path],text=True).split()[0].endswith('+'): raise ValueError()
+    fd=os.open(path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))
+    try:
+        opened=os.fstat(fd); raw=os.read(fd,8193); after=os.fstat(fd)
+    finally: os.close(fd)
+    if ((opened.st_dev,opened.st_ino,opened.st_size,opened.st_uid,stat.S_IMODE(opened.st_mode),opened.st_nlink,opened.st_ctime_ns)!=(before.st_dev,before.st_ino,before.st_size,before.st_uid,stat.S_IMODE(before.st_mode),before.st_nlink,before.st_ctime_ns)
+            or (after.st_dev,after.st_ino,after.st_size,after.st_uid,stat.S_IMODE(after.st_mode),after.st_nlink,after.st_ctime_ns,after.st_mtime_ns)!=(opened.st_dev,opened.st_ino,opened.st_size,opened.st_uid,stat.S_IMODE(opened.st_mode),opened.st_nlink,opened.st_ctime_ns,opened.st_mtime_ns)
+            or len(raw)>8192): raise ValueError()
+    value=json.loads(raw); code=value.get('code')
+    expected={'schema','protocol','nonce','owner_id','channel_id','message_id','bot_user_id','created_at','expires_at','code'}
+    if (set(value)!=expected or value.get('schema')!='qofi-login-control-response/v1' or value.get('protocol')!=1
+            or value.get('nonce')!=nonce or value.get('owner_id')!=owner
+            or value.get('channel_id')!=channel or value.get('message_id')!=message
+            or value.get('bot_user_id')!=bot or not isinstance(value.get('created_at'),int)
+            or not isinstance(value.get('expires_at'),int) or value['created_at']>int(time.time())+5
+            or value['created_at']>value['expires_at'] or value['expires_at'] < int(time.time()) or not isinstance(code,str)
+            or len(code)>2000
+            or not re.fullmatch(r'[A-Za-z0-9._~+/=%:-]{1,1900}#[A-Za-z0-9._~+/=%:-]{1,1900}',code)):
+        raise ValueError()
+    current=os.lstat(path)
+    if (current.st_dev,current.st_ino)!=(before.st_dev,before.st_ino): raise ValueError()
+    os.unlink(path)
+    if action=='take': sys.stdout.write(code)
+except Exception:
+    raise SystemExit(2)
+PY
+}
+
+pane_take_and_paste_secret() { # response -> tmux stdin; never a shell variable/argv/log
+  local buffer="qofi-login-$CONTROL_NONCE" take_rc load_rc
+  local -a pipe_status
+  consume_login_control_response take | "$TMUX_BIN" load-buffer -b "$buffer" -
+  pipe_status=("${PIPESTATUS[@]}")
+  take_rc=${pipe_status[0]}; load_rc=${pipe_status[1]}
+  if [ "$take_rc" -ne 0 ] || [ "$load_rc" -ne 0 ]; then
+    "$TMUX_BIN" delete-buffer -b "$buffer" >/dev/null 2>&1 || true
+    [ "$take_rc" -ne 0 ] && return "$take_rc"
+    return 3
+  fi
+  if ! "$TMUX_BIN" paste-buffer -b "$buffer" -d -t "$SESS"; then
+    "$TMUX_BIN" delete-buffer -b "$buffer" >/dev/null 2>&1 || true
+    return 1
+  fi
+  pane_send Enter
+}
 
 # pat_lines PATTERNS — normalize a pipe- or newline-separated pattern set to
 # one per line, blank lines stripped (a blank pattern line makes grep -f match
@@ -549,7 +979,7 @@ if [ "$DEDICATED" = "1" ]; then
   # DEDICATED: drive an ISOLATED throwaway session — never a CTO pane. There is
   # NO clean-boundary guard here: the probe session does no CTO work, so /login
   # interrupts nothing, and no fleet relaunch follows a re-auth (see step 6).
-  echo "$PROG: step 1/6 — DEDICATED mode: isolated login session '$SESS' (URL → swarm '$SWARM' channel $CHANNEL)"
+  echo "$PROG: step 1/6 — DEDICATED mode: isolated login session '$SESS' (secure control → swarm '$SWARM' channel $CHANNEL)"
   if ! ensure_probe_session; then
     echo "$PROG: REFUSED — could not stand up a healthy isolated login session '$SESS'. Nothing sent." >&2
     exit 2
@@ -604,6 +1034,7 @@ BASELINE_FRAME="$(pane_capture)"
 BASE_URLS="$(printf '%s\n' "$BASELINE_FRAME" | grep -oE "$URL_REGEX" 2>/dev/null || true)"
 PICKER_BASE_N="$(count_pattern_lines "$BASELINE_FRAME" "$PICKER_PATTERNS")"
 SUCCESS_BASE_N="$(count_pattern_lines "$BASELINE_FRAME" "$SUCCESS_PATTERNS")"
+PASTE_BASE_N="$(count_pattern_lines "$BASELINE_FRAME" "$PASTE_PATTERNS")"
 
 # extract_fresh_url FRAME — the BOTTOM-most URL-regex match that is not one of
 # the baseline's matches (the login UI renders at the pane bottom; anything
@@ -625,16 +1056,20 @@ fi
 URL=""
 PICKER_SENT=0
 TRUNC_WARNED=0
+PASTE_READY=0
 _deadline=$((SECONDS + URL_TIMEOUT))
 while :; do
   _frame="$(pane_capture)"
+  if [ "$(count_pattern_lines "$_frame" "$PASTE_PATTERNS")" -gt "$PASTE_BASE_N" ]; then
+    PASTE_READY=1
+  fi
   URL="$(extract_fresh_url "$_frame")"
   # COMPLETENESS gate (see URL_REQUIRE above): a width-truncated fragment must
   # never be posted — treat it as not-yet-rendered and keep polling; the
   # timeout path fails loud instead of shipping a broken link.
   if [ -n "$URL" ] && [ -n "$URL_REQUIRE" ] && ! printf '%s' "$URL" | grep -qF -- "$URL_REQUIRE"; then
     if [ "$TRUNC_WARNED" -eq 0 ]; then
-      echo "$PROG: WARNING — candidate URL (${#URL} chars) lacks '$URL_REQUIRE'; likely WIDTH-TRUNCATED by the pane. Not posting it. Widen SWARM_LOGIN_PROBE_COLS (or the target pane) if this persists to timeout." >&2
+      echo "$PROG: WARNING — candidate URL (${#URL} chars) lacks '$URL_REQUIRE'; likely WIDTH-TRUNCATED by the pane. Not publishing it to private control state. Widen SWARM_LOGIN_PROBE_COLS (or the target pane) if this persists to timeout." >&2
       TRUNC_WARNED=1
     fi
     URL=""
@@ -659,19 +1094,40 @@ done
 echo "$PROG:   fresh login URL captured (${#URL} chars)"
 
 # ---------------------------------------------------------------------------
-# Step 3/6 — relay the URL to the operator over Discord.
+# Step 3/6 — publish a generic control button; keep the URL private.
 # ---------------------------------------------------------------------------
-echo "$PROG: step 3/6 — posting the login URL to Discord channel $CHANNEL"
+echo "$PROG: step 3/6 — publishing the secure login control to Discord channel $CHANNEL (OAuth URL remains private)"
 _rotmsg=""
-[ -n "${SWARM_ROTATE_TO_ACCOUNT:-}" ] && _rotmsg=" Rotation target handle: '$SWARM_ROTATE_TO_ACCOUNT' — the ACTUAL account is whichever you log into."
-if ! post_discord "🔐 **Re-auth needed** (swarm '$SWARM') — open this link in your browser and authenticate: $URL
-After the browser flow completes, the session resumes automatically — no paste-back needed.${_rotmsg} (Waiting up to $((AUTH_TIMEOUT / 60)) min.)"; then
-  echo "$PROG: FAILED — could not post the login URL to Discord. The operator never saw the link," >&2
+[ -n "${SWARM_ROTATE_TO_ACCOUNT:-}" ] && _rotmsg=" Rotation target handle: '$SWARM_ROTATE_TO_ACCOUNT'."
+CONTROL_NONCE="$(/usr/bin/python3 -I -B -c 'import secrets; print(secrets.token_hex(16))')" || CONTROL_NONCE=""
+case "$CONTROL_NONCE" in *[!a-f0-9]*) CONTROL_NONCE="" ;; esac
+if [ "${#CONTROL_NONCE}" -ne 32 ]; then
+  echo "$PROG: FAILED — could not create a 128-bit login-control nonce." >&2
+  back_out
+  exit 6
+fi
+CONTROL_EXPIRES=$(( $(date +%s) + AUTH_TIMEOUT ))
+if ! _control_binding="$(post_login_control "$CONTROL_NONCE")"; then
+  echo "$PROG: FAILED — could not post the generic secure login control. The operator never received a private interaction," >&2
   echo "$PROG: so we are NOT leaving the pane wedged in a login modal: backing out (Escape) and failing loud." >&2
   back_out
   exit 6
 fi
-echo "$PROG:   posted — waiting for the operator to authenticate in the browser"
+IFS='|' read -r CONTROL_MESSAGE_ID _control_bot _control_channel <<EOF
+$_control_binding
+EOF
+if [ "$_control_bot" != "$DISCORD_BOT_ID" ] || [ "$_control_channel" != "$CHANNEL" ]; then
+  echo "$PROG: FAILED — Discord login-control response did not bind the expected bot/channel." >&2
+  back_out
+  exit 6
+fi
+if ! printf '%s' "$URL" | write_login_control_request "$CONTROL_NONCE" "$CONTROL_MESSAGE_ID" "$DISCORD_BOT_ID" "$CONTROL_EXPIRES"; then
+  echo "$PROG: FAILED — could not publish the private nonce-bound login request; removing the generic control and backing out." >&2
+  back_out
+  exit 6
+fi
+URL="" # never retain the OAuth URL past private handoff publication
+echo "$PROG:   secure control posted — waiting for owner authentication (automatic callback or private modal paste-back)"
 
 # ---------------------------------------------------------------------------
 # Step 4/6 — wait for the operator to complete the browser auth.
@@ -682,12 +1138,39 @@ echo "$PROG:   posted — waiting for the operator to authenticate in the browse
 # operator's window early.
 echo "$PROG: step 4/6 — polling for login success (timeout ${AUTH_TIMEOUT}s)"
 _ok=0
+_code_injected=0
 _deadline=$((SECONDS + AUTH_TIMEOUT))
 while :; do
   _frame="$(pane_capture)"
+  # The automatic localhost callback wins every race.  If an unused modal
+  # response exists at the same time, discard it without ever injecting it.
   if [ "$(count_pattern_lines "$_frame" "$SUCCESS_PATTERNS")" -gt "$SUCCESS_BASE_N" ]; then
+    consume_login_control_response discard >/dev/null 2>&1 || true
     _ok=1
     break
+  fi
+  if [ "$(count_pattern_lines "$_frame" "$PASTE_PATTERNS")" -gt "$PASTE_BASE_N" ]; then
+    PASTE_READY=1
+  fi
+  if [ "$PASTE_READY" -eq 1 ] && [ "$_code_injected" -eq 0 ]; then
+    pane_take_and_paste_secret; _take_rc=$?
+    case "$_take_rc" in
+      0)
+        _code_injected=1
+        echo "$PROG:   private paste-back received and injected into the fresh Claude prompt"
+        ;;
+      1) : ;; # no response yet
+      2)
+        echo "$PROG: FAILED — private paste-back response failed its owner/channel/nonce/expiry/file boundary." >&2
+        back_out
+        exit 10
+        ;;
+      *)
+        echo "$PROG: FAILED — secure paste-back was received but exact tmux stdin-buffer injection failed." >&2
+        back_out
+        exit 10
+        ;;
+    esac
   fi
   if [ "$SECONDS" -ge "$_deadline" ]; then
     break
@@ -711,7 +1194,17 @@ pane_send Enter || true
 # Step 5/6 — VERIFY and map to the credswap exit contract.
 # ---------------------------------------------------------------------------
 echo "$PROG: step 5/6 — verifying the fresh credential (auth probe)"
+probe_attempt=1
 sh -c "$AUTHCHECK"; probe_rc=$?
+while [ "$probe_rc" -eq 1 ] && [ "$probe_attempt" -lt "$VERIFY_ATTEMPTS" ]; do
+  echo "$PROG:   credential not yet verified (probe attempt $probe_attempt/$VERIFY_ATTEMPTS); retrying in ${VERIFY_INTERVAL}s"
+  sleep "$VERIFY_INTERVAL"
+  probe_attempt=$((probe_attempt + 1))
+  sh -c "$AUTHCHECK"; probe_rc=$?
+done
+if [ "$probe_rc" -eq 0 ] && [ "$probe_attempt" -gt 1 ]; then
+  echo "$PROG:   fresh credential verified on probe attempt $probe_attempt/$VERIFY_ATTEMPTS"
+fi
 case "$probe_rc" in
   0) : ;;  # good — proceed to the boundary re-check + confirmation below
   75)
@@ -744,7 +1237,10 @@ esac
 fleet_working() {  # -> prints " name(ages)" for each WORKING swarm; empty = idle
   local out=""
   while IFS= read -r _line; do
-    swarm_conf_parse_line "$_line" || continue
+    if ! swarm_conf_parse_line "$_line"; then
+      return 2
+    fi
+    [ "$SWARM_CONF_F_ENGINE" = "codex" ] && continue
     [ -z "$SWARM_CONF_F_NAME" ] && continue
     [ -z "$SWARM_CONF_F_REPO" ] && continue
     "$TMUX_BIN" has-session -t "${PREFIX}-${SWARM_CONF_F_NAME}" 2>/dev/null || continue
@@ -766,6 +1262,13 @@ fleet_working() {  # -> prints " name(ages)" for each WORKING swarm; empty = idl
   printf '%s' "$out"
 }
 
+post_auth_config_hold() {
+  echo "$PROG: POST-AUTH HOLD — swarm.conf became malformed after authentication; the credential changed, but no fleet relaunch is safe." >&2
+  post_discord "⚠️ **Re-auth completed, relaunch HELD** (swarm '$SWARM') — swarm.conf changed or became malformed during login. Repair the config and relaunch explicitly." \
+    || echo "$PROG: WARNING — post-auth hold notice failed to post." >&2
+  exit 9
+}
+
 if [ "$DEDICATED" = "1" ]; then
   # No fleet re-check: nothing restarts after a dedicated-session re-auth, so
   # there is no relaunch to protect a mid-turn lead from. The panes keep running
@@ -774,7 +1277,8 @@ if [ "$DEDICATED" = "1" ]; then
 elif [ "$IDLE_TIMEOUT" -gt 0 ]; then
   echo "$PROG: step 6/6 — re-checking the clean boundary before handing back to rotate (timeout ${IDLE_TIMEOUT}s)"
   _deadline=$((SECONDS + IDLE_TIMEOUT))
-  _working="$(fleet_working)"
+  swarm_login_validate_config || post_auth_config_hold
+  if ! _working="$(fleet_working)"; then post_auth_config_hold; fi
   while [ -n "$_working" ]; do
     if [ "$SECONDS" -ge "$_deadline" ]; then
       echo "$PROG: WARNING — fleet still WORKING after ${IDLE_TIMEOUT}s:$_working" >&2
@@ -784,11 +1288,16 @@ elif [ "$IDLE_TIMEOUT" -gt 0 ]; then
     fi
     echo "$PROG:   waiting for a clean boundary — working:$_working"
     sleep "$POLL_INTERVAL"
-    _working="$(fleet_working)"
+    if ! _working="$(fleet_working)"; then post_auth_config_hold; fi
   done
 else
   echo "$PROG: step 6/6 — boundary re-check disabled (SWARM_LOGIN_IDLE_TIMEOUT=0)"
 fi
+
+# Bind the successful handoff to one final fully parseable fleet snapshot. The
+# caller also revalidates before teardown; this closes the relay's own long
+# operator-auth window without pretending a completed credential change failed.
+swarm_login_validate_config || post_auth_config_hold
 
 if [ "$DEDICATED" = "1" ]; then
   echo "$PROG: DONE — re-auth complete; credential verified (isolated session; no fleet restart)."

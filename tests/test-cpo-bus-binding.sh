@@ -52,5 +52,11 @@ OV2="$(SWARM_CPO_NAME=acme-cpo swarm_bound_exports qofi-product "$OP")"
 has "$BUS" "$OV2" && no "qofi-product still got bus after override!" || ok "override re-points CPO detection"
 
 echo ""
+echo "=== explicit archetype keeps Codex CPO binding independent of deployment name ==="
+TYPE_OUT="$(swarm_bound_exports product-vision 333 cpo)"
+has "DISCORD_OPERATOR_CHANNEL='333'" "$TYPE_OUT" && ok "type=cpo binds its operator channel" || no "type=cpo operator role missing"
+has "DISCORD_BUS_CHANNEL='$BUS'" "$TYPE_OUT" && ok "type=cpo binds the bus regardless of name" || no "type=cpo bus role missing"
+
+echo ""
 printf '  PASS: %d   FAIL: %d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

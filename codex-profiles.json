@@ -1,0 +1,17 @@
+{
+  "schema": "qofi-codex-profiles/v1",
+  "profiles": [
+    {
+      "label": "default",
+      "shared": true
+    }
+  ],
+  "pools": {
+    "default": {
+      "profiles": [
+        "default"
+      ],
+      "thresholdPercent": 95
+    }
+  }
+}

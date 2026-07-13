@@ -42,6 +42,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CREDSWAP="$ROOT/bin/swarm-credswap-keychain.sh"
+KEYCHAIN_WRITE_HELPER="$ROOT/bin/security-add-generic-password.py"
 
 PASS=0; FAIL=0; SKIP=0; FAILURES=""
 ok()   { printf '  PASS  %s\n' "$1"; PASS=$((PASS+1)); }
@@ -53,7 +54,6 @@ assert_has()   { if printf '%s' "$1" | grep -qF -- "$2"; then ok "$3"; else bad 
 assert_lacks() { if printf '%s' "$1" | grep -qF -- "$2"; then bad "$3 (found [$2])"; else ok "$3"; fi; }
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/swarm-credswap-test.XXXXXX")"
-trap 'rm -rf "$TMP"' EXIT
 
 # A clearly synthetic, test-only service name (NEVER the real claude service).
 TEST_SERVICE="swarm-credswap-TEST-$$"
@@ -62,6 +62,20 @@ TEST_ACCOUNT="synthetic-acct"
 # assertions is that even these throwaway markers must not appear in output.
 PRIOR_BLOB="SYNTH-PRIOR-do-not-leak-$$"
 NEXT_BLOB="SYNTH-NEXT-do-not-leak-$$"
+
+# Belt-and-suspenders cleanup also runs for PTY timeout/interruption. The only
+# real-keychain target in this suite is the unique synthetic service above.
+cleanup_all() {
+  if [ -x /usr/bin/security ]; then
+    /usr/bin/security delete-generic-password \
+      -s "$TEST_SERVICE" -a "$TEST_ACCOUNT" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$TMP"
+}
+trap cleanup_all EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ===========================================================================
 # (A) LOGIC LEVEL — a MOCK keychain injected via SWARM_KEYCHAIN_CMD.
@@ -150,6 +164,14 @@ clear_slot() { rm -f "$MOCK_STORE"; }                          # slot empty
 slot_value() { [ -f "$MOCK_STORE" ] && cat "$MOCK_STORE" || printf '<EMPTY>'; }
 
 echo "=== (A) LOGIC LEVEL — mock keychain via SWARM_KEYCHAIN_CMD ==="
+
+echo "--- 0) secure writer guards input before invoking /usr/bin/security ---"
+OUT="$(printf 'one-line\nsecond-line' | /usr/bin/python3 "$KEYCHAIN_WRITE_HELPER" \
+  --service "$TEST_SERVICE" --account "$TEST_ACCOUNT" 2>&1)"; rc=$?
+assert_eq 2 "$rc" "secure writer refuses multi-line stdin"
+assert_has "$OUT" "not a single line" "secure writer explains the bounded-line refusal"
+assert_lacks "$OUT" "one-line" "secure writer does not disclose refused stdin"
+assert_lacks "$OUT" "second-line" "secure writer does not disclose a second refused line"
 
 echo "--- 1) happy path: backup -> install -> verify(pass) -> slot holds NEXT ---"
 seed_prior; rm -f "$MOCK_FAIL_ADD"
@@ -352,11 +374,11 @@ echo ""
 echo "=== (B) REAL security — synthetic service '$TEST_SERVICE' (or SKIP if sandboxed) ==="
 
 # Probe: can we add/find/delete a generic-password under the synthetic service?
-real_cleanup() { security delete-generic-password -s "$TEST_SERVICE" -a "$TEST_ACCOUNT" >/dev/null 2>&1 || true; }
+real_cleanup() { /usr/bin/security delete-generic-password -s "$TEST_SERVICE" -a "$TEST_ACCOUNT" >/dev/null 2>&1 || true; }
 real_cleanup   # pre-clean any leftover from a crashed prior run
 REAL_OK=0
-if security add-generic-password -s "$TEST_SERVICE" -a "$TEST_ACCOUNT" -w "probe" >/dev/null 2>&1; then
-  if security find-generic-password -s "$TEST_SERVICE" -a "$TEST_ACCOUNT" >/dev/null 2>&1; then
+if /usr/bin/security add-generic-password -s "$TEST_SERVICE" -a "$TEST_ACCOUNT" -w "probe" >/dev/null 2>&1; then
+  if /usr/bin/security find-generic-password -s "$TEST_SERVICE" -a "$TEST_ACCOUNT" >/dev/null 2>&1; then
     REAL_OK=1
   fi
 fi
@@ -368,8 +390,8 @@ else
   # Helper: read the synthetic slot's value WITH -w. This is a TEST reading a value
   # it itself wrote (a synthetic marker), to PROVE the adapter installed/restored
   # the right bytes — it is never a real credential.
-  real_slot() { security find-generic-password -s "$TEST_SERVICE" -a "$TEST_ACCOUNT" -w 2>/dev/null || printf '<EMPTY>'; }
-  real_seed_prior() { security add-generic-password -U -s "$TEST_SERVICE" -a "$TEST_ACCOUNT" -w "$PRIOR_BLOB" >/dev/null 2>&1; }
+  real_slot() { /usr/bin/security find-generic-password -s "$TEST_SERVICE" -a "$TEST_ACCOUNT" -w 2>/dev/null || printf '<EMPTY>'; }
+  real_seed_prior() { /usr/bin/security add-generic-password -U -s "$TEST_SERVICE" -a "$TEST_ACCOUNT" -w "$PRIOR_BLOB" >/dev/null 2>&1; }
 
   run_real() {  # AUTHCHECK ACCOUNT-ARG
     OUT="$(
@@ -381,6 +403,49 @@ else
     )"; rc=$?
   }
 
+  # Run the adapter as a child of `script`, which gives it a real controlling
+  # PTY. An outer timeout makes the historical hang a bounded test failure. The
+  # secure writer must detach only /usr/bin/security from that PTY, complete the
+  # prompt over its private pipe, and leave the synthetic slot on NEXT.
+  run_real_pty() {  # AUTHCHECK ACCOUNT-ARG
+    OUT="$(
+      export SWARM_CREDSWAP_SERVICE="$TEST_SERVICE"
+      export SWARM_CREDSWAP_ACCOUNT="$TEST_ACCOUNT"
+      export SWARM_CREDSWAP_AUTHCHECK_CMD="$1"
+      export SWARM_CREDSWAP_BLOB_FETCH="printf %s $NEXT_BLOB # {}"
+      /usr/bin/python3 - "$CREDSWAP" "$2" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+
+command = [
+    "/usr/bin/script", "-q", "-e", "/dev/null",
+    "/bin/bash", sys.argv[1], sys.argv[2],
+]
+process = subprocess.Popen(
+    command,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    start_new_session=True,
+)
+try:
+    output, _ = process.communicate(timeout=20)
+except subprocess.TimeoutExpired:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.communicate()
+    print("PTY regression timed out", file=sys.stderr)
+    raise SystemExit(124)
+if output:
+    os.write(sys.stdout.fileno(), output)
+raise SystemExit(process.returncode)
+PY
+    )"; rc=$?
+  }
+
   echo "--- B1) REAL happy path: slot ends up holding NEXT ---"
   real_seed_prior
   run_real 'true' max-b
@@ -388,6 +453,60 @@ else
   assert_eq "$NEXT_BLOB" "$(real_slot)" "REAL: slot holds NEXT after a verified swap"
   assert_lacks "$OUT" "$PRIOR_BLOB" "REAL no-leak: prior value not printed"
   assert_lacks "$OUT" "$NEXT_BLOB"  "REAL no-leak: next value not printed"
+
+  echo "--- B1b) REAL controlling-PTY happy path completes without prompt hang ---"
+  real_seed_prior
+  run_real_pty 'true' max-b
+  assert_eq 0 "$rc" "REAL PTY path completes before the timeout"
+  assert_eq "$NEXT_BLOB" "$(real_slot)" "REAL PTY path installs NEXT"
+  assert_lacks "$OUT" "$PRIOR_BLOB" "REAL PTY no-leak: prior value not printed"
+  assert_lacks "$OUT" "$NEXT_BLOB" "REAL PTY no-leak: next value not printed"
+
+  echo "--- B1c) literal security seam is pinned away from ambient PATH ---"
+  SHADOW_DIR="$TMP/shadow-bin"
+  SHADOW_MARKER="$TMP/shadow-security-ran"
+  mkdir -p "$SHADOW_DIR"
+  cat > "$SHADOW_DIR/security" <<'SHADOW'
+#!/bin/sh
+: > "${SHADOW_MARKER:?}"
+exit 99
+SHADOW
+  chmod +x "$SHADOW_DIR/security"
+  rm -f "$SHADOW_MARKER"
+  real_seed_prior
+  OUT="$(
+    export SHADOW_MARKER
+    export PATH="$SHADOW_DIR:/usr/bin:/bin"
+    export SWARM_KEYCHAIN_CMD='security'
+    export SWARM_CREDSWAP_SERVICE="$TEST_SERVICE"
+    export SWARM_CREDSWAP_ACCOUNT="$TEST_ACCOUNT"
+    export SWARM_CREDSWAP_AUTHCHECK_CMD='true'
+    export SWARM_CREDSWAP_BLOB_FETCH="printf %s $NEXT_BLOB # {}"
+    bash "$CREDSWAP" max-b 2>&1
+  )"; rc=$?
+  assert_eq 0 "$rc" "literal security seam succeeds through fixed /usr/bin/security"
+  if [ ! -e "$SHADOW_MARKER" ]; then
+    ok "literal security seam never executes an ambient-PATH shadow"
+  else
+    bad "literal security seam executed an ambient-PATH shadow"
+  fi
+  assert_eq "$NEXT_BLOB" "$(real_slot)" "literal security seam writes through the same fixed binary used for backup"
+
+  echo "--- B1d) REAL explicit-keychain path fails closed before mutation ---"
+  real_seed_prior
+  OUT="$(
+    export SWARM_CREDSWAP_SERVICE="$TEST_SERVICE"
+    export SWARM_CREDSWAP_ACCOUNT="$TEST_ACCOUNT"
+    export SWARM_CREDSWAP_AUTHCHECK_CMD='true'
+    export SWARM_CREDSWAP_BLOB_FETCH="printf %s $NEXT_BLOB # {}"
+    export SWARM_CREDSWAP_KEYCHAIN="$TMP/never-used.keychain-db"
+    bash "$CREDSWAP" max-b 2>&1
+  )"; rc=$?
+  assert_eq 2 "$rc" "REAL explicit keychain is refused before the insecure argv ambiguity"
+  assert_eq "$PRIOR_BLOB" "$(real_slot)" "REAL explicit-keychain refusal leaves the slot untouched"
+  assert_has "$OUT" "incompatible with secure stdin prompting" "REAL explicit-keychain refusal is actionable"
+  assert_lacks "$OUT" "$PRIOR_BLOB" "REAL explicit-keychain refusal does not print the prior value"
+  assert_lacks "$OUT" "$NEXT_BLOB" "REAL explicit-keychain refusal does not print the next value"
 
   echo "--- B2) REAL verify failure -> PRIOR RESTORED in the real keychain ---"
   real_seed_prior
@@ -404,7 +523,7 @@ else
 
   # CLEANUP — the synthetic entry must not survive the test run.
   real_cleanup
-  if security find-generic-password -s "$TEST_SERVICE" -a "$TEST_ACCOUNT" >/dev/null 2>&1; then
+  if /usr/bin/security find-generic-password -s "$TEST_SERVICE" -a "$TEST_ACCOUNT" >/dev/null 2>&1; then
     bad "CLEANUP: synthetic keychain entry '$TEST_SERVICE' still present after the run"
   else
     ok "CLEANUP: synthetic keychain entry removed"
@@ -412,7 +531,7 @@ else
 fi
 
 # Final belt-and-suspenders cleanup regardless of path.
-security delete-generic-password -s "$TEST_SERVICE" -a "$TEST_ACCOUNT" >/dev/null 2>&1 || true
+/usr/bin/security delete-generic-password -s "$TEST_SERVICE" -a "$TEST_ACCOUNT" >/dev/null 2>&1 || true
 
 echo ""
 echo "=== Summary ==="

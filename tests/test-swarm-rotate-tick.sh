@@ -76,7 +76,7 @@ cat > "$TMP/stubs/poll.sh" <<EOF
 #!/usr/bin/env bash
 for a in "\$@"; do
   if [ "\$a" = "--json" ]; then
-    echo '{"verdict":"NEAR","five_hour_pct":88,"weekly_pct":41,"worst_pct":88,"worst_window":"5h","threshold_pct":85,"account":"max-a"}'
+    echo '{"verdict":"NEAR","five_hour_pct":98,"weekly_pct":41,"worst_pct":98,"worst_window":"5h","threshold_pct":95,"account":"max-a"}'
     exit "\$(cat "$TMP/poll.rc" 2>/dev/null || echo 0)"
   fi
 done
@@ -336,9 +336,9 @@ assert_eq 0 "$rc" "--observe exits 0"
 assert_has "$OUT" "OBSERVE" "observe emits a calibration line"
 assert_has "$OUT" "proxy_verdict=NEAR" "observe logs the proxy verdict word"
 assert_has "$OUT" "proxy_exit=10" "observe logs the proxy exit code"
-assert_has "$OUT" "five_hour_pct=88" "observe logs the estimated 5h burn-vs-budget pct"
+assert_has "$OUT" "five_hour_pct=98" "observe logs the estimated 5h burn-vs-budget pct"
 assert_has "$OUT" "weekly_pct=41" "observe logs the estimated weekly pct"
-assert_has "$OUT" "threshold_pct=85" "observe logs the rotation threshold"
+assert_has "$OUT" "threshold_pct=95" "observe logs the rotation threshold"
 assert_has "$OUT" "account=max-a" "observe logs which account"
 assert_has "$OUT" "real_signal=OK" "observe logs the REAL limit signal (detector consulted)"
 assert_has "$OUT" "would_rotate=yes" "observe states the live tick WOULD rotate on this verdict"

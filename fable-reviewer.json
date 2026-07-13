@@ -1,0 +1,12 @@
+{
+  "schema": "qofi-fable-reviewer/v1",
+  "defaults": {
+    "authLane": "device",
+    "maxCallsPerTask": 1,
+    "maxCallsPerWindow": 12,
+    "windowSeconds": 3600,
+    "timeoutSeconds": 180,
+    "failurePolicy": "review-pending"
+  },
+  "swarms": {}
+}

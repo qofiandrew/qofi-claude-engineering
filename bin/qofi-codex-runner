@@ -1,0 +1,2572 @@
+#!/usr/bin/python3 -I
+"""Root-owned supervisor for every unattended Codex child on macOS.
+
+This source is installed byte-for-byte at /usr/local/libexec/qofi-codex-runner.
+It is the sole sudo target: the operator never receives sudo-as-user, pkill, or
+launchctl authority. The installed file and immutable Node/Codex entrypoint are
+bound by SHA-256 in /private/etc/qofi-codex-runtime.json.
+"""
+
+from __future__ import annotations
+
+import ctypes
+import errno
+import fcntl
+import grp
+import hashlib
+import json
+import math
+import os
+import pwd
+import re
+import select
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import NoReturn
+
+sys.dont_write_bytecode = True
+
+ATTESTATION = "/private/etc/qofi-codex-runtime.json"
+MANAGER_AUTHORITY = "/private/etc/qofi-codex-manager.json"
+MANAGER_ADMISSION = "/private/var/db/qofi-codex-manager-admission.json"
+MANAGER_LAUNCHER = "/usr/local/libexec/qofi-codex-manager-launcher"
+MANAGER_BUNDLE = "/usr/local/libexec/qofi-codex-app-server-manager.mjs"
+FABLE_REVIEWER = "/usr/local/libexec/qofi-fable-reviewer-mcp.py"
+FABLE_DOCTRINE = "/usr/local/libexec/qofi-fable-reviewer-doctrine.md"
+FABLE_SCHEMA = "/usr/local/libexec/qofi-adversarial-review-output.schema.json"
+MANAGER_AUTHORITY_SCHEMA = "qofi-codex-manager-authority/v1"
+MANAGER_ADMISSION_SCHEMA = "qofi-codex-manager-admission/v1"
+SCHEMA = "qofi-codex-runtime/v2"
+RUNNER = "/usr/local/libexec/qofi-codex-runner"
+LOCK = "/private/var/run/qofi-codex-runner.lock"
+MACOS_RUNTIME_INFRASTRUCTURE = "/usr/sbin/distnoted"
+MAX_ATTESTATION = 16 * 1024
+MAX_HASH_FILE = 512 * 1024 * 1024
+MAX_AUTH_JSON = 1024 * 1024
+MAX_TELEMETRY_FILE = 64 * 1024 * 1024
+MAX_TELEMETRY_LINE = 1024 * 1024
+MAX_TELEMETRY_ENTRIES = 100_000
+MAX_TELEMETRY_DEPTH = 8
+# Production authority is uid 0. Tests replace this module-local value only in
+# an isolated import so descriptor-bound authority checks remain testable.
+ROOT_AUTHORITY_UID = 0
+_ACL_API: tuple[object, object] | None = None
+EXACT_KEYS = {
+    "schema", "operator_uid", "runtime_uid", "runtime_user",
+    "runtime_gid", "runtime_group", "runtime_home", "codex_home",
+    "runner_path", "runner_sha256", "node_path", "node_sha256",
+    "codex_script", "codex_script_sha256", "launchd_canary_name",
+    "launchd_canary_sha256", "fable_reviewer_path", "fable_reviewer_sha256",
+    "fable_doctrine_path", "fable_doctrine_sha256",
+    "fable_schema_path", "fable_schema_sha256",
+    "fable_reviewer_config_sha256", "codex_config_sha256",
+}
+MANAGER_AUTHORITY_KEYS = {
+    "schema", "operator_uid", "operator_user", "operator_home",
+    "node_path", "node_sha256", "manager_bundle_path",
+    "manager_bundle_sha256", "manager_launcher_path",
+    "manager_launcher_sha256", "manager_python_path",
+    "manager_python_sha256", "manager_state_dir", "swarm_home",
+    "manager_environment_sha256",
+}
+MANAGER_ADMISSION_KEYS = {
+    "schema", "nonce", "operator_uid", "launcher_pid", "launcher_started",
+    "manager_pid", "manager_started", "node_path", "node_sha256",
+    "manager_bundle_path", "manager_bundle_sha256", "manager_launcher_path",
+    "manager_launcher_sha256", "manager_python_path", "manager_python_sha256",
+    "manager_state_dir", "swarm_home", "manager_environment_sha256",
+}
+NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}\Z")
+PROFILE_RE = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
+DEFAULT_PROFILE = "default"
+CODEX_CONFIG_TEMPLATE = b'''# Managed by swarm-codex-runtime.py. Local edits are replaced.
+[mcp_servers.fable_reviewer]
+command = "/usr/bin/sudo"
+args = ["-n", "-H", "-u", "#__QOFI_OPERATOR_UID__", "--", "/usr/bin/python3", "-I", "-B", "/usr/local/libexec/qofi-fable-reviewer-mcp.py"]
+enabled = true
+required = true
+startup_timeout_sec = 10
+tool_timeout_sec = 4300
+default_tools_approval_mode = "approve"
+enabled_tools = ["adversarial_review"]
+
+[mcp_servers.fable_reviewer.tools.adversarial_review]
+approval_mode = "approve"
+'''
+CODEX_CONFIG_OPERATOR_UID = b"__QOFI_OPERATOR_UID__"
+ROLLOUT_RE = re.compile(r"rollout-[A-Za-z0-9_.:-]{1,240}\.jsonl\Z")
+ROLLOUT_TIMESTAMP_RE = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+    r"(?:\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2})\Z"
+)
+HASH_RE = re.compile(r"[0-9a-f]{64}\Z")
+TOOL_PROBES = {
+    "bun": ("--version",),
+    "cargo": ("--version",),
+    "deno": ("--version",),
+    "git": ("--version",),
+    "go": ("version",),
+    "node": ("--version",),
+    "npm": ("--version",),
+    "npx": ("--version",),
+    "pnpm": ("--version",),
+    "python3": ("--version",),
+    "rustc": ("--version",),
+    "swift": ("--version",),
+    "swiftc": ("--version",),
+    "uv": ("--version",),
+    "xcodebuild": ("-version",),
+    "xcrun": ("--version",),
+    "yarn": ("--version",),
+}
+SUPPORTED_PNPM_VERSION = "9.12.3"
+MAX_TOOL_PROBES = 16
+MAX_PROBE_OUTPUT = 64 * 1024
+ALLOWED_IMPLICIT_RUNTIME_GROUPS = {"everyone", "localaccounts", "_lpoperator"}
+RUNTIME_USER_REALNAME = "Qofi Codex Runtime"
+RUNTIME_GROUP_REALNAME = "Qofi Codex shared workspace"
+# `launchctl asuser` adopts a bootstrap/audit context but deliberately does not
+# change credentials. It must therefore run as root on current macOS, followed
+# by this fixed isolated-system-Python trampoline which drops credentials before
+# the requested executable is reached. Keep byte-identical with swarm-codex-runtime.py.
+RUNTIME_CONTEXT_TRAMPOLINE = r'''import os
+import pwd
+import sys
+
+def refuse(reason):
+    sys.stderr.write("qofi runtime credential trampoline refused: " + reason + "\n")
+    raise SystemExit(126)
+
+if len(sys.argv) < 6:
+    refuse("argument shape")
+name, uid_text, gid_text, mask_text = sys.argv[1:5]
+argv = sys.argv[5:]
+if not uid_text.isdecimal() or not gid_text.isdecimal():
+    refuse("numeric identity")
+uid, gid = int(uid_text), int(gid_text)
+if uid <= 0 or gid <= 0 or mask_text not in ("077", "002"):
+    refuse("identity or umask")
+if (not argv or not os.path.isabs(argv[0]) or os.path.normpath(argv[0]) != argv[0]
+        or any("\0" in value for value in argv)):
+    refuse("executable argv")
+try:
+    by_name = pwd.getpwnam(name)
+    by_uid = pwd.getpwuid(uid)
+except KeyError:
+    refuse("directory identity")
+if (by_name.pw_name != name or by_name.pw_uid != uid or by_name.pw_gid != gid
+        or by_uid.pw_name != name or by_uid.pw_uid != uid or by_uid.pw_gid != gid):
+    refuse("directory identity")
+try:
+    os.initgroups(name, gid)
+    os.setgid(gid)
+    os.setuid(uid)
+except OSError:
+    refuse("credential drop")
+if ((os.getuid(), os.geteuid(), os.getgid(), os.getegid()) != (uid, uid, gid, gid)
+        or 0 in os.getgroups()):
+    refuse("credential proof")
+os.umask(int(mask_text, 8))
+try:
+    os.execve(argv[0], argv, dict(os.environ))
+except OSError:
+    refuse("exec")'''
+WORKSPACE_PROFILE = "qofi-workspace-only"
+WORKSPACE_DISABLED_FEATURES = (
+    "plugins", "plugin_sharing", "remote_plugin", "apps", "browser_use",
+    "browser_use_external", "browser_use_full_cdp_access", "in_app_browser",
+    "computer_use", "image_generation", "skill_mcp_dependency_install",
+    "tool_call_mcp_elicitation", "auth_elicitation", "tool_suggest",
+    "code_mode_host", "goals", "memories", "chronicle",
+    "workspace_dependencies", "shell_snapshot", "hooks",
+)
+REVIEW_DISABLED_FEATURES = (
+    "hooks", "plugins", "plugin_sharing", "remote_plugin", "apps",
+    "browser_use", "browser_use_external", "browser_use_full_cdp_access",
+    "in_app_browser", "computer_use", "image_generation",
+    "skill_mcp_dependency_install", "tool_call_mcp_elicitation",
+    "auth_elicitation", "tool_suggest", "code_mode_host", "goals",
+    "memories", "chronicle", "multi_agent", "workspace_dependencies",
+    "shell_snapshot", "shell_tool", "unified_exec",
+)
+# The global App Server is never a cross-UID listener.  Its only transport is
+# inherited stdio to the separately trusted operator manager, which mediates
+# every client and thread capability.  Keep this argv exact: App Server has no
+# `--ignore-user-config` switch, so every security-relevant ambient capability
+# that can be pinned at process startup is overridden here.
+# Do not add an mcp_servers override here. validate_authority() descriptor-binds
+# the exact rendered profile config immediately before this argv is launched;
+# that file contains the sole manager-scoped Fable reviewer capability.
+APP_SERVER_ARGS = (
+    "app-server", "--listen", "stdio://", "--strict-config",
+    "--enable", "multi_agent",
+    *(token for feature in WORKSPACE_DISABLED_FEATURES
+      for token in ("--disable", feature)),
+    "-c", 'approval_policy="never"',
+    "-c", 'forced_login_method="chatgpt"',
+    "-c", 'cli_auth_credentials_store="file"',
+    "-c", 'model_provider="openai"',
+    "-c", "model_providers={}",
+    "-c", "allow_login_shell=false",
+    "-c", 'web_search="disabled"',
+    "-c", 'shell_environment_policy.inherit="none"',
+    "-c", "shell_environment_policy.set={}",
+    "-c", "shell_environment_policy.experimental_use_profile=false",
+    "-c", "shell_environment_policy.ignore_default_excludes=false",
+    "-c", "analytics.enabled=false",
+)
+SHELL_ENV_KEYS = {
+    "HOME", "CODEX_HOME", "PATH", "TMPDIR", "TMP", "TEMP",
+    "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM", "GIT_TERMINAL_PROMPT", "GIT_ASKPASS",
+    "NPM_CONFIG_USERCONFIG", "NPM_CONFIG_CACHE", "NPM_CONFIG_UPDATE_NOTIFIER",
+    "NPM_CONFIG_AUDIT", "NPM_CONFIG_FUND", "NPM_CONFIG_STORE_DIR",
+    "NPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS", "NPM_CONFIG_PACKAGE_MANAGER_STRICT",
+    "NPM_CONFIG_PACKAGE_MANAGER_STRICT_VERSION", "PNPM_HOME",
+    "COREPACK_ENABLE_PROJECT_SPEC", "COREPACK_ENABLE_DOWNLOAD_PROMPT",
+    "COREPACK_ENABLE_NETWORK", "BUN_INSTALL_CACHE_DIR",
+    "UV_CACHE_DIR", "PIP_CONFIG_FILE", "PIP_CACHE_DIR", "PYTHONNOUSERSITE",
+    "GOCACHE", "GOPATH", "GOMODCACHE", "CARGO_HOME", "CARGO_TARGET_DIR",
+    "RUSTUP_HOME", "CLANG_MODULE_CACHE_PATH", "SWIFT_MODULE_CACHE_PATH",
+    "SWIFTPM_CACHE_PATH", "SWIFTPM_CONFIG_PATH", "SWIFTPM_SECURITY_PATH",
+    "OBJROOT", "SYMROOT", "SHARED_PRECOMPS_DIR", "DERIVED_DATA_DIR",
+}
+SANDBOX_GIT_READ_SCRIPT = "\n".join((
+    "set -eu",
+    'GIT_NO_LAZY_FETCH=1 "$1" --no-pager --no-optional-locks --no-replace-objects -c safe.directory="$2" -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.untrackedCache=false -C "$2" rev-parse --verify "HEAD^{commit}" >/dev/null',
+    'GIT_NO_LAZY_FETCH=1 "$1" --no-pager --no-optional-locks --no-replace-objects -c safe.directory="$2" -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.untrackedCache=false -C "$2" cat-file -e "HEAD^{commit}"',
+    'GIT_NO_LAZY_FETCH=1 "$1" --no-pager --no-optional-locks --no-replace-objects -c safe.directory="$2" -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.untrackedCache=false -C "$2" ls-files --stage >/dev/null',
+))
+SANDBOX_TOOL_PROBE_SCRIPT = "\n".join((
+    "set -eu",
+    "fail() { printf 'qofi-tool-probe: %s\\n' \"$1\" >&2; exit 69; }",
+    'while [ "$#" -gt 0 ]; do',
+    "  name=$1",
+    "  path=$2",
+    "  shift 2",
+    '  case "$name" in',
+    '    xcrun) "$path" --find clang >/dev/null || fail "$name execution failed" ;;',
+    '    xcodebuild) "$path" -version >/dev/null || fail "$name execution failed" ;;',
+    '    go) "$path" version >/dev/null || fail "$name execution failed" ;;',
+    '    pnpm) output=$("$path" --version && printf qofi-pnpm-end) || fail "$name execution failed"; expected=$(printf \'9.12.3\\nqofi-pnpm-end\'); { [ "$output" = "9.12.3qofi-pnpm-end" ] || [ "$output" = "$expected" ]; } || fail "pnpm must be exactly 9.12.3" ;;',
+    '    *) "$path" --version >/dev/null || fail "$name execution failed" ;;',
+    "  esac",
+    "done",
+))
+SANDBOX_BUILD_SCRIPTS = {
+    "bun": "; ".join((
+        'd="$2/bun-build-$$"; trap \'rm -rf "$d"\' EXIT; mkdir -p "$d" || exit',
+        'printf \'import {expect,test} from "bun:test"; test("smoke",()=>expect(2+2).toBe(4))\\n\' > "$d/smoke.test.ts" || exit',
+        '"$1" test "$d/smoke.test.ts" >/dev/null 2>&1',
+    )),
+    "go": "; ".join((
+        'd="$2/go-build-$$"; trap \'rm -rf "$d"\' EXIT; mkdir -p "$d" || exit',
+        'printf \'package smoke\\nimport "testing"\\nfunc TestSmoke(t *testing.T) {}\\n\' > "$d/smoke_test.go" || exit',
+        'cd "$d" && "$1" test smoke_test.go >/dev/null 2>&1',
+    )),
+    "rustc": "; ".join((
+        'd="$2/rust-build-$$"; trap \'rm -rf "$d"\' EXIT; mkdir -p "$d" || exit',
+        'printf \'fn main() { assert_eq!(2 + 2, 4); }\\n\' > "$d/main.rs" || exit',
+        '"$1" "$d/main.rs" -o "$d/smoke" >/dev/null 2>&1 && "$d/smoke"',
+    )),
+    "cargo": "; ".join((
+        'd="$2/cargo-build-$$"; trap \'rm -rf "$d"\' EXIT; mkdir -p "$d/src" || exit',
+        'printf \'[package]\\nname="qofi_smoke"\\nversion="0.1.0"\\nedition="2021"\\n\' > "$d/Cargo.toml" || exit',
+        'printf \'fn main() { assert_eq!(2 + 2, 4); }\\n\' > "$d/src/main.rs" || exit',
+        'RUSTC="$3" "$1" build --manifest-path "$d/Cargo.toml" --target-dir "$d/target" >/dev/null 2>&1',
+    )),
+    "swift": "; ".join((
+        'd="$2/swift-build-$$"; trap \'rm -rf "$d"\' EXIT; mkdir -p "$d" || exit',
+        'printf \'precondition(2 + 2 == 4)\\n\' > "$d/main.swift" || exit',
+        '"$1" "$d/main.swift" -o "$d/smoke" >/dev/null 2>&1 && "$d/smoke"',
+    )),
+    "swift-xcrun": "; ".join((
+        'd="$2/swift-build-$$"; trap \'rm -rf "$d"\' EXIT; mkdir -p "$d" || exit',
+        'printf \'precondition(2 + 2 == 4)\\n\' > "$d/main.swift" || exit',
+        '"$1" swiftc "$d/main.swift" -o "$d/smoke" >/dev/null 2>&1 && "$d/smoke"',
+    )),
+    "xcode": "; ".join((
+        'd="$2/xcode-build-$$"; trap \'rm -rf "$d"\' EXIT; mkdir -p "$d" || exit',
+        'printf \'int main(void) { return 0; }\\n\' > "$d/main.c" || exit',
+        '"$1" clang "$d/main.c" -o "$d/smoke" >/dev/null 2>&1 && "$d/smoke"',
+    )),
+}
+SANDBOX_WORKSPACE_WRITE_SCRIPT = (
+    'umask 0002; printf runtime >> "$1" && printf delete > "$2" && rm -f "$2"'
+)
+SANDBOX_DETACHED_SCRIPT = (
+    '(trap "" HUP; sleep 1; printf escaped > "$1") </dev/null >/dev/null 2>&1 &'
+)
+_PARENT_BINDING: tuple[int, int, str] | None = None
+
+
+def die(message: str, code: int = 70) -> NoReturn:
+    print(f"qofi-codex-runner: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def inside(root: str, candidate: str) -> bool:
+    try:
+        return os.path.commonpath([root, candidate]) == root
+    except ValueError:
+        return False
+
+
+def clean_absolute(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value or not os.path.isabs(value):
+        die(f"attested {label} must be an absolute path")
+    if os.path.normpath(value) != value or os.path.realpath(value) != value:
+        die(f"attested {label} must be canonical")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        die(f"attested {label} contains a control character")
+    return value
+
+
+def fd_has_extended_acl(fd: int) -> bool:
+    if sys.platform != "darwin":
+        return False
+    global _ACL_API
+    if _ACL_API is None:
+        libc = ctypes.CDLL(None, use_errno=True)
+        get_acl = libc.acl_get_fd_np
+        get_acl.argtypes = [ctypes.c_int, ctypes.c_int]
+        get_acl.restype = ctypes.c_void_p
+        free_acl = libc.acl_free
+        free_acl.argtypes = [ctypes.c_void_p]
+        free_acl.restype = ctypes.c_int
+        _ACL_API = (get_acl, free_acl)
+    get_acl, free_acl = _ACL_API
+    ctypes.set_errno(0)
+    acl = get_acl(fd, 0x00000100)  # ACL_TYPE_EXTENDED
+    if not acl:
+        error = ctypes.get_errno()
+        if error in (0, errno.ENOENT):
+            return False
+        die(f"could not inspect root authority ACL: errno {error}")
+    try:
+        return True
+    finally:
+        free_acl(acl)
+
+
+def _root_authority_owner(uid: int) -> bool:
+    return uid in (0, ROOT_AUTHORITY_UID)
+
+
+def safe_root_file(path: str, label: str, *, executable: bool = False) -> os.stat_result:
+    path = clean_absolute(path, label)
+    directory_flags = (
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    )
+    fd = os.open("/", directory_flags)
+    current = "/"
+    parent_parts = path.split("/")[1:-1]
+    try:
+        for index in range(len(parent_parts) + 1):
+            info = os.fstat(fd)
+            enforce_acl = ROOT_AUTHORITY_UID == 0 or index == len(parent_parts)
+            if (not stat.S_ISDIR(info.st_mode) or not _root_authority_owner(info.st_uid)
+                    or info.st_mode & 0o022
+                    or (enforce_acl and fd_has_extended_acl(fd))):
+                die(f"{label} parent is not ACL-free root controlled: {current}")
+            if index == len(parent_parts):
+                break
+            part = parent_parts[index]
+            next_fd = os.open(part, directory_flags, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+            current = os.path.join(current, part)
+
+        name = os.path.basename(path)
+        before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        file_fd = os.open(
+            name,
+            os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=fd,
+        )
+        try:
+            opened = os.fstat(file_fd)
+            if ((opened.st_dev, opened.st_ino, opened.st_mode, opened.st_uid,
+                 opened.st_gid, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
+                    != (before.st_dev, before.st_ino, before.st_mode, before.st_uid,
+                        before.st_gid, before.st_size, before.st_mtime_ns,
+                        before.st_ctime_ns)
+                    or not stat.S_ISREG(opened.st_mode)
+                    or not _root_authority_owner(opened.st_uid)
+                    or opened.st_mode & 0o022 or fd_has_extended_acl(file_fd)):
+                die(f"{label} must be an ACL-free root-owned non-writable regular file")
+            if executable and not opened.st_mode & 0o111:
+                die(f"{label} is not executable")
+            return opened
+        finally:
+            os.close(file_fd)
+    except OSError as exc:
+        die(f"could not bind {label} root authority: {exc}")
+    finally:
+        os.close(fd)
+
+
+def sha256_file(path: str) -> str:
+    info = os.lstat(path)
+    if info.st_size > MAX_HASH_FILE:
+        die(f"refusing to hash oversized authority file: {path}")
+    digest = hashlib.sha256()
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns) != (
+            info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+        ):
+            die(f"authority file changed while opening: {path}")
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        after = os.fstat(fd)
+        if (after.st_size, after.st_mtime_ns) != (opened.st_size, opened.st_mtime_ns):
+            die(f"authority file changed while hashing: {path}")
+    finally:
+        os.close(fd)
+    return digest.hexdigest()
+
+
+def acl_entries(path: str) -> list[str]:
+    try:
+        output = subprocess.run(
+            ["/bin/ls", "-lde", path], check=True, capture_output=True, text=True,
+            env={
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C",
+            },
+            timeout=2,
+        ).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        die(f"could not inspect runtime ACL for {path}: {exc}")
+    if len(output.encode("utf-8", "replace")) > 16 * 1024:
+        die(f"runtime ACL listing is unexpectedly large: {path}")
+    return [
+        line.strip() for line in output.splitlines()[1:]
+        if re.match(r"\s*\d+:\s", line)
+    ]
+
+
+def profile_codex_home(runtime_home: str, profile: str) -> str:
+    """Derive one profile home without accepting an operator-controlled path."""
+
+    if not isinstance(profile, str) or not PROFILE_RE.fullmatch(profile):
+        die("Codex profile handle must match [a-z][a-z0-9_-]{0,31}", 64)
+    if profile == DEFAULT_PROFILE:
+        return os.path.join(runtime_home, ".codex")
+    return os.path.join(runtime_home, ".codex-profiles", profile)
+
+
+def rendered_codex_config(operator_uid: int) -> bytes:
+    if type(operator_uid) is not int or operator_uid <= 0:
+        die("Codex config renderer requires a non-root operator uid")
+    if CODEX_CONFIG_TEMPLATE.count(CODEX_CONFIG_OPERATOR_UID) != 1:
+        die("embedded Codex config template has an invalid placeholder count")
+    return CODEX_CONFIG_TEMPLATE.replace(
+        CODEX_CONFIG_OPERATOR_UID, str(operator_uid).encode("ascii"),
+    )
+
+
+def validate_runtime_codex_config(
+    codex_home: str,
+    runtime_uid: int,
+    runtime_gid: int,
+    operator_uid: int,
+    expected_sha256: object,
+) -> None:
+    expected = rendered_codex_config(operator_uid)
+    if (not isinstance(expected_sha256, str) or not HASH_RE.fullmatch(expected_sha256)
+            or hashlib.sha256(expected).hexdigest() != expected_sha256):
+        die("attested Codex config hash differs from the fixed renderer")
+    config = os.path.join(codex_home, "config.toml")
+    try:
+        parent_before = os.lstat(codex_home)
+        before = os.lstat(config)
+        parent_fd = os.open(
+            codex_home,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError as exc:
+        die(f"could not bind dedicated Codex config: {exc}")
+    config_fd = -1
+    try:
+        parent_opened = os.fstat(parent_fd)
+        rebound = os.stat("config.toml", dir_fd=parent_fd, follow_symlinks=False)
+        config_fd = os.open(
+            "config.toml",
+            os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_fd,
+        )
+        opened = os.fstat(config_fd)
+        observed = os.read(config_fd, len(expected) + 1)
+        final = os.fstat(config_fd)
+        parent_after = os.lstat(codex_home)
+        identity = lambda value: (
+            value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid,
+            value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns,
+        )
+        if (identity(parent_opened) != identity(parent_before)
+                or identity(parent_after) != identity(parent_before)
+                or identity(rebound) != identity(before)
+                or identity(opened) != identity(before) or identity(final) != identity(before)
+                or not stat.S_ISREG(opened.st_mode) or stat.S_ISLNK(opened.st_mode)
+                or opened.st_uid != runtime_uid or opened.st_gid != runtime_gid
+                or opened.st_nlink != 1 or opened.st_dev != parent_opened.st_dev
+                or stat.S_IMODE(opened.st_mode) != 0o600
+                or fd_has_extended_acl(config_fd) or observed != expected):
+            die("dedicated Codex config is not the exact runtime-owned mode 0600 render")
+    except OSError as exc:
+        die(f"could not verify dedicated Codex config: {exc}")
+    finally:
+        if config_fd >= 0:
+            os.close(config_fd)
+        os.close(parent_fd)
+
+
+def validate_runtime_acls(
+    authority: dict[str, object], operator_user: str,
+    profile: str = DEFAULT_PROFILE,
+) -> None:
+    rule = f"0: user:{operator_user} allow search,readattr,readextattr,readsecurity"
+    runtime_home = str(authority["runtime_home"])
+    paths = [runtime_home, str(authority["codex_home"]), os.path.join(runtime_home, ".tmp")]
+    if profile != DEFAULT_PROFILE:
+        paths.append(os.path.join(runtime_home, ".codex-profiles"))
+    for path in paths:
+        if acl_entries(path) != [rule]:
+            die(f"runtime traversal directory has an unexpected ACL: {path}")
+    auth = os.path.join(str(authority["codex_home"]), "auth.json")
+    if acl_entries(auth):
+        die("dedicated Codex auth.json must not have any ACL entries")
+
+
+def _runtime_auth_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+        info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+    )
+
+
+def validate_runtime_auth_file(codex_home: str, runtime_uid: int, runtime_gid: int) -> None:
+    """Root-runner descriptor proof for the unreadable isolated credential."""
+
+    auth = os.path.join(codex_home, "auth.json")
+    try:
+        parent_before = os.lstat(codex_home)
+        before = os.lstat(auth)
+    except FileNotFoundError:
+        die(
+            "dedicated ChatGPT auth is not initialized; run "
+            "bin/swarm-codex-runtime.sh login, then retry"
+        )
+    except OSError as exc:
+        die(f"could not inspect dedicated Codex auth.json: {exc}")
+    if (not stat.S_ISDIR(parent_before.st_mode) or stat.S_ISLNK(parent_before.st_mode)
+            or parent_before.st_uid != runtime_uid
+            or stat.S_IMODE(parent_before.st_mode) != 0o700
+            or not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode)
+            or before.st_uid != runtime_uid or before.st_gid != runtime_gid
+            or stat.S_IMODE(before.st_mode) != 0o600 or before.st_nlink != 1
+            or not 2 <= before.st_size <= MAX_AUTH_JSON
+            or before.st_dev != parent_before.st_dev):
+        die("dedicated Codex auth.json must be runtime-owned regular mode 0600")
+    parent_flags = (
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        parent_fd = os.open(codex_home, parent_flags)
+    except OSError as exc:
+        die(f"dedicated Codex home changed while opening auth.json: {exc}")
+    auth_fd = -1
+    try:
+        parent_opened = os.fstat(parent_fd)
+        rebound = os.stat("auth.json", dir_fd=parent_fd, follow_symlinks=False)
+        auth_fd = os.open(
+            "auth.json",
+            os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_fd,
+        )
+        opened = os.fstat(auth_fd)
+        parent_after = os.lstat(codex_home)
+        if (_runtime_auth_identity(parent_opened) != _runtime_auth_identity(parent_before)
+                or _runtime_auth_identity(parent_after) != _runtime_auth_identity(parent_before)
+                or _runtime_auth_identity(rebound) != _runtime_auth_identity(before)
+                or _runtime_auth_identity(opened) != _runtime_auth_identity(before)
+                or fd_has_extended_acl(auth_fd)):
+            die("dedicated Codex auth.json changed while opening or has an extended ACL")
+    except OSError as exc:
+        die(f"dedicated Codex auth.json changed while opening: {exc}")
+    finally:
+        if auth_fd >= 0:
+            os.close(auth_fd)
+        os.close(parent_fd)
+
+
+def validate_runtime_keychain_dir(
+    runtime_home: str,
+    runtime_uid: int,
+    runtime_gid: int,
+) -> None:
+    """Bind opaque Security.framework storage without enumerating its contents."""
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        home_fd = os.open(runtime_home, flags)
+    except OSError as exc:
+        die(f"could not bind runtime home for keychain validation: {exc}")
+    try:
+        home_info = os.fstat(home_fd)
+        if (not stat.S_ISDIR(home_info.st_mode) or home_info.st_uid != runtime_uid
+                or stat.S_IMODE(home_info.st_mode) != 0o700):
+            die("runtime home is unsafe for keychain storage")
+        try:
+            library_before = os.stat("Library", dir_fd=home_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if (not stat.S_ISDIR(library_before.st_mode) or stat.S_ISLNK(library_before.st_mode)
+                or library_before.st_dev != home_info.st_dev
+                or library_before.st_uid != runtime_uid
+                or stat.S_IMODE(library_before.st_mode) & 0o700 != 0o700
+                or library_before.st_mode & 0o022):
+            die("runtime Library must be a real non-writable runtime-owned directory")
+        library_fd = os.open("Library", flags, dir_fd=home_fd)
+        try:
+            library_opened = os.fstat(library_fd)
+            if ((library_opened.st_dev, library_opened.st_ino, library_opened.st_mode,
+                 library_opened.st_uid, library_opened.st_gid)
+                    != (library_before.st_dev, library_before.st_ino, library_before.st_mode,
+                        library_before.st_uid, library_before.st_gid)
+                    or fd_has_extended_acl(library_fd)):
+                die("runtime Library changed while opening or has an extended ACL")
+            try:
+                keychains_before = os.stat(
+                    "Keychains", dir_fd=library_fd, follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                return
+            mode = stat.S_IMODE(keychains_before.st_mode)
+            if (not stat.S_ISDIR(keychains_before.st_mode)
+                    or stat.S_ISLNK(keychains_before.st_mode)
+                    or keychains_before.st_dev != home_info.st_dev
+                    or keychains_before.st_uid != runtime_uid
+                    or keychains_before.st_gid != runtime_gid
+                    or mode & 0o700 != 0o700 or mode & 0o066):
+                die("runtime Library/Keychains storage boundary is unsafe")
+            keychains_fd = os.open("Keychains", flags, dir_fd=library_fd)
+            try:
+                keychains_opened = os.fstat(keychains_fd)
+                if ((keychains_opened.st_dev, keychains_opened.st_ino,
+                     keychains_opened.st_mode, keychains_opened.st_uid,
+                     keychains_opened.st_gid)
+                        != (keychains_before.st_dev, keychains_before.st_ino,
+                            keychains_before.st_mode, keychains_before.st_uid,
+                            keychains_before.st_gid)
+                        or fd_has_extended_acl(keychains_fd)):
+                    die("runtime Library/Keychains changed while opening or has an extended ACL")
+            finally:
+                os.close(keychains_fd)
+        finally:
+            os.close(library_fd)
+    except OSError as exc:
+        die(f"could not validate runtime keychain storage boundary: {exc}")
+    finally:
+        os.close(home_fd)
+
+
+def load_attestation() -> dict[str, object]:
+    info = safe_root_file(ATTESTATION, "runtime attestation")
+    if not 2 <= info.st_size <= MAX_ATTESTATION:
+        die("runtime attestation has an invalid size")
+    fd = os.open(ATTESTATION, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns) != (
+            info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+        ):
+            die("runtime attestation changed while opening")
+        raw = os.read(fd, MAX_ATTESTATION + 1)
+    finally:
+        os.close(fd)
+    try:
+        value = json.loads(raw.decode("utf-8", "strict"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        die(f"runtime attestation is invalid JSON: {exc}")
+    if not isinstance(value, dict) or set(value) != EXACT_KEYS or value.get("schema") != SCHEMA:
+        die("runtime attestation does not exactly match qofi-codex-runtime/v2")
+    return value
+
+
+def load_root_json_exact(
+    path: str,
+    label: str,
+    keys: set[str],
+    schema: str,
+    *,
+    exact_mode: int,
+    max_bytes: int = 16 * 1024,
+) -> dict[str, object]:
+    info = safe_root_file(path, label)
+    if stat.S_IMODE(info.st_mode) != exact_mode or not 2 <= info.st_size <= max_bytes:
+        die(f"{label} must be root-owned mode {exact_mode:o} with a bounded size")
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns,
+                opened.st_ctime_ns) != (
+            info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+        ):
+            die(f"{label} changed while opening")
+        raw = os.read(fd, max_bytes + 1)
+    finally:
+        os.close(fd)
+    try:
+        value = json.loads(raw.decode("utf-8", "strict"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        die(f"{label} is invalid JSON: {exc}")
+    if not isinstance(value, dict) or set(value) != keys or value.get("schema") != schema:
+        die(f"{label} has an incompatible exact schema")
+    return value
+
+
+def manager_environment_sha256(operator_name: str, operator_home: str) -> str:
+    environment = {
+        "HOME": operator_home,
+        "USER": operator_name,
+        "LOGNAME": operator_name,
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "LANG": "C",
+        "LC_ALL": "C",
+    }
+    rendered = json.dumps(
+        environment, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    )
+    return hashlib.sha256(rendered.encode("ascii")).hexdigest()
+
+
+def integer(value: object, label: str) -> int:
+    if type(value) is not int or value <= 0:
+        die(f"attested {label} must be a positive integer")
+    return value
+
+
+def ds_values(kind: str, name: str, field: str) -> list[str] | None:
+    try:
+        result = subprocess.run(
+            ["/usr/bin/dscl", ".", "-read", f"/{kind}/{name}", field],
+            capture_output=True, text=True,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        die(f"could not inspect Directory Services {kind}/{name} {field}: {exc}")
+    if len((result.stdout + result.stderr).encode("utf-8", "replace")) > 16 * 1024:
+        die(f"Directory Services {field} output exceeded the bound")
+    combined = (result.stdout + result.stderr).strip()
+    if result.returncode != 0 or combined == f"No such key: {field}":
+        return None
+    lines = result.stdout.splitlines()
+    if not lines or not lines[0].startswith(f"{field}:"):
+        die(f"Directory Services {kind}/{name} has malformed {field}")
+    values = lines[0].split(":", 1)[1].split()
+    for line in lines[1:]:
+        values.extend(line.split())
+    return values
+
+
+def ds_boolean_attribute(kind: str, name: str, field: str) -> bool | None:
+    """Read an exact native/direct Directory Services boolean.
+
+    macOS may normalize a value written as ``1`` to ``YES`` and may render the
+    native key as ``dsAttrTypeNative:<field>``. Match the lifecycle helper's
+    strict accepted forms; a standard-key alias or any other present value is
+    malformed rather than truthy/falsy by coercion.
+    """
+
+    try:
+        result = subprocess.run(
+            ["/usr/bin/dscl", ".", "-read", f"/{kind}/{name}", field],
+            capture_output=True, text=True,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        die(f"could not inspect Directory Services {kind}/{name} {field}: {exc}")
+    if len((result.stdout + result.stderr).encode("utf-8", "replace")) > 16 * 1024:
+        die(f"Directory Services {field} output exceeded the bound")
+    combined = (result.stdout + result.stderr).strip()
+    if result.returncode != 0 or combined == f"No such key: {field}":
+        return None
+    fields = result.stdout.strip().split()
+    rendered_key = fields[0].rstrip(":") if fields else ""
+    if (len(fields) != 2
+            or rendered_key not in (field, f"dsAttrTypeNative:{field}")):
+        die(f"Directory Services {kind}/{name} has malformed {field}")
+    if fields[1] in ("1", "YES"):
+        return True
+    if fields[1] in ("0", "NO"):
+        return False
+    die(f"Directory Services {kind}/{name} has malformed {field}")
+
+
+def validate_noauth_directory_service(
+    operator: pwd.struct_passwd,
+    runtime: pwd.struct_passwd,
+    shared: grp.struct_group,
+) -> None:
+    if sys.platform != "darwin":
+        return
+    scalar = {
+        "UniqueID": str(runtime.pw_uid),
+        "PrimaryGroupID": str(shared.gr_gid),
+        "NFSHomeDirectory": runtime.pw_dir,
+        "UserShell": "/usr/bin/false",
+        "RealName": RUNTIME_USER_REALNAME,
+        "Password": "*",
+    }
+    for field, expected in scalar.items():
+        observed = ds_values("Users", runtime.pw_name, field)
+        if observed is None or " ".join(observed) != expected:
+            die(f"Directory Services runtime {field} drift")
+    if ds_boolean_attribute("Users", runtime.pw_name, "IsHidden") is not True:
+        die("Directory Services runtime IsHidden drift")
+    if ds_values("Users", runtime.pw_name, "AuthenticationAuthority") is not None:
+        die("runtime account must not have an AuthenticationAuthority")
+    group_gid = ds_values("Groups", shared.gr_name, "PrimaryGroupID")
+    if group_gid is None or " ".join(group_gid) != str(shared.gr_gid):
+        die("Directory Services shared group gid drift")
+    group_name = ds_values("Groups", shared.gr_name, "RealName")
+    if group_name is None or " ".join(group_name) != RUNTIME_GROUP_REALNAME:
+        die("Directory Services shared group marker drift")
+    members = ds_values("Groups", shared.gr_name, "GroupMembership")
+    if members is None or set(members) != {operator.pw_name, runtime.pw_name}:
+        die("Directory Services shared group has missing or unexpected members")
+    nested = ds_values("Groups", shared.gr_name, "NestedGroups")
+    if nested not in (None, []):
+        die("Directory Services shared group must not contain nested groups")
+
+
+def validate_exact_os_identity(
+    value: dict[str, object], *, require_ds: bool = True,
+) -> tuple[pwd.struct_passwd, pwd.struct_passwd, grp.struct_group]:
+    operator_uid = integer(value["operator_uid"], "operator_uid")
+    runtime_uid = integer(value["runtime_uid"], "runtime_uid")
+    runtime_gid = integer(value["runtime_gid"], "runtime_gid")
+    runtime_user = value["runtime_user"]
+    runtime_group = value["runtime_group"]
+    runtime_home = clean_absolute(value["runtime_home"], "runtime_home")
+    if operator_uid == runtime_uid:
+        die("operator/runtime uids must be distinct")
+    if not isinstance(runtime_user, str) or not NAME_RE.fullmatch(runtime_user):
+        die("attested runtime_user is invalid")
+    if not isinstance(runtime_group, str) or not NAME_RE.fullmatch(runtime_group):
+        die("attested runtime_group is invalid")
+    try:
+        operator = pwd.getpwuid(operator_uid)
+        operator_by_name = pwd.getpwnam(operator.pw_name)
+        runtime = pwd.getpwnam(runtime_user)
+        runtime_by_uid = pwd.getpwuid(runtime_uid)
+        shared = grp.getgrnam(runtime_group)
+        shared_by_gid = grp.getgrgid(runtime_gid)
+    except KeyError as exc:
+        die(f"attested account/group does not exist bidirectionally: {exc}")
+    if (operator_by_name.pw_uid != operator_uid
+            or runtime.pw_uid != runtime_uid or runtime_by_uid.pw_name != runtime_user
+            or runtime_by_uid.pw_uid != runtime_uid
+            or runtime.pw_gid != runtime_gid or runtime_by_uid.pw_gid != runtime_gid
+            or runtime.pw_dir != runtime_home or runtime_by_uid.pw_dir != runtime_home
+            or runtime.pw_shell != "/usr/bin/false" or runtime_by_uid.pw_shell != "/usr/bin/false"
+            or shared.gr_gid != runtime_gid or shared_by_gid.gr_name != runtime_group
+            or shared_by_gid.gr_gid != runtime_gid):
+        die("attested uid/name/home/gid does not map bidirectionally")
+    if set(shared.gr_mem) != {operator.pw_name, runtime_user}:
+        die("shared runtime group has missing or unexpected explicit members")
+    runtime_groups = set(os.getgrouplist(runtime_user, runtime.pw_gid))
+    operator_groups = set(os.getgrouplist(operator.pw_name, operator.pw_gid))
+    try:
+        runtime_group_names = {grp.getgrgid(gid).gr_name for gid in runtime_groups}
+    except KeyError as exc:
+        die(f"runtime account has an unresolvable supplementary gid: {exc}")
+    if runtime_group_names - ({runtime_group} | ALLOWED_IMPLICIT_RUNTIME_GROUPS):
+        die("runtime account has an unexpected or privileged supplementary group")
+    if runtime_gid not in operator_groups:
+        die("operator is not in the exact shared runtime group")
+    if require_ds:
+        validate_noauth_directory_service(operator, runtime, shared)
+    return operator, runtime, shared
+
+
+def validate_authority(
+    *, validate_runtime_state: bool = True, profile: str = DEFAULT_PROFILE,
+) -> dict[str, object]:
+    value = load_attestation()
+    operator_uid = integer(value["operator_uid"], "operator_uid")
+    runtime_uid = integer(value["runtime_uid"], "runtime_uid")
+    runtime_gid = integer(value["runtime_gid"], "runtime_gid")
+    if operator_uid == 0 or runtime_uid == 0 or runtime_uid == operator_uid:
+        die("operator/runtime uids must be distinct and non-root")
+    operator_pw, runtime_pw, shared_group = validate_exact_os_identity(value)
+    runtime_user = runtime_pw.pw_name
+    runtime_home = runtime_pw.pw_dir
+    attested_codex_home = clean_absolute(value["codex_home"], "codex_home")
+    if attested_codex_home != os.path.join(runtime_home, ".codex"):
+        die("codex_home must equal runtime_home/.codex")
+    codex_home = profile_codex_home(runtime_home, profile)
+    if validate_runtime_state:
+        home_info = os.lstat(runtime_home)
+        if (not stat.S_ISDIR(home_info.st_mode) or stat.S_ISLNK(home_info.st_mode)
+                or home_info.st_uid != runtime_uid or stat.S_IMODE(home_info.st_mode) != 0o700):
+            die("runtime home must be runtime-owned mode 0700")
+        for path, mode in ((codex_home, 0o700), (os.path.join(runtime_home, ".tmp"), 0o700)):
+            info = os.lstat(path)
+            if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                    or info.st_uid != runtime_uid or info.st_gid != runtime_pw.pw_gid
+                    or stat.S_IMODE(info.st_mode) != mode):
+                die(f"runtime directory must be uid-owned mode {mode:o}: {path}")
+        if profile != DEFAULT_PROFILE:
+            profiles_home = os.path.join(runtime_home, ".codex-profiles")
+            profiles_info = os.lstat(profiles_home)
+            if (not stat.S_ISDIR(profiles_info.st_mode)
+                    or stat.S_ISLNK(profiles_info.st_mode)
+                    or profiles_info.st_uid != runtime_uid
+                    or profiles_info.st_gid != runtime_pw.pw_gid
+                    or stat.S_IMODE(profiles_info.st_mode) != 0o700):
+                die("Codex profiles home must be runtime-owned real mode 0700")
+        validate_runtime_auth_file(codex_home, runtime_uid, runtime_gid)
+        validate_runtime_codex_config(
+            codex_home, runtime_uid, runtime_pw.pw_gid, operator_uid,
+            value.get("codex_config_sha256"),
+        )
+        selected = dict(value)
+        selected["codex_home"] = codex_home
+        validate_runtime_acls(selected, operator_pw.pw_name, profile)
+        validate_runtime_keychain_dir(runtime_home, runtime_uid, runtime_gid)
+
+    runner = clean_absolute(value["runner_path"], "runner_path")
+    if runner != RUNNER or os.path.realpath(sys.argv[0]) != RUNNER:
+        die("runner must execute from the fixed installed path")
+    node = clean_absolute(value["node_path"], "node_path")
+    script = clean_absolute(value["codex_script"], "codex_script")
+    safe_root_file(runner, "runner", executable=True)
+    safe_root_file(node, "Node executable", executable=True)
+    safe_root_file(script, "Codex script")
+    reviewer = clean_absolute(value["fable_reviewer_path"], "fable_reviewer_path")
+    doctrine = clean_absolute(value["fable_doctrine_path"], "fable_doctrine_path")
+    schema = clean_absolute(value["fable_schema_path"], "fable_schema_path")
+    if (reviewer != FABLE_REVIEWER or doctrine != FABLE_DOCTRINE
+            or schema != FABLE_SCHEMA):
+        die("Fable reviewer authority is outside the fixed libexec paths")
+    reviewer_info = safe_root_file(reviewer, "Fable reviewer shim", executable=True)
+    doctrine_info = safe_root_file(doctrine, "Fable reviewer doctrine")
+    schema_info = safe_root_file(schema, "adversarial review schema")
+    if (stat.S_IMODE(reviewer_info.st_mode) != 0o755
+            or stat.S_IMODE(doctrine_info.st_mode) != 0o644
+            or stat.S_IMODE(schema_info.st_mode) != 0o644):
+        die("Fable reviewer fixed files have unexpected modes")
+    for path_key, hash_key in (
+        ("runner_path", "runner_sha256"),
+        ("node_path", "node_sha256"),
+        ("codex_script", "codex_script_sha256"),
+        ("fable_reviewer_path", "fable_reviewer_sha256"),
+        ("fable_doctrine_path", "fable_doctrine_sha256"),
+        ("fable_schema_path", "fable_schema_sha256"),
+    ):
+        expected = value[hash_key]
+        if not isinstance(expected, str) or not HASH_RE.fullmatch(expected):
+            die(f"attested {hash_key} is invalid")
+        if sha256_file(str(value[path_key])) != expected:
+            die(f"attested {path_key} hash does not match")
+    canary_name = value["launchd_canary_name"]
+    canary_hash = value["launchd_canary_sha256"]
+    if (not isinstance(canary_name, str)
+            or not re.fullmatch(r"QOFI_CODEX_RUNTIME_CANARY_[A-Z0-9_]{8,64}", canary_name)
+            or not isinstance(canary_hash, str) or not HASH_RE.fullmatch(canary_hash)):
+        die("launchd canary attestation is invalid")
+    value["operator_user"] = operator_pw.pw_name
+    value["runtime_primary_gid"] = runtime_pw.pw_gid
+    value["codex_home"] = codex_home
+    value["profile"] = profile
+    return value
+
+
+def parse_generated_string_map(value: str, label: str) -> dict[str, str]:
+    """Parse the deliberately tiny `{JSON-string=JSON-string}` TOML subset."""
+
+    if len(value.encode("utf-8", "strict")) > 128 * 1024 or not value.startswith("{"):
+        die(f"{label} is oversized or malformed", 64)
+    decoder = json.JSONDecoder()
+    result: dict[str, str] = {}
+    index = 1
+    while True:
+        while index < len(value) and value[index].isspace():
+            index += 1
+        if index < len(value) and value[index] == "}":
+            index += 1
+            break
+        try:
+            key, end = decoder.raw_decode(value, index)
+        except ValueError:
+            die(f"{label} has an invalid key", 64)
+        if not isinstance(key, str) or key in result:
+            die(f"{label} has a non-string or duplicate key", 64)
+        index = end
+        while index < len(value) and value[index].isspace():
+            index += 1
+        if index >= len(value) or value[index] != "=":
+            die(f"{label} is missing '='", 64)
+        index += 1
+        while index < len(value) and value[index].isspace():
+            index += 1
+        try:
+            item, end = decoder.raw_decode(value, index)
+        except ValueError:
+            die(f"{label} has an invalid value", 64)
+        if not isinstance(item, str):
+            die(f"{label} values must be strings", 64)
+        result[key] = item
+        index = end
+        while index < len(value) and value[index].isspace():
+            index += 1
+        if index < len(value) and value[index] == ",":
+            index += 1
+            continue
+        if index < len(value) and value[index] == "}":
+            index += 1
+            break
+        die(f"{label} has invalid item separation", 64)
+    if index != len(value):
+        die(f"{label} has trailing input", 64)
+    return result
+
+
+def validate_shell_environment(value: str) -> None:
+    entries = parse_generated_string_map(value, "shell environment override")
+    if set(entries) - SHELL_ENV_KEYS:
+        die("shell environment override contains a non-allowlisted key", 64)
+    if any(len(item.encode("utf-8", "strict")) > 8192 or "\0" in item for item in entries.values()):
+        die("shell environment override contains an unsafe value", 64)
+
+
+def lexical_inside(root: str, candidate: str) -> bool:
+    try:
+        return os.path.commonpath([root, candidate]) == root
+    except ValueError:
+        return False
+
+
+def is_operator_turn_tmp(authority: dict[str, object], path: str) -> bool:
+    try:
+        operator = pwd.getpwuid(int(authority["operator_uid"]))
+    except (KeyError, TypeError, ValueError):
+        return False
+    root = os.path.join(operator.pw_dir, ".codex", "channels")
+    try:
+        relative = os.path.relpath(path, root)
+    except ValueError:
+        return False
+    parts = relative.split(os.sep)
+    if (len(parts) != 3 or not re.fullmatch(r"discord-[A-Za-z0-9][A-Za-z0-9_-]{0,64}", parts[0])
+            or parts[1] != "tool-tmp"
+            or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", parts[2])):
+        return False
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    return (stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+            and info.st_uid == operator.pw_uid and not info.st_mode & 0o022
+            and os.path.realpath(path) == path)
+
+
+def validate_filesystem_override(value: str, authority: dict[str, object], workspace: str) -> None:
+    prefix = f"permissions.{WORKSPACE_PROFILE}.filesystem="
+    if not value.startswith(prefix):
+        die("workspace permission filesystem override is missing", 64)
+    entries = parse_generated_string_map(value[len(prefix):], "workspace filesystem override")
+    required = {
+        ":root": "deny", ":minimal": "read",
+        ":tmpdir": "deny", ":slash_tmp": "deny",
+    }
+    if any(entries.get(key) != access for key, access in required.items()):
+        die("workspace filesystem override weakens the root/minimal/tmp baseline", 64)
+    runtime_home = str(authority["runtime_home"])
+    runtime_tmp = os.path.join(runtime_home, ".tmp")
+    for path, access in entries.items():
+        if access not in ("read", "write", "deny"):
+            die("workspace filesystem override has an unknown access value", 64)
+        if path.startswith(":"):
+            if path not in required:
+                die("workspace filesystem override has an unknown capability root", 64)
+            continue
+        if (not os.path.isabs(path) or os.path.normpath(path) != path
+                or path == "/" or any(ord(ch) < 32 or ord(ch) == 127 for ch in path)):
+            die("workspace filesystem override contains an unsafe path", 64)
+        if access in ("read", "write") and lexical_inside(runtime_home, path):
+            if not (access == "write" and lexical_inside(runtime_tmp, path)):
+                die("workspace filesystem override exposes dedicated runtime secrets", 64)
+        if access == "write" and not (
+            lexical_inside(workspace, path) or lexical_inside(runtime_tmp, path)
+            or is_operator_turn_tmp(authority, path)
+        ):
+            die("workspace filesystem override writes outside workspace/turn temp", 64)
+
+
+def take_config(args: list[str], index: int, expected: str | None = None) -> tuple[str, int]:
+    if index + 1 >= len(args) or args[index] != "-c":
+        die("Codex argv is missing an exact -c override", 64)
+    value = args[index + 1]
+    if expected is not None and value != expected:
+        die(f"Codex argv override differs from the hardened value: {expected}", 64)
+    return value, index + 2
+
+
+def validate_workspace_exec(args: list[str], authority: dict[str, object], workspace: str) -> None:
+    index = 0
+    if args[:1] == ["-p"]:
+        if len(args) < 3 or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", args[1]):
+            die("Codex profile name is invalid", 64)
+        index = 2
+    if index >= len(args) or args[index] != "exec":
+        die("workspace mode only permits hardened Codex exec", 64)
+    index += 1
+    if index < len(args) and args[index] == "resume":
+        if index + 1 >= len(args) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", args[index + 1]):
+            die("Codex resume thread id is invalid", 64)
+        index += 2
+    for token in ("--json", "--ignore-user-config", "--ignore-rules", "--enable", "multi_agent"):
+        if index >= len(args) or args[index] != token:
+            die(f"workspace exec is missing hardened flag {token}", 64)
+        index += 1
+    for feature in WORKSPACE_DISABLED_FEATURES:
+        if index + 1 >= len(args) or args[index:index + 2] != ["--disable", feature]:
+            die(f"workspace exec does not disable {feature}", 64)
+        index += 2
+    if index >= len(args) or args[index] != "--skip-git-repo-check":
+        die("workspace exec is missing --skip-git-repo-check", 64)
+    index += 1
+    _, index = take_config(args, index, f'default_permissions="{WORKSPACE_PROFILE}"')
+    _, index = take_config(args, index, f'permissions.{WORKSPACE_PROFILE}.extends=":workspace"')
+    filesystem, index = take_config(args, index)
+    validate_filesystem_override(filesystem, authority, workspace)
+    _, index = take_config(args, index, f"permissions.{WORKSPACE_PROFILE}.network.enabled=false")
+    for expected in (
+        'approval_policy="never"', 'forced_login_method="chatgpt"',
+        'cli_auth_credentials_store="file"',
+        "allow_login_shell=false", 'web_search="disabled"',
+        'shell_environment_policy.inherit="all"',
+    ):
+        _, index = take_config(args, index, expected)
+    environment, index = take_config(args, index)
+    env_prefix = "shell_environment_policy.set="
+    if not environment.startswith(env_prefix):
+        die("workspace exec is missing its pinned shell environment", 64)
+    validate_shell_environment(environment[len(env_prefix):])
+    for expected in (
+        "shell_environment_policy.experimental_use_profile=false",
+        "shell_environment_policy.ignore_default_excludes=false",
+        "mcp_servers={}",
+    ):
+        _, index = take_config(args, index, expected)
+    reasoning_effort, index = take_config(args, index)
+    if reasoning_effort not in (
+        'model_reasoning_effort="medium"',
+        'model_reasoning_effort="ultra"',
+    ):
+        die("workspace exec reasoning effort must be medium or ultra", 64)
+    model, index = take_config(args, index)
+    if not re.fullmatch(r'model="[A-Za-z0-9_.:-]{1,128}"', model):
+        die("workspace exec model override is invalid", 64)
+    if args[index:] != ["-"]:
+        die("workspace exec must take its prompt only on stdin", 64)
+
+
+def validate_review_exec(args: list[str]) -> None:
+    index = 0
+    fixed = ["exec", "--ignore-user-config", "--ignore-rules", "--ephemeral",
+             "--skip-git-repo-check", "-C"]
+    if args[:len(fixed)] != fixed or len(args) <= len(fixed):
+        die("review mode only permits the hardened ephemeral exec", 64)
+    review_cwd = args[len(fixed)]
+    if (not os.path.isabs(review_cwd) or os.path.normpath(review_cwd) != review_cwd
+            or os.path.realpath(review_cwd) != review_cwd
+            or os.path.realpath(os.getcwd()) != review_cwd):
+        die("review cwd must be absolute and canonical", 64)
+    index = len(fixed) + 1
+    for feature in REVIEW_DISABLED_FEATURES:
+        if args[index:index + 2] != ["--disable", feature]:
+            die(f"review exec does not disable {feature}", 64)
+        index += 2
+    for expected in (
+        'default_permissions="qofi-review-readonly"',
+        'permissions.qofi-review-readonly.filesystem={":root"="deny",":minimal"="read",":workspace_roots"={"."="deny"},":tmpdir"="deny",":slash_tmp"="deny"}',
+        "permissions.qofi-review-readonly.network.enabled=false",
+        "allow_login_shell=false", 'web_search="disabled"',
+        'approval_policy="never"', 'forced_login_method="chatgpt"',
+        'cli_auth_credentials_store="file"',
+        "project_doc_max_bytes=0", "mcp_servers={}",
+        'shell_environment_policy.inherit="core"',
+        "shell_environment_policy.ignore_default_excludes=false",
+        'model="gpt-5.6-sol"',
+        'model_reasoning_effort="ultra"',
+    ):
+        _, index = take_config(args, index, expected)
+    if args[index:] != ["review", "-"]:
+        die("review exec must take its prompt only on stdin", 64)
+
+
+def validate_sandbox_tool(path: str, semantic_names: set[str]) -> str:
+    if (not os.path.isabs(path) or os.path.normpath(path) != path
+            or os.path.realpath(path) != path):
+        die("sandbox startup tool must be an exact canonical path", 64)
+    safe_root_file(path, "sandbox startup tool", executable=True)
+    basename = os.path.basename(path)
+    if basename not in semantic_names and not (
+        basename == "rustup" and semantic_names <= {"cargo", "rustc"}
+    ):
+        die("sandbox startup tool does not match the expected canary", 64)
+    return path
+
+
+def validate_sandbox_shell_command(
+    command_args: list[str],
+    authority: dict[str, object],
+    workspace: str,
+    parent_pid: int,
+) -> None:
+    if len(command_args) < 3 or command_args[0] != "-c":
+        die("sandbox shell is reserved for exact built-in canaries", 64)
+    script, label, *parameters = command_args[1:]
+    runtime_tmp = os.path.join(str(authority["runtime_home"]), ".tmp")
+    if script == SANDBOX_TOOL_PROBE_SCRIPT:
+        if (label != "qofi-toolchain-probe" or len(parameters) < 2
+                or len(parameters) > MAX_TOOL_PROBES * 2
+                or len(parameters) % 2 != 0):
+            die("sandbox toolchain canary arguments changed", 64)
+        names = parameters[::2]
+        paths = parameters[1::2]
+        if (names != sorted(names) or len(set(names)) != len(names)
+                or any(name not in TOOL_PROBES for name in names)):
+            die("sandbox toolchain canary requires 1-16 ordered unique allowlisted names", 64)
+        # Length parity is proven above; avoid zip(strict=...) because the
+        # fixed macOS system Python may still be 3.9.
+        for name, path in zip(names, paths):
+            validate_sandbox_tool(path, {name})
+        return
+    if script == SANDBOX_GIT_READ_SCRIPT:
+        if (label != "qofi-git-read-canary" or len(parameters) != 2
+                or parameters[1] != workspace):
+            die("sandbox Git read canary arguments changed", 64)
+        validate_sandbox_tool(parameters[0], {"git"})
+        return
+    build_kind = next(
+        (kind for kind, expected in SANDBOX_BUILD_SCRIPTS.items() if script == expected),
+        None,
+    )
+    if build_kind is not None:
+        expected_label = "swift" if build_kind == "swift-xcrun" else build_kind
+        expected_count = 3 if build_kind == "cargo" else 2
+        if (label != f"qofi-{expected_label}-build-canary"
+                or len(parameters) != expected_count
+                or parameters[1] != runtime_tmp):
+            die("sandbox build canary arguments changed", 64)
+        semantic = "xcrun" if build_kind in ("swift-xcrun", "xcode") else build_kind
+        validate_sandbox_tool(parameters[0], {semantic})
+        if build_kind == "cargo":
+            validate_sandbox_tool(parameters[2], {"rustc"})
+        return
+    write_marker = os.path.join(workspace, f".qofi-runtime-write-canary-{parent_pid}")
+    if script == SANDBOX_WORKSPACE_WRITE_SCRIPT:
+        if (label != "qofi-runtime-write-canary"
+                or parameters != [write_marker, f"{write_marker}-deleted"]):
+            die("sandbox workspace-write canary arguments changed", 64)
+        return
+    detached_marker = os.path.join(
+        workspace, f".qofi-runtime-detached-canary-{parent_pid}",
+    )
+    if script == SANDBOX_DETACHED_SCRIPT:
+        if label != "qofi-runtime-detached-canary" or parameters != [detached_marker]:
+            die("sandbox detached-process canary arguments changed", 64)
+        return
+    die("sandbox shell command is not an exact built-in canary", 64)
+
+
+def validate_sandbox_command(
+    command_args: list[str],
+    authority: dict[str, object],
+    workspace: str,
+    parent_pid: int,
+) -> None:
+    if not command_args:
+        die("sandbox startup check has no command", 64)
+    command, *parameters = command_args
+    if (not os.path.isabs(command) or os.path.normpath(command) != command
+            or os.path.realpath(command) != command):
+        die("sandbox startup command must be an exact canonical path", 64)
+    safe_root_file(command, "sandbox startup command", executable=True)
+
+    if command == "/usr/bin/id" and parameters == ["-u"]:
+        return
+    if command == "/bin/sh":
+        validate_sandbox_shell_command(parameters, authority, workspace, parent_pid)
+        return
+    if command == "/bin/launchctl":
+        canary = str(authority["launchd_canary_name"])
+        runtime_uid = int(authority["runtime_uid"])
+        label_pattern = rf"qofi\.codex\.sandbox-canary\.{parent_pid}\.\d{{10,16}}"
+        marker_pattern = re.compile(
+            rf"{re.escape(workspace)}/\.qofi-launchd-canary-"
+            rf"{parent_pid}-\d{{10,16}}\Z",
+        )
+        if parameters == ["getenv", canary]:
+            return
+        if (len(parameters) == 6 and parameters[:2] == ["submit", "-l"]
+                and re.fullmatch(label_pattern, parameters[2])
+                and parameters[3:5] == ["--", "/usr/bin/touch"]
+                and marker_pattern.fullmatch(parameters[5])):
+            return
+        if (len(parameters) == 2 and parameters[0] == "print"
+                and re.fullmatch(
+                    rf"user/{runtime_uid}/{label_pattern}", parameters[1],
+                )):
+            return
+        die("sandbox launchctl invocation is not an exact isolation canary", 64)
+    if command == "/usr/bin/security" and parameters == ["list-keychains", "-d", "user"]:
+        return
+
+    die("sandbox command is not an exact startup canary", 64)
+
+
+def validate_sandbox_check(
+    args: list[str],
+    authority: dict[str, object],
+    workspace: str,
+    parent_pid: int,
+) -> None:
+    if len(args) < 8 or args[:3] != ["sandbox", "-P", WORKSPACE_PROFILE] or args[3] != "-C":
+        die("sandbox mode is reserved for the hardened startup check", 64)
+    requested = args[4]
+    if (not os.path.isabs(requested) or os.path.realpath(requested) != workspace
+            or os.path.normpath(requested) != requested):
+        die("sandbox startup check cwd differs from the runner workspace", 64)
+    index = 5
+    _, index = take_config(args, index, f'permissions.{WORKSPACE_PROFILE}.extends=":workspace"')
+    filesystem, index = take_config(args, index)
+    validate_filesystem_override(filesystem, authority, workspace)
+    _, index = take_config(args, index, f"permissions.{WORKSPACE_PROFILE}.network.enabled=false")
+    _, index = take_config(args, index, 'shell_environment_policy.inherit="none"')
+    environment, index = take_config(args, index)
+    env_prefix = "shell_environment_policy.set="
+    if not environment.startswith(env_prefix):
+        die("sandbox startup check lacks its pinned environment", 64)
+    validate_shell_environment(environment[len(env_prefix):])
+    _, index = take_config(args, index, "shell_environment_policy.experimental_use_profile=false")
+    if index >= len(args) or args[index] != "--" or index + 1 >= len(args):
+        die("sandbox startup check has no exact command separator", 64)
+    validate_sandbox_command(args[index + 1:], authority, workspace, parent_pid)
+
+
+def validate_command_grammar(
+    mode: str,
+    args: list[str],
+    authority: dict[str, object],
+    *,
+    parent_pid: int,
+) -> None:
+    if mode == "check-tools":
+        return
+    if mode == "telemetry":
+        if args:
+            die("telemetry mode never accepts Codex argv", 64)
+        return
+    if mode == "app-server":
+        if args != list(APP_SERVER_ARGS):
+            die(
+                "app-server mode only permits the hardened stdio transport",
+                64,
+            )
+        return
+    if mode == "review":
+        validate_review_exec(args)
+        return
+    if args in (
+        ["--version"],
+        [
+            "login",
+            "-c", 'forced_login_method="chatgpt"',
+            "-c", 'cli_auth_credentials_store="file"',
+            "status",
+        ],
+    ):
+        return
+    workspace = os.path.realpath(os.getcwd())
+    if os.path.normpath(os.getcwd()) != workspace or lexical_inside(str(authority["runtime_home"]), workspace):
+        die("runner workspace cwd is noncanonical or overlaps the runtime home", 64)
+    if args[:1] == ["sandbox"]:
+        validate_sandbox_check(args, authority, workspace, parent_pid)
+        return
+    validate_workspace_exec(args, authority, workspace)
+
+
+def parse_command() -> tuple[str, str, int, list[str]]:
+    args = sys.argv[1:]
+    if args[:1] == ["--verify"]:
+        if len(args) == 1:
+            return "verify", DEFAULT_PROFILE, 0, []
+        if len(args) == 3 and args[1] == "--profile":
+            profile_codex_home("/", args[2])
+            return "verify", args[2], 0, []
+        die("usage: qofi-codex-runner --verify [--profile HANDLE]", 64)
+    if args == ["--verify-install"]:
+        return "verify-install", DEFAULT_PROFILE, 0, []
+    if args == ["--verify-fable-reviewer"]:
+        return "verify-fable-reviewer", DEFAULT_PROFILE, 0, []
+    mode = "workspace"
+    if args[:2] == ["--mode", "review"]:
+        mode = "review"
+        args = args[2:]
+    elif args[:2] == ["--mode", "app-server"]:
+        mode = "app-server"
+        args = args[2:]
+    elif args[:1] == ["--check-tools"]:
+        mode = "check-tools"
+        args = args[1:]
+    elif args[:1] == ["--telemetry"]:
+        mode = "telemetry"
+        args = args[1:]
+    profile = DEFAULT_PROFILE
+    profile_selected = False
+    if args[:1] == ["--profile"]:
+        if len(args) < 2:
+            die("profile selector is missing its handle", 64)
+        profile = args[1]
+        profile_selected = True
+        profile_codex_home("/", profile)
+        args = args[2:]
+    if mode == "telemetry":
+        if (not profile_selected or len(args) != 2 or args[0] != "--parent-pid"
+                or not args[1].isdigit() or int(args[1]) <= 1):
+            die(
+                "usage: qofi-codex-runner --telemetry --profile HANDLE "
+                "--parent-pid PID",
+                64,
+            )
+        return mode, profile, int(args[1]), []
+    if len(args) < 4 or args[0] != "--parent-pid" or args[2] != "--":
+        die(
+            "usage: qofi-codex-runner [--mode review|--mode app-server|--check-tools] "
+            "[--profile HANDLE] --parent-pid PID -- ARG...",
+            64,
+        )
+    if not args[1].isdigit() or int(args[1]) <= 1 or not args[3:]:
+        die("invalid parent pid or empty Codex argv", 64)
+    command_args = args[3:]
+    if mode == "check-tools":
+        if (len(command_args) > MAX_TOOL_PROBES or len(set(command_args)) != len(command_args)
+                or any(name not in TOOL_PROBES for name in command_args)):
+            die("tool check must contain 1-16 unique allowlisted tool names", 64)
+    return mode, profile, int(args[1]), command_args
+
+
+def process_record(pid: int) -> tuple[int, int, str] | None:
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-p", str(pid), "-o", "uid=", "-o", "ppid=", "-o", "lstart="],
+            capture_output=True, text=True,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    fields = result.stdout.strip().split(maxsplit=2)
+    if result.returncode != 0 or len(fields) != 3 or not fields[0].isdigit() or not fields[1].isdigit():
+        return None
+    return int(fields[0]), int(fields[1]), fields[2]
+
+
+def is_ancestor(ancestor_pid: int, descendant_pid: int | None = None) -> bool:
+    current = os.getpid() if descendant_pid is None else descendant_pid
+    seen: set[int] = set()
+    for _ in range(12):
+        if current == ancestor_pid:
+            return True
+        if current <= 1 or current in seen:
+            return False
+        seen.add(current)
+        record = process_record(current)
+        if record is None:
+            return False
+        current = record[1]
+    return False
+
+
+def verify_invoker(authority: dict[str, object], parent_pid: int) -> None:
+    global _PARENT_BINDING
+    if os.geteuid() != 0 or os.getuid() != 0:
+        die("runner must execute as root through the fixed sudoers rule")
+    sudo_uid = os.environ.get("SUDO_UID", "")
+    if not sudo_uid.isdigit() or int(sudo_uid) != authority["operator_uid"]:
+        die("SUDO_UID does not match attested operator_uid")
+    record = process_record(parent_pid)
+    if (record is None or record[0] != authority["operator_uid"]
+            or not is_ancestor(parent_pid)):
+        die("parent pid is not a live attested-operator ancestor")
+    _PARENT_BINDING = record
+
+
+def parent_is_live(parent_pid: int, operator_uid: int) -> bool:
+    record = process_record(parent_pid)
+    if record is None or record[0] != operator_uid or not is_ancestor(parent_pid):
+        return False
+    return _PARENT_BINDING is None or record == _PARENT_BINDING
+
+
+def lock_global(mode: str, parent_pid: int, operator_uid: int) -> int:
+    fd = os.open(LOCK, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    info = os.fstat(fd)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+            or stat.S_IMODE(info.st_mode) != 0o600 or fd_has_extended_acl(fd)):
+        os.close(fd)
+        die("global runner lock is not root-owned mode 0600")
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if mode == "review":
+                os.close(fd)
+                die("another dedicated Codex child is active; advisory review is busy", 75)
+            if not parent_is_live(parent_pid, operator_uid):
+                os.close(fd)
+                die("operator parent exited while waiting for the global runner lock")
+            time.sleep(0.1)
+    return fd
+
+
+def process_executable_path(pid: int) -> str | None:
+    if sys.platform != "darwin" or pid <= 0:
+        return None
+    libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    proc_pidpath = libproc.proc_pidpath
+    proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+    proc_pidpath.restype = ctypes.c_int
+    buffer = ctypes.create_string_buffer(4096)
+    length = proc_pidpath(pid, buffer, len(buffer))
+    if length <= 0:
+        return None
+    try:
+        return buffer.value.decode("utf-8", "strict")
+    except UnicodeDecodeError:
+        return None
+
+
+def process_arguments(pid: int) -> list[str] | None:
+    """Read the bounded initial argv vector with macOS KERN_PROCARGS2."""
+
+    if sys.platform != "darwin" or pid <= 1:
+        return None
+    libc = ctypes.CDLL(None, use_errno=True)
+    sysctl = libc.sysctl
+    sysctl.argtypes = [
+        ctypes.POINTER(ctypes.c_int), ctypes.c_uint, ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t,
+    ]
+    sysctl.restype = ctypes.c_int
+    mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2, pid
+    size = ctypes.c_size_t(0)
+    if sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
+        return None
+    if not 8 <= size.value <= 256 * 1024:
+        return None
+    buffer = ctypes.create_string_buffer(size.value)
+    if sysctl(mib, 3, buffer, ctypes.byref(size), None, 0) != 0:
+        return None
+    raw = bytes(buffer.raw[:size.value])
+    if len(raw) < ctypes.sizeof(ctypes.c_int):
+        return None
+    argc = int.from_bytes(
+        raw[:ctypes.sizeof(ctypes.c_int)], byteorder=sys.byteorder, signed=True,
+    )
+    if not 1 <= argc <= 64:
+        return None
+    offset = ctypes.sizeof(ctypes.c_int)
+    executable_end = raw.find(b"\0", offset)
+    if executable_end <= offset:
+        return None
+    offset = executable_end + 1
+    while offset < len(raw) and raw[offset] == 0:
+        offset += 1
+    result: list[str] = []
+    try:
+        for _ in range(argc):
+            end = raw.find(b"\0", offset)
+            if end < offset:
+                return None
+            result.append(raw[offset:end].decode("utf-8", "strict"))
+            offset = end + 1
+    except UnicodeDecodeError:
+        return None
+    return result
+
+
+def verify_app_server_manager_admission(
+    authority: dict[str, object], parent_pid: int,
+) -> None:
+    """Require the live root-launcher-created manager capability.
+
+    A public exact App Server argv is not sufficient authority: without this
+    record any operator process could otherwise obtain raw hidden-UID stdio.
+    """
+
+    manager = load_root_json_exact(
+        MANAGER_AUTHORITY,
+        "manager authority",
+        MANAGER_AUTHORITY_KEYS,
+        MANAGER_AUTHORITY_SCHEMA,
+        exact_mode=0o644,
+    )
+    admission = load_root_json_exact(
+        MANAGER_ADMISSION,
+        "manager admission",
+        MANAGER_ADMISSION_KEYS,
+        MANAGER_ADMISSION_SCHEMA,
+        exact_mode=0o600,
+    )
+    operator_uid = int(authority["operator_uid"])
+    operator_name = str(authority["operator_user"])
+    operator_home = pwd.getpwuid(operator_uid).pw_dir
+    expected_environment = manager_environment_sha256(operator_name, operator_home)
+    if (manager.get("operator_uid") != operator_uid
+            or manager.get("operator_user") != operator_name
+            or manager.get("operator_home") != operator_home
+            or manager.get("node_path") != authority.get("node_path")
+            or manager.get("node_sha256") != authority.get("node_sha256")
+            or manager.get("manager_bundle_path") != MANAGER_BUNDLE
+            or manager.get("manager_launcher_path") != MANAGER_LAUNCHER
+            or manager.get("manager_environment_sha256") != expected_environment):
+        die("manager authority differs from the runtime/operator contract")
+    for key in MANAGER_AUTHORITY_KEYS - {"schema", "operator_user", "operator_home"}:
+        if key in admission and admission.get(key) != manager.get(key):
+            die(f"manager admission differs from attested authority: {key}")
+    if admission.get("operator_uid") != operator_uid:
+        die("manager admission operator differs from the runtime authority")
+    nonce = admission.get("nonce")
+    if not isinstance(nonce, str) or not re.fullmatch(r"[0-9a-f]{64}", nonce):
+        die("manager admission nonce is malformed")
+    manager_pid = admission.get("manager_pid")
+    launcher_pid = admission.get("launcher_pid")
+    manager_started = admission.get("manager_started")
+    launcher_started = admission.get("launcher_started")
+    if (type(manager_pid) is not int or manager_pid != parent_pid
+            or type(launcher_pid) is not int or launcher_pid <= 1
+            or not isinstance(manager_started, str) or not 1 <= len(manager_started) <= 128
+            or not isinstance(launcher_started, str) or not 1 <= len(launcher_started) <= 128):
+        die("runner parent is not the admitted App Server manager")
+    manager_record = process_record(manager_pid)
+    launcher_record = process_record(launcher_pid)
+    if manager_record != (operator_uid, launcher_pid, manager_started):
+        die("admitted App Server manager process identity changed")
+    if (launcher_record is None or launcher_record[0] != 0
+            or launcher_record[2] != launcher_started):
+        die("admitted root manager launcher process identity changed")
+    if not is_ancestor(launcher_pid, manager_pid):
+        die("admitted root launcher is not the live manager ancestor")
+
+    node = str(manager["node_path"])
+    bundle = str(manager["manager_bundle_path"])
+    launcher = str(manager["manager_launcher_path"])
+    state_dir = clean_absolute(manager["manager_state_dir"], "manager_state_dir")
+    swarm_home = clean_absolute(manager["swarm_home"], "swarm_home")
+    for path, expected, label, executable in (
+        (node, manager["node_sha256"], "manager Node", True),
+        (bundle, manager["manager_bundle_sha256"], "manager bundle", False),
+        (launcher, manager["manager_launcher_sha256"], "manager launcher", True),
+        (str(manager["manager_python_path"]), manager["manager_python_sha256"],
+         "manager Python", True),
+    ):
+        if not isinstance(expected, str) or not HASH_RE.fullmatch(expected):
+            die(f"{label} attested hash is invalid")
+        safe_root_file(path, label, executable=executable)
+        if sha256_file(path) != expected:
+            die(f"{label} hash changed")
+    if process_executable_path(manager_pid) != node:
+        die("admitted manager does not execute the pinned Node binary")
+    expected_manager_args = [
+        node, "--disable-sigusr1", bundle,
+        "--state-dir", state_dir, "--swarm-home", swarm_home,
+    ]
+    if process_arguments(manager_pid) != expected_manager_args:
+        die("admitted manager argv differs from the fixed bundle contract")
+    python = str(manager["manager_python_path"])
+    if process_executable_path(launcher_pid) != python:
+        die("admitted manager launcher interpreter changed")
+    launcher_args = process_arguments(launcher_pid)
+    if launcher_args != [python, "-I", launcher]:
+        die("admitted manager launcher argv differs from the fixed contract")
+
+    state_fd = os.open(
+        state_dir,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        state_info = os.fstat(state_fd)
+        if (not stat.S_ISDIR(state_info.st_mode) or state_info.st_uid != operator_uid
+                or stat.S_IMODE(state_info.st_mode) != 0o700
+                or fd_has_extended_acl(state_fd)):
+            die("manager state directory authority changed")
+    finally:
+        os.close(state_fd)
+    swarm_fd = os.open(
+        swarm_home,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        swarm_info = os.fstat(swarm_fd)
+        if (not stat.S_ISDIR(swarm_info.st_mode)
+                or swarm_info.st_uid not in (0, operator_uid)
+                or swarm_info.st_mode & 0o022 or fd_has_extended_acl(swarm_fd)):
+            die("manager swarm home authority changed")
+    finally:
+        os.close(swarm_fd)
+
+
+PROCESS_SNAPSHOT_FIELDS = [
+    "pid=", "ppid=", "pgid=", "sess=", "uid=", "ruid=", "svuid=",
+    "gid=", "rgid=", "svgid=", "lstart=",
+]
+
+
+def parse_process_snapshot(line: str) -> dict[str, int | str] | None:
+    fields = line.split()
+    if len(fields) != 15 or not all(field.isdigit() for field in fields[:10]):
+        return None
+    values = list(map(int, fields[:10]))
+    return {
+        "pid": values[0], "ppid": values[1], "pgid": values[2], "session": values[3],
+        "uid": values[4], "ruid": values[5], "svuid": values[6],
+        "gid": values[7], "rgid": values[8], "svgid": values[9],
+        "started": " ".join(fields[10:]),
+    }
+
+
+def process_snapshots(uid: int) -> list[dict[str, int | str]]:
+    try:
+        output = subprocess.run(
+            ["/bin/ps", "-axo", ",".join(PROCESS_SNAPSHOT_FIELDS)],
+            check=True, capture_output=True,
+            text=True, env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}, timeout=3,
+        ).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        die(f"could not enumerate dedicated runtime processes: {exc}")
+    if len(output.encode("utf-8", "replace")) > 1024 * 1024:
+        die("dedicated runtime process snapshot exceeded the bound")
+    result: list[dict[str, int | str]] = []
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        snapshot = parse_process_snapshot(line)
+        if snapshot is None:
+            die("dedicated runtime process snapshot was malformed")
+        if uid in (snapshot["uid"], snapshot["ruid"], snapshot["svuid"]):
+            result.append(snapshot)
+    return result
+
+
+def process_snapshot(pid: int) -> dict[str, int | str] | None:
+    try:
+        observed = subprocess.run(
+            ["/bin/ps", "-p", str(pid), "-o", ",".join(PROCESS_SNAPSHOT_FIELDS)],
+            check=False, capture_output=True, text=True, timeout=3,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    lines = [line for line in observed.stdout.splitlines() if line.strip()]
+    return parse_process_snapshot(lines[0]) if observed.returncode == 0 and len(lines) == 1 else None
+
+
+def exact_process_command(pid: int) -> str | None:
+    try:
+        observed = subprocess.run(
+            ["/bin/ps", "-ww", "-p", str(pid), "-o", "command="],
+            check=False, capture_output=True, text=True, timeout=3,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return observed.stdout.strip() if observed.returncode == 0 else None
+
+
+def allowed_runtime_infrastructure_pid(
+    snapshots: list[dict[str, int | str]], uid: int, gid: int,
+) -> int | None:
+    """Return the one stable PID-1/SIP distnoted agent, never a payload process."""
+
+    if sys.platform != "darwin" or uid <= 0 or gid <= 0:
+        return None
+    candidates = [
+        item for item in snapshots
+        if item["pid"] > 1
+        and item["ppid"] == 1
+        and item["pgid"] == item["pid"]
+        and item["session"] == 0
+        and item["uid"] == item["ruid"] == item["svuid"] == uid
+        and item["gid"] == item["rgid"] == item["svgid"] == gid
+        and process_executable_path(int(item["pid"])) == MACOS_RUNTIME_INFRASTRUCTURE
+    ]
+    if len(candidates) != 1:
+        return None
+    before = candidates[0]
+    pid = int(before["pid"])
+    info = safe_root_file(
+        MACOS_RUNTIME_INFRASTRUCTURE,
+        "macOS runtime infrastructure",
+        executable=True,
+    )
+    if (os.path.realpath(MACOS_RUNTIME_INFRASTRUCTURE) != MACOS_RUNTIME_INFRASTRUCTURE
+            or info.st_uid != 0 or info.st_gid != 0
+            or stat.S_IMODE(info.st_mode) != 0o755 or info.st_nlink != 1
+            or not 1 <= info.st_size <= 16 * 1024 * 1024
+            or not getattr(info, "st_flags", 0) & 0x00080000):
+        die("macOS runtime infrastructure authority changed")
+    if exact_process_command(pid) != f"{MACOS_RUNTIME_INFRASTRUCTURE} agent":
+        return None
+    after = process_snapshot(pid)
+    if (after != before or process_executable_path(pid) != MACOS_RUNTIME_INFRASTRUCTURE
+            or exact_process_command(pid) != f"{MACOS_RUNTIME_INFRASTRUCTURE} agent"):
+        return None
+    return pid
+
+
+def runtime_pids(runtime_uid: int, runtime_gid: int) -> list[int]:
+    snapshots = process_snapshots(runtime_uid)
+    allowed = allowed_runtime_infrastructure_pid(snapshots, runtime_uid, runtime_gid)
+    return [int(item["pid"]) for item in snapshots if item["pid"] != allowed]
+
+
+def kill_runtime_uid(authority: dict[str, object]) -> None:
+    runtime_uid = int(authority["runtime_uid"])
+    # STOP closes the fork-between-snapshot-and-KILL window. Re-enumerate and
+    # signal every bounded iteration so ordinary double-forks are caught too.
+    for _ in range(40):
+        validate_exact_os_identity(authority)
+        runtime_gid = int(authority["runtime_primary_gid"])
+        pids = runtime_pids(runtime_uid, runtime_gid)
+        if not pids:
+            return
+        for pid in pids:
+            validate_exact_os_identity(authority, require_ds=False)
+            try:
+                os.kill(pid, signal.SIGSTOP)
+            except ProcessLookupError:
+                pass
+        for pid in runtime_pids(runtime_uid, runtime_gid):
+            validate_exact_os_identity(authority, require_ds=False)
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        time.sleep(0.05)
+    if runtime_pids(runtime_uid, runtime_gid):
+        die("could not quiesce every dedicated-runtime process; a persistent launchd respawner may require operator cleanup")
+
+
+def ensure_runtime_dir(home: str, relative: str, uid: int, gid: int) -> str:
+    parts = relative.split("/")
+    if not parts or any(not part or part in (".", "..") for part in parts):
+        die(f"invalid runtime directory component: {relative}")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(home, flags)
+    try:
+        root_info = os.fstat(fd)
+        if (not stat.S_ISDIR(root_info.st_mode) or root_info.st_uid != uid
+                or stat.S_IMODE(root_info.st_mode) != 0o700):
+            die("runtime home changed before cache preparation")
+        for part in parts:
+            try:
+                os.mkdir(part, 0o700, dir_fd=fd)
+            except FileExistsError:
+                pass
+            next_fd = os.open(part, flags, dir_fd=fd)
+            info = os.fstat(next_fd)
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, uid):
+                os.close(next_fd)
+                die(f"runtime cache component is unsafe: {relative}")
+            os.fchown(next_fd, uid, gid)
+            os.fchmod(next_fd, 0o700)
+            os.close(fd)
+            fd = next_fd
+    finally:
+        os.close(fd)
+    return os.path.join(home, *parts)
+
+
+def prepare_runtime_dirs(authority: dict[str, object], mode: str) -> str | None:
+    uid = int(authority["runtime_uid"])
+    gid = int(authority["runtime_primary_gid"])
+    home = str(authority["runtime_home"])
+    paths = [
+        ".tmp", ".cache", ".config", ".local", ".local/share", ".local/state",
+        ".local/share/pnpm", ".cache/npm", ".cache/pnpm-store",
+        ".cache/bun", ".cache/uv", ".cache/pip", ".cache/go-build", "go",
+        ".cargo", ".cargo/target", ".rustup", ".cache/clang", ".cache/swift",
+        ".cache/swiftpm", ".config/swiftpm", ".local/share/swiftpm",
+        ".cache/build",
+        ".cache/build/obj", ".cache/build/sym", ".cache/build/precomps",
+        ".cache/build/derived",
+    ]
+    for relative in paths:
+        ensure_runtime_dir(home, relative, uid, gid)
+    if mode not in ("review", "check-tools"):
+        return None
+    relative = ".tmp/review" if mode == "review" else ".tmp/tool-check"
+    isolated = os.path.join(home, relative)
+    if os.path.lexists(isolated):
+        info = os.lstat(isolated)
+        if stat.S_ISLNK(info.st_mode):
+            os.unlink(isolated)
+        elif stat.S_ISDIR(info.st_mode):
+            shutil.rmtree(isolated)
+        else:
+            os.unlink(isolated)
+    return ensure_runtime_dir(home, relative, uid, gid)
+
+
+def child_env(authority: dict[str, object]) -> dict[str, str]:
+    home = str(authority["runtime_home"])
+    node_dir = os.path.dirname(str(authority["node_path"]))
+    path_dirs = []
+    for candidate in (os.path.join(node_dir, "bin"), node_dir, "/usr/bin", "/bin", "/usr/sbin", "/sbin"):
+        if candidate not in path_dirs:
+            path_dirs.append(candidate)
+    cache = os.path.join(home, ".cache")
+    return {
+        "HOME": home,
+        "USER": str(authority["runtime_user"]),
+        "LOGNAME": str(authority["runtime_user"]),
+        "CODEX_HOME": str(authority["codex_home"]),
+        "PATH": ":".join(path_dirs),
+        "LANG": "C", "LC_ALL": "C",
+        "TMPDIR": os.path.join(home, ".tmp"),
+        "TMP": os.path.join(home, ".tmp"),
+        "TEMP": os.path.join(home, ".tmp"),
+        "XDG_CONFIG_HOME": os.path.join(home, ".config"),
+        "XDG_CACHE_HOME": cache,
+        "XDG_DATA_HOME": os.path.join(home, ".local", "share"),
+        "XDG_STATE_HOME": os.path.join(home, ".local", "state"),
+        "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "/usr/bin/false",
+        "NPM_CONFIG_USERCONFIG": "/dev/null", "NPM_CONFIG_CACHE": os.path.join(cache, "npm"),
+        "NPM_CONFIG_UPDATE_NOTIFIER": "false", "NPM_CONFIG_AUDIT": "false",
+        "NPM_CONFIG_FUND": "false", "BUN_INSTALL_CACHE_DIR": os.path.join(cache, "bun"),
+        "NPM_CONFIG_STORE_DIR": os.path.join(cache, "pnpm-store"),
+        "NPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS": "false",
+        "NPM_CONFIG_PACKAGE_MANAGER_STRICT": "true",
+        "NPM_CONFIG_PACKAGE_MANAGER_STRICT_VERSION": "true",
+        "PNPM_HOME": os.path.join(home, ".local", "share", "pnpm"),
+        "COREPACK_ENABLE_PROJECT_SPEC": "0", "COREPACK_ENABLE_DOWNLOAD_PROMPT": "0",
+        "COREPACK_ENABLE_NETWORK": "0",
+        "UV_CACHE_DIR": os.path.join(cache, "uv"), "PIP_CONFIG_FILE": "/dev/null",
+        "PIP_CACHE_DIR": os.path.join(cache, "pip"), "PYTHONNOUSERSITE": "1",
+        "GOCACHE": os.path.join(cache, "go-build"), "GOPATH": os.path.join(home, "go"),
+        "GOMODCACHE": os.path.join(home, "go", "pkg", "mod"),
+        "CARGO_HOME": os.path.join(home, ".cargo"),
+        "CARGO_TARGET_DIR": os.path.join(home, ".cargo", "target"),
+        "RUSTUP_HOME": os.path.join(home, ".rustup"),
+        "CLANG_MODULE_CACHE_PATH": os.path.join(cache, "clang"),
+        "SWIFT_MODULE_CACHE_PATH": os.path.join(cache, "swift"),
+        "SWIFTPM_CACHE_PATH": os.path.join(cache, "swiftpm"),
+        "SWIFTPM_CONFIG_PATH": os.path.join(home, ".config", "swiftpm"),
+        "SWIFTPM_SECURITY_PATH": os.path.join(home, ".local", "share", "swiftpm"),
+        "OBJROOT": os.path.join(cache, "build", "obj"),
+        "SYMROOT": os.path.join(cache, "build", "sym"),
+        "SHARED_PRECOMPS_DIR": os.path.join(cache, "build", "precomps"),
+        "DERIVED_DATA_DIR": os.path.join(cache, "build", "derived"),
+    }
+
+
+def runtime_context_command(
+    authority: dict[str, object],
+    command: list[str],
+    *,
+    umask: int,
+) -> list[str]:
+    runtime_name = str(authority["runtime_user"])
+    runtime_uid = int(authority["runtime_uid"])
+    runtime_gid = int(authority["runtime_primary_gid"])
+    if (not NAME_RE.fullmatch(runtime_name) or runtime_uid <= 0 or runtime_gid <= 0
+            or umask not in (0o077, 0o002) or not command
+            or any(not isinstance(value, str) or "\0" in value for value in command)
+            or not os.path.isabs(command[0]) or os.path.normpath(command[0]) != command[0]):
+        die("refusing an unsafe hidden-runtime context command", 69)
+    return [
+        "/bin/launchctl", "asuser", str(runtime_uid),
+        "/usr/bin/python3", "-I", "-S", "-c", RUNTIME_CONTEXT_TRAMPOLINE,
+        runtime_name, str(runtime_uid), str(runtime_gid), f"{umask:03o}",
+        *command,
+    ]
+
+
+def verify_runtime_keychain_search_empty(authority: dict[str, object]) -> None:
+    command = runtime_context_command(
+        authority,
+        ["/usr/bin/security", "list-keychains", "-d", "user"],
+        umask=0o077,
+    )
+    try:
+        result = subprocess.run(
+            command,
+            cwd=str(authority["runtime_home"]),
+            env=child_env(authority),
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        die(f"could not verify the dedicated runtime keychain search list: {exc}")
+    if (len(result.stdout.encode("utf-8", "replace")) > 4096
+            or result.returncode != 0 or result.stdout.strip()):
+        detail = (result.stderr or result.stdout).strip().replace("\n", " ")[:512]
+        die(
+            "dedicated runtime user keychain search list is not empty"
+            f"{': ' + detail if detail else ''}"
+        )
+
+
+def trusted_tool_path(name: str, env: dict[str, str]) -> str:
+    found = shutil.which(name, path=env["PATH"])
+    if not found or not os.path.isabs(found):
+        die(f"allowlisted project tool is absent from the fixed child PATH: {name}", 69)
+    current = "/"
+    for part in os.path.normpath(found).split("/")[1:-1]:
+        current = os.path.join(current, part)
+        info = os.lstat(current)
+        if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                or info.st_uid != 0 or info.st_mode & 0o022):
+            die(f"project tool invocation parent is not root-controlled: {current}")
+    invocation = os.lstat(found)
+    if (not (stat.S_ISREG(invocation.st_mode) or stat.S_ISLNK(invocation.st_mode))
+            or invocation.st_uid != 0
+            or (stat.S_ISREG(invocation.st_mode) and invocation.st_mode & 0o022)):
+        die(f"project tool invocation is not root-controlled: {found}")
+    canonical = os.path.realpath(found)
+    if name in ("pnpm", "yarn") and "corepack" in canonical.lower().split(os.sep):
+        die(f"project tool {name} resolves through Corepack; provision a direct root-owned binary", 69)
+    safe_root_file(canonical, f"project tool {name}", executable=True)
+    return found
+
+
+def run_tool_checks(authority: dict[str, object], parent_pid: int, names: list[str]) -> int:
+    cwd = prepare_runtime_dirs(authority, "check-tools")
+    if cwd is None:
+        die("could not prepare the private tool-check directory")
+    env = child_env(authority)
+    env.update({
+        "COREPACK_ENABLE_PROJECT_SPEC": "0",
+        "COREPACK_ENABLE_DOWNLOAD_PROMPT": "0",
+        "COREPACK_ENABLE_NETWORK": "0",
+    })
+    stopping = False
+
+    def stop(_sig: int, _frame: object) -> None:
+        nonlocal stopping
+        stopping = True
+
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, stop)
+    for name in names:
+        executable = trusted_tool_path(name, env)
+        command = runtime_context_command(
+            authority, [executable, *TOOL_PROBES[name]], umask=0o002,
+        )
+        try:
+            child = subprocess.Popen(
+                command, env=env, cwd=cwd,
+                start_new_session=True,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            )
+        except OSError as exc:
+            die(f"service-uid project tool probe could not run for {name}: {exc}", 69)
+        if child.stdout is None:
+            die(f"service-uid project tool probe has no output pipe: {name}", 69)
+        output = bytearray()
+        deadline = time.monotonic() + 15
+        eof = False
+        try:
+            while not eof or child.poll() is None:
+                if (stopping or time.monotonic() >= deadline
+                        or not parent_is_live(parent_pid, int(authority["operator_uid"]))):
+                    try:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    child.wait()
+                    die(
+                        f"service-uid project tool probe was interrupted, timed out, "
+                        f"or lost its operator parent: {name}",
+                        69,
+                    )
+                ready, _, _ = select.select([child.stdout], [], [], 0.1)
+                if ready:
+                    chunk = os.read(child.stdout.fileno(), 4096)
+                    if not chunk:
+                        eof = True
+                    else:
+                        output.extend(chunk)
+                        if len(output) > MAX_PROBE_OUTPUT:
+                            try:
+                                os.killpg(child.pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                            child.wait()
+                            die(f"service-uid project tool probe exceeded 64KiB output: {name}", 69)
+        finally:
+            child.stdout.close()
+        result = child.wait()
+        if result != 0:
+            detail = output.decode("utf-8", "replace").strip().replace("\n", " ")[:512]
+            die(
+                f"service-uid project tool probe failed for {name}"
+                f"{': ' + detail if detail else ''}",
+                69,
+            )
+        if name == "bun":
+            version = output.decode("utf-8", "strict").strip()
+            match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?", version)
+            if not match or tuple(map(int, match.groups())) < (1, 3, 0):
+                die(f"service-uid Bun >=1.3.0 is required (found: {version})", 69)
+        if name == "pnpm":
+            try:
+                version_output = output.decode("utf-8", "strict")
+            except UnicodeDecodeError:
+                die("service-uid pnpm version output is not UTF-8", 69)
+            if version_output not in (
+                SUPPORTED_PNPM_VERSION,
+                SUPPORTED_PNPM_VERSION + "\n",
+            ):
+                die(
+                    f"service-uid pnpm must be exactly {SUPPORTED_PNPM_VERSION}",
+                    69,
+                )
+        print(f"{name}\t{os.path.realpath(executable)}")
+    return 0
+
+
+def telemetry_unknown(reason: str) -> int:
+    allowed = {
+        "no-sessions", "no-rollout", "unsafe-rollout", "oversized-rollout",
+        "oversized-line", "no-token-count", "invalid-token-count",
+        "rollout-changed", "scan-bound",
+    }
+    if reason not in allowed:
+        reason = "unsafe-rollout"
+    print(json.dumps(
+        {"status": "unknown", "reason": reason},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ))
+    return 0
+
+
+def _telemetry_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+        info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+    )
+
+
+def open_newest_rollout(authority: dict[str, object]) -> tuple[int, os.stat_result] | str:
+    """Return one descriptor-bound newest rollout without exposing its pathname."""
+
+    uid = int(authority["runtime_uid"])
+    gid = int(authority["runtime_primary_gid"])
+    sessions = os.path.join(str(authority["codex_home"]), "sessions")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        sessions_fd = os.open(sessions, flags)
+    except FileNotFoundError:
+        return "no-sessions"
+    except OSError:
+        return "unsafe-rollout"
+    best_fd = -1
+    best_info: os.stat_result | None = None
+    best_key: tuple[int, str] | None = None
+    entries_seen = 0
+    root_dev = -1
+
+    def safe_dir(info: os.stat_result) -> bool:
+        return (
+            stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+            and info.st_uid == uid and info.st_gid == gid and info.st_dev == root_dev
+        )
+
+    def walk(dir_fd: int, depth: int, prefix: str) -> str | None:
+        nonlocal best_fd, best_info, best_key, entries_seen
+        if depth > MAX_TELEMETRY_DEPTH:
+            return "scan-bound"
+        try:
+            iterator = os.scandir(dir_fd)
+        except OSError:
+            return "unsafe-rollout"
+        try:
+            for entry in iterator:
+                entries_seen += 1
+                if entries_seen > MAX_TELEMETRY_ENTRIES:
+                    return "scan-bound"
+                name = entry.name
+                if (not isinstance(name, str) or name in ("", ".", "..")
+                        or "/" in name or "\0" in name):
+                    return "unsafe-rollout"
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                except OSError:
+                    return "unsafe-rollout"
+                relative = f"{prefix}/{name}" if prefix else name
+                if stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+                    if not safe_dir(info):
+                        return "unsafe-rollout"
+                    try:
+                        child_fd = os.open(name, flags, dir_fd=dir_fd)
+                    except OSError:
+                        return "unsafe-rollout"
+                    try:
+                        if _telemetry_identity(os.fstat(child_fd)) != _telemetry_identity(info):
+                            return "unsafe-rollout"
+                        failure = walk(child_fd, depth + 1, relative)
+                        if failure is not None:
+                            return failure
+                    finally:
+                        os.close(child_fd)
+                    continue
+                if not ROLLOUT_RE.fullmatch(name):
+                    continue
+                if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                        or info.st_uid != uid or info.st_gid != gid
+                        or info.st_dev != root_dev or info.st_nlink != 1):
+                    return "unsafe-rollout"
+                if not 1 <= info.st_size <= MAX_TELEMETRY_FILE:
+                    return "oversized-rollout"
+                key = (info.st_mtime_ns, relative)
+                if best_key is not None and key <= best_key:
+                    continue
+                try:
+                    candidate = os.open(
+                        name,
+                        os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=dir_fd,
+                    )
+                except OSError:
+                    return "unsafe-rollout"
+                opened = os.fstat(candidate)
+                if (_telemetry_identity(opened) != _telemetry_identity(info)
+                        or not stat.S_ISREG(opened.st_mode)):
+                    os.close(candidate)
+                    return "unsafe-rollout"
+                if best_fd >= 0:
+                    os.close(best_fd)
+                best_fd, best_info, best_key = candidate, opened, key
+        finally:
+            iterator.close()
+        return None
+
+    try:
+        try:
+            sessions_info = os.fstat(sessions_fd)
+            root_dev = sessions_info.st_dev
+            if not safe_dir(sessions_info):
+                return "unsafe-rollout"
+            failure = walk(sessions_fd, 0, "")
+        except OSError:
+            if best_fd >= 0:
+                os.close(best_fd)
+            return "unsafe-rollout"
+        if failure is not None:
+            if best_fd >= 0:
+                os.close(best_fd)
+            return failure
+        if best_fd < 0 or best_info is None:
+            return "no-rollout"
+        return best_fd, best_info
+    finally:
+        os.close(sessions_fd)
+
+
+def _sanitize_rate_limit_window(value: object) -> dict[str, int | float | None] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("window")
+    used = value.get("used_percent")
+    minutes = value.get("window_minutes")
+    reset = value.get("resets_at")
+    if (isinstance(used, bool) or not isinstance(used, (int, float))
+            or not math.isfinite(float(used)) or not 0 <= float(used) <= 100):
+        raise ValueError("used_percent")
+    if (minutes is not None
+            and (type(minutes) is not int or not 1 <= minutes <= 10_000_000)):
+        raise ValueError("window_minutes")
+    if reset is not None and (type(reset) is not int or not 1 <= reset <= 99_999_999_999):
+        raise ValueError("resets_at")
+    return {
+        "used_percent": used,
+        "window_minutes": minutes,
+        "resets_at": reset,
+    }
+
+
+def sanitize_token_count(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict) or value.get("type") != "event_msg":
+        return None
+    payload = value.get("payload")
+    if not isinstance(payload, dict) or payload.get("type") != "token_count":
+        return None
+    timestamp = value.get("timestamp")
+    if not isinstance(timestamp, str) or not ROLLOUT_TIMESTAMP_RE.fullmatch(timestamp):
+        raise ValueError("timestamp")
+    limits = payload.get("rate_limits")
+    if limits is None:
+        sanitized_limits = None
+    elif isinstance(limits, dict):
+        sanitized_limits = {
+            "primary": _sanitize_rate_limit_window(limits.get("primary")),
+            "secondary": _sanitize_rate_limit_window(limits.get("secondary")),
+        }
+    else:
+        raise ValueError("rate_limits")
+    return {"timestamp": timestamp, "rate_limits": sanitized_limits}
+
+
+def emit_latest_telemetry(authority: dict[str, object]) -> int:
+    selected = open_newest_rollout(authority)
+    if isinstance(selected, str):
+        return telemetry_unknown(selected)
+    fd, before = selected
+    latest: dict[str, object] | None = None
+    latest_candidate_failure: str | None = None
+    failure: str | None = None
+    try:
+        with os.fdopen(os.dup(fd), "rb") as stream:
+            while True:
+                line = stream.readline(MAX_TELEMETRY_LINE + 1)
+                if not line:
+                    break
+                if len(line) > MAX_TELEMETRY_LINE:
+                    failure = "oversized-line"
+                    break
+                if b'"token_count"' not in line:
+                    continue
+                try:
+                    decoded = json.loads(line.decode("utf-8", "strict"))
+                    sanitized = sanitize_token_count(decoded)
+                except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+                    # Append order is authoritative.  An invalid candidate is
+                    # unknown only if it remains the physically latest
+                    # token_count; a later valid candidate must supersede it.
+                    latest = None
+                    latest_candidate_failure = "invalid-token-count"
+                    continue
+                if sanitized is not None:
+                    latest = sanitized
+                    latest_candidate_failure = None
+        after = os.fstat(fd)
+        if _telemetry_identity(after) != _telemetry_identity(before):
+            failure = "rollout-changed"
+    except OSError:
+        failure = "unsafe-rollout"
+    finally:
+        os.close(fd)
+    if failure is not None:
+        return telemetry_unknown(failure)
+    if latest_candidate_failure is not None:
+        return telemetry_unknown(latest_candidate_failure)
+    if latest is None:
+        return telemetry_unknown("no-token-count")
+    print(json.dumps(
+        latest, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ))
+    return 0
+
+
+def review_args(args: list[str], review: str) -> list[str]:
+    cleaned: list[str] = []
+    index = 0
+    replaced = False
+    while index < len(args):
+        token = args[index]
+        if token in ("-C", "--cd", "--cwd"):
+            if index + 1 >= len(args):
+                die("review Codex argv contains a dangling cwd option")
+            cleaned.extend([token, review])
+            replaced = True
+            index += 2
+            continue
+        if token.startswith(("-C=", "--cd=", "--cwd=")):
+            option = token.split("=", 1)[0]
+            cleaned.append(f"{option}={review}")
+            replaced = True
+            index += 1
+            continue
+        cleaned.append(token)
+        index += 1
+    if replaced:
+        return cleaned
+    if cleaned and cleaned[0] == "exec":
+        return [cleaned[0], "-C", review, *cleaned[1:]]
+    return ["-C", review, *cleaned]
+
+
+def run_child(authority: dict[str, object], parent_pid: int, mode: str, args: list[str]) -> int:
+    review = prepare_runtime_dirs(authority, mode)
+    if review is not None:
+        args = review_args(args, review)
+    command = runtime_context_command(
+        authority,
+        [str(authority["node_path"]), str(authority["codex_script"]), *args],
+        umask=0o002,
+    )
+
+    stopping = False
+
+    def stop(_sig: int, _frame: object) -> None:
+        nonlocal stopping
+        stopping = True
+
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, stop)
+    child_options: dict[str, object] = {
+        "env": child_env(authority),
+        "start_new_session": True,
+    }
+    if mode == "app-server":
+        # A global server has no ambient repository.  Thread cwd/profile
+        # authority arrives later through the trusted protocol manager.
+        child_options["cwd"] = str(authority["runtime_home"])
+    child = subprocess.Popen(command, **child_options)
+    while child.poll() is None:
+        if stopping:
+            try:
+                os.killpg(child.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            break
+        if not parent_is_live(parent_pid, int(authority["operator_uid"])):
+            stopping = True
+            continue
+        time.sleep(0.2)
+    if stopping and child.poll() is None:
+        try:
+            child.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    return child.wait()
+
+
+def prove_fable_reviewer_mcp(authority: dict[str, object]) -> None:
+    """Prove the exact hidden-uid -> operator sudo MCP lane without spending quota."""
+
+    requests = (
+        json.dumps({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                       "clientInfo": {"name": "qofi-install-proof", "version": "1"}},
+        }, separators=(",", ":")) + "\n"
+        + json.dumps({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {},
+        }, separators=(",", ":")) + "\n"
+    )
+    operator_uid = int(authority["operator_uid"])
+    command = runtime_context_command(authority, [
+        "/usr/bin/sudo", "-n", "-H", "-u", f"#{operator_uid}", "--",
+        "/usr/bin/python3", "-I", "-B", FABLE_REVIEWER,
+    ], umask=0o077)
+    env = child_env(authority)
+    try:
+        proof = subprocess.run(
+            command, input=requests, text=True, capture_output=True,
+            env=env, cwd=str(authority["runtime_home"]), timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        die(f"service-uid Fable MCP proof could not execute: {exc}", 69)
+    if proof.returncode != 0 or proof.stderr:
+        die(
+            "service-uid Fable MCP proof failed: "
+            + (proof.stderr or proof.stdout).strip()[:512], 69,
+        )
+    lines = proof.stdout.splitlines()
+    if len(lines) != 2:
+        die("service-uid Fable MCP proof emitted an unexpected response count", 69)
+    try:
+        initialized, listed = (json.loads(line) for line in lines)
+    except ValueError:
+        die("service-uid Fable MCP proof emitted malformed JSON", 69)
+    if (not isinstance(initialized, dict) or initialized.get("jsonrpc") != "2.0"
+            or initialized.get("id") != 1 or not isinstance(initialized.get("result"), dict)
+            or initialized["result"].get("serverInfo") != {
+                "name": "qofi-fable-reviewer", "version": "1.0.0",
+            }):
+        die("service-uid Fable MCP initialize response is not exact", 69)
+    tools = listed.get("result", {}).get("tools") if isinstance(listed, dict) else None
+    if (listed.get("jsonrpc") != "2.0" or listed.get("id") != 2
+            or not isinstance(tools, list) or len(tools) != 1
+            or not isinstance(tools[0], dict)
+            or tools[0].get("name") != "adversarial_review"):
+        die("service-uid Fable MCP tools/list did not expose exactly one expected tool", 69)
+
+
+def main() -> None:
+    # Root-created lock modes must not depend on the sudo caller.
+    os.umask(0o077)
+    mode, profile, parent_pid, args = parse_command()
+    authority = validate_authority(
+        validate_runtime_state=(mode == "verify"), profile=profile,
+    )
+    if mode in ("verify", "verify-install", "verify-fable-reviewer"):
+        if os.geteuid() != 0:
+            die(f"--{mode} must run through the fixed root sudoers rule")
+        sudo_uid = os.environ.get("SUDO_UID", "")
+        if not sudo_uid.isdigit() or int(sudo_uid) != authority["operator_uid"]:
+            die("verification SUDO_UID does not match attested operator_uid")
+        if mode == "verify-fable-reviewer":
+            prove_fable_reviewer_mcp(authority)
+            print("qofi-codex-runner: OK service-uid/operator Fable MCP contract")
+            return
+        print("qofi-codex-runner: OK v2 authority/hash/account contract")
+        return
+    validate_command_grammar(mode, args, authority, parent_pid=parent_pid)
+    verify_invoker(authority, parent_pid)
+    if mode == "app-server":
+        verify_app_server_manager_admission(authority, parent_pid)
+    lock_fd = lock_global(mode, parent_pid, int(authority["operator_uid"]))
+    runtime_uid = int(authority["runtime_uid"])
+    try:
+        if not parent_is_live(parent_pid, int(authority["operator_uid"])):
+            die("operator parent exited while waiting for the runner lock")
+        kill_runtime_uid(authority)
+        # Only after the exclusive root lock and zero non-platform payload
+        # processes may root inspect or mutate runtime-owned paths. macOS may
+        # retain one fully attested PID-1/SIP distnoted agent for this user.
+        authority = validate_authority(validate_runtime_state=True, profile=profile)
+        verify_runtime_keychain_search_empty(authority)
+        if mode == "telemetry":
+            result = emit_latest_telemetry(authority)
+        elif mode == "check-tools":
+            result = run_tool_checks(authority, parent_pid, args)
+        else:
+            result = run_child(authority, parent_pid, mode, args)
+    finally:
+        kill_runtime_uid(authority)
+        os.close(lock_fd)
+    raise SystemExit(result)
+
+
+if __name__ == "__main__":
+    main()

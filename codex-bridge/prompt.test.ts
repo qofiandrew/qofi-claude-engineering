@@ -1,5 +1,12 @@
 import { describe, test, expect } from 'bun:test'
-import { buildEnvelope, PREAMBLE } from './prompt.ts'
+import {
+  ATTENTION_RELAY_PREAMBLE,
+  buildEnvelope,
+  buildPairingInstruction,
+  CPO_SILENCE_PREAMBLE,
+  GIT_BROKER_PREAMBLE,
+  PREAMBLE,
+} from './prompt.ts'
 
 const meta = {
   chatId: '123',
@@ -32,8 +39,32 @@ describe('buildEnvelope', () => {
     expect(env).toContain('[attachments downloaded to:\n  /state/inbox/1-a.pdf]')
   })
 
+  test('trusted archetype and channel role are carried as envelope metadata', () => {
+    const env = buildEnvelope('status', {
+      ...meta, archetype: 'cpo', channelRole: 'bus',
+    })
+    expect(env).toContain('archetype="cpo"')
+    expect(env).toContain('channel_role="bus"')
+  })
+
   test('preamble teaches the delivery contract', () => {
     expect(PREAMBLE).toContain('FINAL message')
     expect(PREAMBLE).toContain('untrusted')
+    expect(PREAMBLE).toContain('no Discord reply/send tool')
+    expect(PREAMBLE).toContain('exactly one final text response')
+    expect(PREAMBLE).toContain('Outbound file uploads are not supported')
+    expect(PREAMBLE).toContain('never let multiple delegates edit the same worktree paths concurrently')
+    expect(ATTENTION_RELAY_PREAMBLE).toContain('[[SWARM_ATTENTION_RAISE:')
+    expect(ATTENTION_RELAY_PREAMBLE).toContain('[[SWARM_ATTENTION_CLEAR]]')
+    expect(GIT_BROKER_PREAMBLE).toContain('!qofi-git branch feature/name')
+    expect(GIT_BROKER_PREAMBLE).toContain('SEPARATE exact control message')
+    expect(CPO_SILENCE_PREAMBLE).toContain('[[QOFI_SILENT]]')
+    expect(CPO_SILENCE_PREAMBLE).toContain('posts nothing')
+  })
+
+  test('pairing instruction carries and safely quotes the actual state dir', () => {
+    const text = buildPairingInstruction("/tmp/swarm's state", 'abc123', false)
+    expect(text).toContain(`DISCORD_STATE_DIR='/tmp/swarm'"'"'s state'`)
+    expect(text).toContain("bun cli.ts pair 'abc123'")
   })
 })

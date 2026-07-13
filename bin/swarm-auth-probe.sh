@@ -52,8 +52,13 @@
 #   SWARM_AUTH_PROBE_CMD   A command run via `sh -c`. Its EXIT CODE and its
 #                          combined stdout+stderr are classified below. Default:
 #                          a cheap `claude` call that round-trips the credential
-#                          (see DEFAULT_PROBE). Tests point this at a synthetic
+#                          (see the default probe below). Tests point this at a synthetic
 #                          stub that emits a chosen outcome deterministically.
+#   SWARM_CLAUDE_BIN       Optional absolute path to Claude Code for the default
+#                          probe. This is useful under launchd, whose minimal PATH
+#                          commonly omits the native install at
+#                          ~/.local/bin/claude. When unset we first resolve
+#                          `claude` on PATH, then use that native-install path.
 #
 # Classification rules (applied to the probe's exit code + captured output), IN
 # THIS PRECEDENCE — auth-fail WINS over a limit substring:
@@ -172,7 +177,7 @@ auth_fail_patterns() {
 }
 
 # ── The probe call (overridable; default exercises the credential) ───────────
-# DEFAULT_PROBE is a cheap credential round-trip. `claude -p` with a one-token
+# The default is a cheap credential round-trip. `claude -p` with a one-token
 # request authenticates and returns near-instantly; it is the cheapest call that
 # actually touches the credential (unlike `--version`, which does not). If your
 # `claude` exposes an even cheaper auth ping (e.g. a `whoami`), wire
@@ -185,19 +190,36 @@ auth_fail_patterns() {
 # and thrash-restore a capped-but-valid account. OUT is captured and never
 # printed, so there is no scrollback/secret concern (the default `ping` reply is a
 # short "pong"-ish ack, never the credential value).
-DEFAULT_PROBE='claude -p "ping" --max-turns 1'
-
 PROBE="${SWARM_AUTH_PROBE_CMD:-}"
+PROBE_BIN=""
 if [ -z "$PROBE" ]; then
-  if command -v claude >/dev/null 2>&1; then
-    PROBE="$DEFAULT_PROBE"
+  if [ -n "${SWARM_CLAUDE_BIN:-}" ]; then
+    case "$SWARM_CLAUDE_BIN" in
+      /*) PROBE_BIN="$SWARM_CLAUDE_BIN" ;;
+      *)
+        [ "$EXPLAIN" -eq 1 ] && echo "$PROG: SWARM_CLAUDE_BIN must be an absolute executable path; failing closed." >&2
+        exit 1
+        ;;
+    esac
+    if [ ! -x "$PROBE_BIN" ]; then
+      [ "$EXPLAIN" -eq 1 ] && echo "$PROG: SWARM_CLAUDE_BIN is not executable; failing closed." >&2
+      exit 1
+    fi
+  elif command -v claude >/dev/null 2>&1; then
+    PROBE_BIN="$(command -v claude)"
+  elif [ -n "${HOME:-}" ] && [ -x "$HOME/.local/bin/claude" ]; then
+    # Anthropic's native installer places Claude Code here. launchd does not
+    # inherit the interactive shell PATH, so resolving only with `command -v`
+    # makes a successful browser login look like an auth failure during the
+    # post-login verify. Invoke the known user-local executable directly.
+    PROBE_BIN="$HOME/.local/bin/claude"
   else
     # No probe wired AND no `claude` on PATH → we cannot verify. This is the same
     # stance the credswap takes: an unverifiable swap is not a safe swap. We exit
     # 1 (auth-fail) — fail CLOSED, so the caller RESTORES rather than booting on
     # an unverifiable credential. (Distinct from config-error 2, which is a usage
     # bug, not a verdict.)
-    [ "$EXPLAIN" -eq 1 ] && echo "$PROG: no SWARM_AUTH_PROBE_CMD and no 'claude' on PATH — cannot verify; failing closed (treat as auth-fail so the swap is restored)." >&2
+    [ "$EXPLAIN" -eq 1 ] && echo "$PROG: no SWARM_AUTH_PROBE_CMD and no Claude Code executable on PATH or at ~/.local/bin/claude — cannot verify; failing closed (treat as auth-fail so the swap is restored)." >&2
     exit 1
   fi
 fi
@@ -206,7 +228,13 @@ fi
 # secret). The probe's own command is responsible for not echoing the credential
 # value — our default does not. We `2>&1` because limit/auth messages land on
 # either stream depending on the CLI's mood.
-OUT="$(sh -c "$PROBE" 2>&1)"; prc=$?
+if [ -n "$PROBE" ]; then
+  OUT="$(sh -c "$PROBE" 2>&1)"; prc=$?
+else
+  # Keep the resolved executable out of a shell command string: paths with
+  # spaces remain one argv element and cannot become shell syntax.
+  OUT="$("$PROBE_BIN" -p "ping" --max-turns 1 2>&1)"; prc=$?
+fi
 
 matches() {  # haystack  pattern-producer-fn
   local hay="$1" fn="$2"

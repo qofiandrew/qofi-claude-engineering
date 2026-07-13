@@ -49,6 +49,7 @@ cat > "$FAKE_SH/swarm.conf" <<EOF
 prodtest | $TMP/repo-prodtest | BOT_TEST | 555 | |
 alpha    | $TMP/repo-alpha    | BOT_A    | 111 | |
 beta     | $TMP/repo-beta     | BOT_B    | 222 | |
+codex    | $TMP/repo-codex    | BOT_C    | 333 | | | codex
 EOF
 
 MOCK_TMUX="$TMP/stubbin/tmux"
@@ -101,7 +102,7 @@ run_verify() {
     # start a fresh shell with no positional args).
     export SWARM_REAUTH_VERIFY_POST_CMD='printf "chan=%s :: %s\n" "$1" "$2" >> '"$POST_LOG"
     export MOCK_TMUX_LOG MOCK_PANE_DIR
-    export MOCK_LIVE="swarm-prodtest swarm-alpha swarm-beta"
+    export MOCK_LIVE="swarm-prodtest swarm-alpha swarm-beta swarm-codex"
     bash "$VERIFY" 2>&1
   )"; rc=$?
 }
@@ -117,12 +118,15 @@ reset_all
 set_pane swarm-alpha "$CAP_FRAME"
 set_pane swarm-prodtest "$IDLE_FRAME"
 set_pane swarm-beta "$IDLE_FRAME"
+set_pane swarm-codex "$CAP_FRAME"
 run_verify OK
 assert_eq 0 "$rc" "exit 0"
 assert_eq 1 "$(post_count)" "exactly one alert posted"
 assert_has "$(posts)" "chan=555" "alert went to the product row's channel (555)"
 assert_has "$(posts)" "alpha" "alert names the parked swarm 'alpha'"
 assert_lacks "$(posts)" "beta" "alert does not name the idle swarm 'beta'"
+assert_lacks "$(posts)" "codex" "Claude re-auth verifier excludes a parked Codex engine row"
+assert_lacks "$(cat "$MOCK_TMUX_LOG")" "swarm-codex" "Codex daemon pane is never inspected with Claude pane_state"
 
 echo "--- THE NON-INTERFERENCE INVARIANT: only reads, never acts ---"
 assert_lacks "$(cat "$MOCK_TMUX_LOG")" "send-keys" "never sends keys to any pane"

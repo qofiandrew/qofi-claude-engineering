@@ -4,7 +4,13 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { prepareContext, decideRoute, parseStateLines, parseDirective } from './routing.js';
+import {
+  prepareContext,
+  decideRoute,
+  harnessDraftSurfaceEnabled,
+  parseStateLines,
+  parseDirective,
+} from './routing.js';
 
 const FAKE = {
   busChannelId: '1000000000000000001',
@@ -27,7 +33,54 @@ test('config: maps build; liveness OFF by default', () => {
   assert.equal(ctx.ctoByName.get('cto-7').channelId, '4000000000000000004');
   assert.equal(ctx.ctoById.get('4000000000000000004'), 'cto-7');
   assert.equal(ctx.livenessEnabled, false);
+  assert.equal(ctx.structuredCheckInsEnabled, false);
   assert.equal(ctx.silenceThresholdMs, 1800000);
+  assert.equal(ctx.roadmapEnabled, false);
+  assert.equal(ctx.roadmapQueriesEnabled, false);
+  assert.equal(ctx.roadmapDigestIntervalMs, 86400000);
+  assert.equal(ctx.roadmapDigestChannelId, FAKE.busChannelId);
+  assert.equal(ctx.checkInMaxAttempts, 3);
+});
+
+test('config: structured check-in adoption requires an explicit opt-in', () => {
+  const legacy = prepareContext({ ...FAKE, livenessEnabled: true }, SELF);
+  assert.equal(legacy.structuredCheckInsEnabled, false);
+  assert.equal(harnessDraftSurfaceEnabled(legacy), false, 'legacy liveness launches no Bun/policy surface');
+  const allBound = {
+    ...FAKE,
+    ctoChannels: {
+      ...FAKE.ctoChannels,
+      'press-backend': {
+        channelId: '6000000000000000006',
+        botUserId: '6600000000000000066',
+      },
+    },
+  };
+  assert.equal(
+    prepareContext({ ...allBound, livenessEnabled: true, structuredCheckInsEnabled: true }, SELF).structuredCheckInsEnabled,
+    true,
+  );
+  assert.throws(
+    () => prepareContext({ ...FAKE, livenessEnabled: true, structuredCheckInsEnabled: true }, SELF),
+    /requires botUserId\/authorId for CTO "press-backend"/,
+  );
+  assert.equal(harnessDraftSurfaceEnabled({ ...legacy, structuredCheckInsEnabled: true }), true);
+});
+
+test('config: roadmap query and scheduled digest have independent explicit opt-ins', () => {
+  const query = prepareContext({ ...FAKE, roadmapQueriesEnabled: true }, SELF);
+  assert.equal(query.roadmapQueriesEnabled, true);
+  assert.equal(query.roadmapEnabled, false);
+  const digest = prepareContext({ ...FAKE, roadmapEnabled: true }, SELF);
+  assert.equal(digest.roadmapQueriesEnabled, false);
+  assert.equal(digest.roadmapEnabled, true);
+});
+
+test('config: roadmap/check-in bounds fail closed', () => {
+  assert.throws(() => prepareContext({ ...FAKE, roadmapDigestIntervalSeconds: 59 }, SELF), /60 seconds/);
+  assert.throws(() => prepareContext({ ...FAKE, checkInMaxAttempts: 2.5 }, SELF), /integer/);
+  assert.throws(() => prepareContext({ ...FAKE, checkInMaxAttempts: 1 }, SELF), /integer/);
+  assert.throws(() => prepareContext({ ...FAKE, roadmapRepoRoot: '' }, SELF), /path string/);
 });
 
 test('STATE: line → state action, never shuttled', () => {
@@ -148,6 +201,19 @@ test('A1 mirror: bus-side CPO parsing is unaffected by the inbound author allowl
   // STATE and directive on the bus are author==CPO, a separate path from A1.
   assert.equal(busCpo('STATE: cto-7 DRIVING').action, 'state');
   assert.equal(busCpo('[cto-7] do X').action, 'route');
+});
+
+test('structured check-in provenance is bound to the named CTO channel and author', () => {
+  const body = JSON.stringify({ schema: 'qofi.cto-checkin/v1', ping_id: 'idle-1' });
+  const trusted = decideRoute({
+    channelId: '5000000000000000005', authorId: '5500000000000000055', content: body,
+  }, ctx);
+  assert.equal(trusted.action, 'shuttle');
+  assert.equal(trusted.sourceName, 'cto-3');
+  const forged = decideRoute({
+    channelId: '5000000000000000005', authorId: RANDOM, content: body,
+  }, ctx);
+  assert.equal(forged.action, 'drop-foreign');
 });
 
 test('parseDirective basics', () => {

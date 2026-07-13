@@ -71,7 +71,7 @@
 #   used_pct  | pct | percent | utilization
 #
 # ── THRESHOLD ───────────────────────────────────────────────────────────────
-#   SWARM_ROTATE_THRESHOLD_PCT   default 85. NEAR fires when either window's
+#   SWARM_ROTATE_THRESHOLD_PCT   default 95. NEAR fires when either window's
 #                                used_pct >= this. AT fires at >= 100.
 #
 # Usage:
@@ -101,7 +101,7 @@ done
 
 STATE_DIR="${SWARM_STATE_DIR:-$HOME/.config/swarm}"
 USAGE_FILE="${SWARM_USAGE_FILE:-$STATE_DIR/usage.json}"
-THRESHOLD="${SWARM_ROTATE_THRESHOLD_PCT:-85}"
+THRESHOLD="${SWARM_ROTATE_THRESHOLD_PCT:-95}"
 
 # Validate the threshold is a plain integer in (0,100]. A bad threshold is a
 # config error, not a reason to silently never/always rotate.

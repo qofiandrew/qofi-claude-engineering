@@ -92,11 +92,16 @@ done
 
 say()  { [ "$QUIET" -eq 1 ] || printf '%s\n' "$*"; }
 
-# Distinct non-empty ACCOUNT labels in swarm.conf (field 6).
-LABELS="$(awk -F'|' '
-  /^[[:space:]]*(#|$)/ { next }
-  { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $6); if ($6 != "") print $6 }
-' "$CONF" | sort -u)"
+# Distinct non-empty Claude ACCOUNT labels. A Codex row may retain field 6 for
+# a possible engine switch-back, but it is not part of the Claude auth universe.
+LABELS="$(
+  while IFS= read -r _line; do
+    swarm_conf_parse_line "$_line" || continue
+    [ "$SWARM_CONF_F_ENGINE" = "codex" ] && continue
+    [ -n "$SWARM_CONF_F_ACCOUNT" ] && printf '%s\n' "$SWARM_CONF_F_ACCOUNT"
+  done < "$CONF"
+)"
+LABELS="$(printf '%s\n' "$LABELS" | sed '/^$/d' | sort -u)"
 
 if [ -z "$LABELS" ]; then
   echo "$PROG: no labeled accounts in $CONF (every swarm is on the default account)." >&2

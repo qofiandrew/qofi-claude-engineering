@@ -8,8 +8,8 @@
 #     session; no key ever reaches swarm-<swarm>. This is the whole safety claim.
 #   - The step-1 CTO-pane clean-boundary guard is SKIPPED (nothing to interrupt).
 #   - The step-6 fleet-idle re-check is SKIPPED (no relaunch follows).
-#   - The URL still posts to the SWARM ROW's channel (product), proving channel
-#     resolution is independent of the target session.
+#   - A generic secure-control button posts to the SWARM ROW's channel while the
+#     OAuth URL remains private/ephemeral.
 #   - A missing/unhealthy probe session is CREATED (new-session + launch keys).
 #
 # Synthetic-fixture discipline mirrors test-swarm-login-relay.sh: a mock tmux
@@ -54,6 +54,16 @@ SYNTH_TOKEN="SYNTH-BOT-TOKEN-do-not-leak-$$"
 printf 'export BOT_TEST="%s"\n' "$SYNTH_TOKEN" > "$FAKE_SH/tokens.env"
 chmod 600 "$FAKE_SH/tokens.env"
 
+OWNER_ID="1507069153335443608"
+BOT_ID="888777666555444333"
+CONTROL_MESSAGE_ID="777666555444333222"
+ACCESS_DIR="$TMP/access"; mkdir -m 700 "$ACCESS_DIR"
+ACCESS_FILE="$ACCESS_DIR/access.json"
+printf '{"allowFrom":["%s"],"groups":{"%s":{"requireMention":false,"allowFrom":["%s"]}},"pending":{},"dmPolicy":"allowlist"}\n' \
+  "$OWNER_ID" "$TEST_CHANNEL" "$OWNER_ID" > "$ACCESS_FILE"
+chmod 600 "$ACCESS_FILE"
+LOGIN_CONTROL_DIR="$ACCESS_DIR/login-control"
+
 MOCK_TMUX="$TMP/stubbin/tmux"
 MOCK_TMUX_LOG="$TMP/tmux.log"
 MOCK_FRAMES_DIR="$TMP/frames"
@@ -93,7 +103,22 @@ chmod +x "$MOCK_TMUX"
 MOCK_CURL_LOG="$TMP/curl.log"
 cat > "$TMP/stubbin/curl" <<'EOF'
 #!/usr/bin/env bash
+case "$*" in
+  *'/users/@me'*) printf '{"id":"%s"}' "${MOCK_BOT_ID:?}"; exit 0 ;;
+esac
 printf '%s\n' "$*" >> "${MOCK_CURL_LOG:?}"
+case "$*" in
+  *' -X DELETE '*) printf '204'; exit 0 ;;
+esac
+out=""; prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-o" ]; then out="$arg"; break; fi
+  prev="$arg"
+done
+if [ -n "$out" ] && [ "$out" != "/dev/null" ]; then
+  printf '{"id":"%s","channel_id":"%s","author":{"id":"%s"}}' \
+    "${MOCK_CONTROL_MESSAGE_ID:?}" "${MOCK_CHANNEL_ID:?}" "${MOCK_BOT_ID:?}" > "$out"
+fi
 printf '%s' "${MOCK_CURL_CODE:-200}"
 exit 0
 EOF
@@ -112,6 +137,10 @@ reset_frames() {
   for _f in "$@"; do printf '%s\n' "$_f" > "$MOCK_FRAMES_DIR/frame-$i.txt"; i=$((i+1)); done
   : > "$MOCK_TMUX_LOG"; : > "$MOCK_CURL_LOG"
   rm -rf "$TMP/state"
+  rm -rf "$LOGIN_CONTROL_DIR"; mkdir -m 700 "$LOGIN_CONTROL_DIR"
+  printf '{"schema":"qofi-login-control-ready/v1","protocol":1,"instance":"0123456789abcdef0123456789abcdef","pid":%s,"bot_user_id":"%s","channel_id":"%s","updated_at":%s}\n' \
+    "$$" "$BOT_ID" "$TEST_CHANNEL" "$(date +%s)" > "$LOGIN_CONTROL_DIR/ready-$TEST_CHANNEL-$BOT_ID.json"
+  chmod 600 "$LOGIN_CONTROL_DIR/ready-$TEST_CHANNEL-$BOT_ID.json"
   T_HAS_SESSION_RC=0
 }
 
@@ -123,17 +152,43 @@ run_dedicated() {
     export SWARM_STATE_DIR="$TMP/state"
     export CLAUDE_PROJECTS_DIR="$EMPTY_PROJ"
     export MOCK_TMUX_LOG MOCK_FRAMES_DIR MOCK_CURL_LOG
+    export MOCK_BOT_ID="$BOT_ID" MOCK_CHANNEL_ID="$TEST_CHANNEL" MOCK_CONTROL_MESSAGE_ID="$CONTROL_MESSAGE_ID"
     export MOCK_HAS_SESSION_RC="$T_HAS_SESSION_RC"
     export MOCK_CURL_CODE=200
     export SWARM_LOGIN_AUTHCHECK_CMD='exit 0'
     export SWARM_LOGIN_URL_TIMEOUT=5 SWARM_LOGIN_AUTH_TIMEOUT=5 SWARM_LOGIN_POLL_INTERVAL=0
     export SWARM_LOGIN_PROBE_LAUNCH_TIMEOUT=5
+    export SWARM_OWNER_DISCORD_ID="$OWNER_ID" SWARM_LOGIN_ACCESS_FILE="$ACCESS_FILE"
     PATH="$TMP/stubbin:$PATH" bash "$RELAY" "$@" 2>&1
   )"; rc=$?
 }
 send_keys_log() { grep '^send-keys' "$MOCK_TMUX_LOG" 2>/dev/null || true; }
 
-echo "=== 1) DEDICATED reuse: healthy probe session -> /login there -> URL to product channel -> exit 0 ==="
+echo "=== 0) LABELED ACCOUNT is outside the shared-keychain actuator ==="
+cp "$FAKE_SH/swarm.conf" "$TMP/swarm.conf.default-lane"
+cat > "$FAKE_SH/swarm.conf" <<EOF
+prodtest | $TMP/repo-prodtest | BOT_TEST | $TEST_CHANNEL | | max-a | claude
+EOF
+reset_frames "$FRAME_READY" "$FRAME_READY" "$FRAME_URL" "$FRAME_SUCCESS"
+run_dedicated --dedicated prodtest
+assert_eq 2 "$rc" "dedicated mode refuses a nonempty ACCOUNT"
+assert_has "$OUT" "ACCOUNT='max-a'" "dedicated refusal names the labeled account boundary"
+assert_has "$OUT" "shared default Claude keychain" "dedicated refusal explains which credential it can change"
+assert_eq "" "$(cat "$MOCK_TMUX_LOG" 2>/dev/null || true)" "dedicated refusal happens before probe lookup/creation or pane input"
+assert_eq "" "$(cat "$MOCK_CURL_LOG" 2>/dev/null || true)" "dedicated refusal happens before Discord control publication"
+if find "$LOGIN_CONTROL_DIR" -maxdepth 1 \( -name 'request-*.json' -o -name 'response-*.json' \) -print | grep -q .; then
+  bad "dedicated labeled-row refusal created private login-control request/response state"
+else
+  ok "dedicated labeled-row refusal creates no private login-control request/response state"
+fi
+if [ -e "$TMP/state" ]; then
+  bad "dedicated labeled-row refusal created relay lock/state"
+else
+  ok "dedicated labeled-row refusal occurs before relay lock/state creation"
+fi
+cp "$TMP/swarm.conf.default-lane" "$FAKE_SH/swarm.conf"
+
+echo "=== 1) DEDICATED reuse: healthy probe -> /login there -> secure control to product channel -> exit 0 ==="
 # Frames: [session_ready, baseline, URL, success].
 reset_frames "$FRAME_READY" "$FRAME_READY" "$FRAME_URL" "$FRAME_SUCCESS"
 run_dedicated --dedicated prodtest
@@ -146,8 +201,9 @@ assert_lacks "$(send_keys_log)" "swarm-prodtest" "no send-keys ever targets the 
 assert_has "$(send_keys_log)" "swarm-login-probe" "every /login key targets the isolated probe session"
 
 echo "--- channel resolution is from the SWARM ROW, not the session ---"
-assert_has "$(sed -n '1p' "$MOCK_CURL_LOG")" "/channels/$TEST_CHANNEL/messages" "URL posted to the product row's channel"
-assert_has "$(sed -n '1p' "$MOCK_CURL_LOG")" "$SYNTH_URL" "posted payload carries the scraped URL"
+assert_has "$(sed -n '1p' "$MOCK_CURL_LOG")" "/channels/$TEST_CHANNEL/messages" "secure control posted to the product row's channel"
+assert_has "$(sed -n '1p' "$MOCK_CURL_LOG")" "qofi-login:open:v1:" "public payload carries only a nonce-bound button"
+assert_lacks "$(cat "$MOCK_CURL_LOG")" "$SYNTH_URL" "OAuth URL never enters public Discord history"
 
 echo "--- the two CTO-pane guards are SKIPPED in dedicated mode ---"
 assert_lacks "$OUT" "clean boundary" "step-6 fleet clean-boundary re-check is skipped"
@@ -195,6 +251,8 @@ OUT="$(
   export SWARM_HOME="$FAKE_SH" SWARM_TMUX_BIN="$MOCK_TMUX" SWARM_TOKENS_ENV="$FAKE_SH/tokens.env"
   export SWARM_STATE_DIR="$TMP/state" CLAUDE_PROJECTS_DIR="$EMPTY_PROJ"
   export MOCK_TMUX_LOG MOCK_FRAMES_DIR MOCK_CURL_LOG MOCK_HAS_SESSION_RC=0 MOCK_CURL_CODE=200
+  export MOCK_BOT_ID="$BOT_ID" MOCK_CHANNEL_ID="$TEST_CHANNEL" MOCK_CONTROL_MESSAGE_ID="$CONTROL_MESSAGE_ID"
+  export SWARM_OWNER_DISCORD_ID="$OWNER_ID" SWARM_LOGIN_ACCESS_FILE="$ACCESS_FILE"
   export SWARM_LOGIN_AUTHCHECK_CMD='exit 0' SWARM_LOGIN_RELAY_DEDICATED=1
   export SWARM_LOGIN_URL_TIMEOUT=5 SWARM_LOGIN_AUTH_TIMEOUT=5 SWARM_LOGIN_POLL_INTERVAL=0 SWARM_LOGIN_PROBE_LAUNCH_TIMEOUT=5
   PATH="$TMP/stubbin:$PATH" bash "$RELAY" prodtest 2>&1
@@ -209,6 +267,8 @@ for v in false no off 0 FALSE; do
     export SWARM_HOME="$FAKE_SH" SWARM_TMUX_BIN="$MOCK_TMUX" SWARM_TOKENS_ENV="$FAKE_SH/tokens.env"
     export SWARM_STATE_DIR="$TMP/state" CLAUDE_PROJECTS_DIR="$EMPTY_PROJ"
     export MOCK_TMUX_LOG MOCK_FRAMES_DIR MOCK_CURL_LOG MOCK_HAS_SESSION_RC=0 MOCK_CURL_CODE=200
+    export MOCK_BOT_ID="$BOT_ID" MOCK_CHANNEL_ID="$TEST_CHANNEL" MOCK_CONTROL_MESSAGE_ID="$CONTROL_MESSAGE_ID"
+    export SWARM_OWNER_DISCORD_ID="$OWNER_ID" SWARM_LOGIN_ACCESS_FILE="$ACCESS_FILE"
     export SWARM_LOGIN_AUTHCHECK_CMD='exit 0' SWARM_LOGIN_RELAY_DEDICATED="$v"
     export SWARM_LOGIN_URL_TIMEOUT=5 SWARM_LOGIN_AUTH_TIMEOUT=5 SWARM_LOGIN_POLL_INTERVAL=0 SWARM_LOGIN_PROBE_LAUNCH_TIMEOUT=5
     PATH="$TMP/stubbin:$PATH" bash "$RELAY" prodtest 2>&1

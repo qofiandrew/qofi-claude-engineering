@@ -1,0 +1,2 @@
+{"timestamp":"2026-07-12T11:48:00.000Z","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"primary":{"used_percent":80,"window_minutes":300,"resets_at":1783861200},"secondary":{"used_percent":80,"window_minutes":10080,"resets_at":1784246400}}}}
+{"timestamp":"2026-07-12T11:59:00.000Z","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":null}}

@@ -20,6 +20,8 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PROBE="$ROOT/bin/swarm-auth-probe.sh"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/swarm-auth-probe-test.XXXXXX")"
+trap 'rm -rf "$TMP"' EXIT INT TERM
 
 PASS=0; FAIL=0; FAILURES=""
 ok()  { printf '  PASS  %s\n' "$1"; PASS=$((PASS+1)); }
@@ -112,8 +114,38 @@ assert_has "$OUT" "OUTCOME (c)" "--explain announces outcome (c)"
 echo "--- no probe wired AND no claude on PATH -> fail CLOSED (exit 1, treat as auth-fail) ---"
 # With no verifier of any kind, we must NOT report success; failing closed makes
 # the caller restore rather than boot on an unverifiable credential.
-OUT="$(env -u SWARM_AUTH_PROBE_CMD PATH=/usr/bin:/bin bash "$PROBE" --explain 2>&1)"; rc=$?
+EMPTY_HOME="$TMP/empty-home"; mkdir -p "$EMPTY_HOME"
+OUT="$(env -u SWARM_AUTH_PROBE_CMD -u SWARM_CLAUDE_BIN HOME="$EMPTY_HOME" PATH=/usr/bin:/bin /bin/bash "$PROBE" --explain 2>&1)"; rc=$?
 assert_eq 1 "$rc" "no probe + no claude -> fail closed (exit 1)"
+
+echo "--- launchd-minimal PATH -> native ~/.local/bin/claude is invoked directly ---"
+# Regression: the live rotation job had no PATH EnvironmentVariable, while the
+# native Claude install lived at ~/.local/bin/claude. /login succeeded in tmux,
+# then verification returned 1 without exercising the credential at all.
+NATIVE_HOME="$TMP/native-home"
+mkdir -p "$NATIVE_HOME/.local/bin"
+cat > "$NATIVE_HOME/.local/bin/claude" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" > "$FAKE_CLAUDE_ARGV"
+printf 'pong\n'
+exit 0
+EOF
+chmod +x "$NATIVE_HOME/.local/bin/claude"
+NATIVE_ARGV="$TMP/native-argv"
+OUT="$(env -i HOME="$NATIVE_HOME" PATH=/usr/bin:/bin FAKE_CLAUDE_ARGV="$NATIVE_ARGV" /bin/bash "$PROBE" --explain 2>&1)"; rc=$?
+assert_eq 0 "$rc" "minimal PATH uses the native-install fallback and authenticates"
+assert_eq '-p ping --max-turns 1' "$(cat "$NATIVE_ARGV" 2>/dev/null)" "native fallback receives the exact bounded probe argv"
+
+echo "--- explicit SWARM_CLAUDE_BIN supports nonstandard installs without shell interpolation ---"
+EXPLICIT_DIR="$TMP/path with spaces"; mkdir -p "$EXPLICIT_DIR"
+cp "$NATIVE_HOME/.local/bin/claude" "$EXPLICIT_DIR/claude"
+EXPLICIT_ARGV="$TMP/explicit-argv"
+OUT="$(env -i HOME="$EMPTY_HOME" PATH=/usr/bin:/bin SWARM_CLAUDE_BIN="$EXPLICIT_DIR/claude" FAKE_CLAUDE_ARGV="$EXPLICIT_ARGV" /bin/bash "$PROBE" --explain 2>&1)"; rc=$?
+assert_eq 0 "$rc" "absolute SWARM_CLAUDE_BIN with spaces authenticates"
+assert_eq '-p ping --max-turns 1' "$(cat "$EXPLICIT_ARGV" 2>/dev/null)" "explicit binary path is invoked as one argv element"
+
+OUT="$(env -i HOME="$EMPTY_HOME" PATH=/usr/bin:/bin SWARM_CLAUDE_BIN=relative/claude /bin/bash "$PROBE" --explain 2>&1)"; rc=$?
+assert_eq 1 "$rc" "relative SWARM_CLAUDE_BIN fails closed"
 
 echo ""
 echo "=== Summary ==="

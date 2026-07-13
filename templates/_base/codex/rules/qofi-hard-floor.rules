@@ -1,0 +1,115 @@
+# Conservative Codex execpolicy floor shared by both archetypes.
+#
+# These rules are for manually trusted interactive Codex sessions. The
+# unattended Discord bridge uses `--ignore-rules`: an `allow` rule can authorize
+# host execution, so editable project rules cannot participate in that runtime's
+# authority. Prefix matching cannot express every flag ordering or destination;
+# this file is defense in depth, never a replacement for the sandbox.
+
+prefix_rule(
+    pattern = ["sudo"],
+    decision = "forbidden",
+    justification = "Do not use sudo. Escalate to the operator per ESCALATION.md.",
+    match = [
+        "sudo true",
+        "sudo rm -rf /tmp/example",
+    ],
+    not_match = [
+        "echo sudo",
+    ],
+)
+
+prefix_rule(
+    pattern = [
+        "rm",
+        ["-r", "-R", "-f", "-rf", "-fr", "-Rf", "-fR", "--recursive", "--force"],
+    ],
+    decision = "forbidden",
+    justification = "Recursive or forced deletion is operator-gated; use a scoped non-destructive alternative or escalate.",
+    match = [
+        "rm -rf build",
+        "rm -r generated",
+        "rm --force artifact.tmp",
+    ],
+    not_match = [
+        "rm build/output.txt",
+        "git rm -r generated",
+    ],
+)
+
+prefix_rule(
+    pattern = ["git", "push", ["--all", "--mirror", "--delete", "-d", "--prune"]],
+    decision = "forbidden",
+    justification = "Broad or destructive pushes are operator-only; push one explicit non-protected branch instead.",
+    match = [
+        "git push --all",
+        "git push --mirror origin",
+        "git push --delete origin old-branch",
+        "git push --prune origin",
+    ],
+    not_match = [
+        "git push origin feature/topic",
+    ],
+)
+
+prefix_rule(
+    pattern = ["git", "push", ["origin", "upstream"], ["main", "master"]],
+    decision = "forbidden",
+    justification = "Pushing a protected branch is operator-only; push a feature branch or dev according to ESCALATION.md.",
+    match = [
+        "git push origin main",
+        "git push upstream master",
+    ],
+    not_match = [
+        "git push origin feature/main-fix",
+        "git push origin dev",
+    ],
+)
+
+prefix_rule(
+    pattern = [
+        "git",
+        "push",
+        ["--force", "-f", "--force-with-lease"],
+        ["origin", "upstream"],
+        ["main", "master", "dev"],
+    ],
+    decision = "forbidden",
+    justification = "Force-pushing main, master, or shared dev is operator-only; use a feature branch or escalate.",
+    match = [
+        "git push --force origin main",
+        "git push -f upstream dev",
+        "git push --force-with-lease origin master",
+    ],
+    not_match = [
+        "git push --force origin feature/rebased",
+    ],
+)
+
+prefix_rule(
+    pattern = ["git", "push", ["origin", "upstream"], ["--force", "-f", "--force-with-lease"], ["main", "master", "dev"]],
+    decision = "forbidden",
+    justification = "Force-pushing main, master, or shared dev is operator-only; use a feature branch or escalate.",
+    match = [
+        "git push origin --force main",
+        "git push upstream -f dev",
+    ],
+    not_match = [
+        "git push origin --force feature/rebased",
+    ],
+)
+
+prefix_rule(
+    pattern = [["npm", "yarn", "pnpm"], "publish"],
+    decision = "forbidden",
+    justification = "Package publication is an external release action; prepare locally and ask the operator to publish.",
+    match = [
+        "npm publish",
+        "yarn publish --access public",
+        "pnpm publish",
+    ],
+    not_match = [
+        "npm pack",
+        "npm run publish-docs",
+    ],
+)

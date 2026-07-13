@@ -1,0 +1,681 @@
+#!/usr/bin/python3 -I
+"""Root admission launcher for the operator-owned Codex App Server manager.
+
+This is a deliberately argument-free sudo target.  It creates the one
+root-authoritative admission record consumed by qofi-codex-runner, then drops
+all credentials before executing the attested manager bundle.  The caller's
+stdio is never connected to the hidden-UID App Server protocol.
+"""
+
+from __future__ import annotations
+
+import ctypes
+import errno
+import fcntl
+import hashlib
+import json
+import os
+import pwd
+import re
+import signal
+import stat
+import subprocess
+import sys
+import time
+from typing import NoReturn
+
+sys.dont_write_bytecode = True
+
+AUTHORITY = "/private/etc/qofi-codex-manager.json"
+ADMISSION = "/private/var/db/qofi-codex-manager-admission.json"
+LOCK = "/private/var/db/qofi-codex-manager-launcher.lock"
+RUNNER_LOCK = "/private/var/run/qofi-codex-runner.lock"
+LAUNCHER = "/usr/local/libexec/qofi-codex-manager-launcher"
+AUTHORITY_SCHEMA = "qofi-codex-manager-authority/v1"
+ADMISSION_SCHEMA = "qofi-codex-manager-admission/v1"
+MAX_AUTHORITY = 16 * 1024
+MAX_ADMISSION = 16 * 1024
+AUTHORITY_KEYS = {
+    "schema", "operator_uid", "operator_user", "operator_home",
+    "node_path", "node_sha256", "manager_bundle_path",
+    "manager_bundle_sha256", "manager_launcher_path",
+    "manager_launcher_sha256", "manager_python_path",
+    "manager_python_sha256", "manager_state_dir", "swarm_home",
+    "manager_environment_sha256",
+}
+ADMISSION_KEYS = {
+    "schema", "nonce", "operator_uid", "launcher_pid", "launcher_started",
+    "manager_pid", "manager_started", "node_path", "node_sha256",
+    "manager_bundle_path", "manager_bundle_sha256", "manager_launcher_path",
+    "manager_launcher_sha256", "manager_python_path", "manager_python_sha256",
+    "manager_state_dir", "swarm_home", "manager_environment_sha256",
+}
+HASH_KEYS = {
+    "node_path": "node_sha256",
+    "manager_bundle_path": "manager_bundle_sha256",
+    "manager_launcher_path": "manager_launcher_sha256",
+    "manager_python_path": "manager_python_sha256",
+}
+HASH_RE = re.compile(r"[0-9a-f]{64}\Z")
+_ACL_API: tuple[object, object] | None = None
+
+
+def die(message: str, code: int = 70) -> NoReturn:
+    print(f"qofi-codex-manager-launcher: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def fd_has_extended_acl(fd: int) -> bool:
+    if sys.platform != "darwin":
+        return False
+    global _ACL_API
+    if _ACL_API is None:
+        libc = ctypes.CDLL(None, use_errno=True)
+        get_acl = libc.acl_get_fd_np
+        get_acl.argtypes = [ctypes.c_int, ctypes.c_int]
+        get_acl.restype = ctypes.c_void_p
+        free_acl = libc.acl_free
+        free_acl.argtypes = [ctypes.c_void_p]
+        free_acl.restype = ctypes.c_int
+        _ACL_API = (get_acl, free_acl)
+    get_acl, free_acl = _ACL_API
+    ctypes.set_errno(0)
+    acl = get_acl(fd, 0x00000100)  # ACL_TYPE_EXTENDED
+    if not acl:
+        error = ctypes.get_errno()
+        if error in (0, errno.ENOENT):
+            return False
+        die(f"could not inspect root authority ACL: errno {error}")
+    try:
+        return True
+    finally:
+        free_acl(acl)
+
+
+def clean_absolute(value: object, label: str) -> str:
+    if (not isinstance(value, str) or not value or not os.path.isabs(value)
+            or os.path.normpath(value) != value or os.path.realpath(value) != value
+            or any(ord(ch) < 32 or ord(ch) == 127 for ch in value)):
+        die(f"{label} must be an absolute canonical path")
+    return value
+
+
+def safe_root_file(path: str, label: str, *, mode: int | None = None,
+                   executable: bool = False, max_bytes: int = 2 * 1024 * 1024) -> os.stat_result:
+    path = clean_absolute(path, label)
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    parent_fd = os.open("/", directory_flags)
+    try:
+        for part in path.split("/")[1:-1]:
+            next_fd = os.open(part, directory_flags, dir_fd=parent_fd)
+            info = os.fstat(next_fd)
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0
+                    or info.st_mode & 0o022 or fd_has_extended_acl(next_fd)):
+                os.close(next_fd)
+                die(f"{label} parent is not root controlled")
+            os.close(parent_fd)
+            parent_fd = next_fd
+        name = os.path.basename(path)
+        before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
+        try:
+            opened = os.fstat(fd)
+            identity = lambda item: (
+                item.st_dev, item.st_ino, item.st_mode, item.st_uid, item.st_gid,
+                item.st_size, item.st_mtime_ns, item.st_ctime_ns,
+            )
+            selected_mode = stat.S_IMODE(opened.st_mode)
+            if (identity(opened) != identity(before) or not stat.S_ISREG(opened.st_mode)
+                    or opened.st_uid != 0 or selected_mode & 0o022
+                    or opened.st_size < 1 or opened.st_size > max_bytes
+                    or fd_has_extended_acl(fd)
+                    or (mode is not None and selected_mode != mode)
+                    or (executable and not selected_mode & 0o111)):
+                die(f"{label} is not an ACL-free root authority file")
+            return opened
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        die(f"could not bind {label}: {exc}")
+    finally:
+        os.close(parent_fd)
+
+
+def sha256_file(path: str, max_bytes: int = 2 * 1024 * 1024) -> str:
+    before = os.lstat(path)
+    if before.st_size > max_bytes:
+        die(f"refusing to hash oversized authority file: {path}")
+    digest = hashlib.sha256()
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns,
+                opened.st_ctime_ns) != (
+            before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns,
+            before.st_ctime_ns,
+        ):
+            die(f"authority file changed while opening: {path}")
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        after = os.fstat(fd)
+        if (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (
+            opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns,
+        ):
+            die(f"authority file changed while hashing: {path}")
+    finally:
+        os.close(fd)
+    return digest.hexdigest()
+
+
+def load_json_authority(path: str, label: str, keys: set[str], schema: str,
+                        *, exact_mode: int, max_bytes: int) -> dict[str, object]:
+    info = safe_root_file(path, label, mode=exact_mode, max_bytes=max_bytes)
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns,
+                opened.st_ctime_ns) != (
+            info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+        ):
+            die(f"{label} changed while opening")
+        raw = os.read(fd, max_bytes + 1)
+    finally:
+        os.close(fd)
+    try:
+        value = json.loads(raw.decode("utf-8", "strict"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        die(f"{label} is invalid JSON: {exc}")
+    if not isinstance(value, dict) or set(value) != keys or value.get("schema") != schema:
+        die(f"{label} has an incompatible schema")
+    return value
+
+
+def manager_environment(operator: pwd.struct_passwd) -> dict[str, str]:
+    return {
+        "HOME": operator.pw_dir,
+        "USER": operator.pw_name,
+        "LOGNAME": operator.pw_name,
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "LANG": "C",
+        "LC_ALL": "C",
+    }
+
+
+def environment_sha256(environment: dict[str, str]) -> str:
+    rendered = json.dumps(environment, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(rendered.encode("ascii")).hexdigest()
+
+
+def process_record(pid: int) -> tuple[int, int, str] | None:
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-p", str(pid), "-o", "uid=", "-o", "ppid=", "-o", "lstart="],
+            capture_output=True, text=True, timeout=2,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    fields = result.stdout.strip().split(maxsplit=2)
+    if result.returncode != 0 or len(fields) != 3 or not fields[0].isdigit() or not fields[1].isdigit():
+        return None
+    return int(fields[0]), int(fields[1]), fields[2]
+
+
+def validate_private_dir(path: str, uid: int, label: str) -> None:
+    if os.path.realpath(path) != path:
+        die(f"{label} must be canonical")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != uid
+                or stat.S_IMODE(info.st_mode) != 0o700 or fd_has_extended_acl(fd)):
+            die(f"{label} must be an ACL-free operator-owned mode-0700 directory")
+    finally:
+        os.close(fd)
+
+
+def validate_swarm_home(path: str, uid: int) -> None:
+    if os.path.realpath(path) != path:
+        die("swarm home must be canonical")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, uid)
+                or info.st_mode & 0o022 or fd_has_extended_acl(fd)):
+            die("swarm home must be an operator/root-controlled real directory")
+    finally:
+        os.close(fd)
+
+
+def load_and_validate_authority() -> tuple[dict[str, object], pwd.struct_passwd, dict[str, str]]:
+    value = load_json_authority(
+        AUTHORITY, "manager authority", AUTHORITY_KEYS, AUTHORITY_SCHEMA,
+        exact_mode=0o644, max_bytes=MAX_AUTHORITY,
+    )
+    if type(value["operator_uid"]) is not int or int(value["operator_uid"]) <= 0:
+        die("manager authority operator uid is invalid")
+    try:
+        operator = pwd.getpwuid(int(value["operator_uid"]))
+        by_name = pwd.getpwnam(str(value["operator_user"]))
+    except KeyError as exc:
+        die(f"attested manager operator does not exist: {exc}")
+    operator_home = clean_absolute(value["operator_home"], "operator home")
+    if (operator.pw_uid != by_name.pw_uid or operator.pw_name != by_name.pw_name
+            or operator.pw_dir != operator_home):
+        die("manager operator identity changed")
+    for path_key, hash_key in HASH_KEYS.items():
+        path = clean_absolute(value[path_key], path_key)
+        expected = value[hash_key]
+        if not isinstance(expected, str) or not HASH_RE.fullmatch(expected):
+            die(f"manager authority {hash_key} is invalid")
+        maximum = (
+            512 * 1024 * 1024
+            if path_key in ("node_path", "manager_python_path")
+            else 2 * 1024 * 1024
+        )
+        safe_root_file(
+            path, path_key, executable=path_key != "manager_bundle_path",
+            max_bytes=maximum,
+        )
+        if sha256_file(path, maximum) != expected:
+            die(f"manager authority hash changed: {path_key}")
+    if value["manager_launcher_path"] != LAUNCHER:
+        die("manager launcher path is not fixed")
+    if os.path.realpath(sys.argv[0]) != LAUNCHER:
+        die("manager launcher must execute from its installed fixed path")
+    if process_executable_path(os.getpid()) != value["manager_python_path"]:
+        die("manager launcher does not execute the attested Python interpreter")
+    state_dir = clean_absolute(value["manager_state_dir"], "manager state dir")
+    swarm_home = clean_absolute(value["swarm_home"], "swarm home")
+    validate_private_dir(state_dir, operator.pw_uid, "manager state dir")
+    validate_swarm_home(swarm_home, operator.pw_uid)
+    environment = manager_environment(operator)
+    expected_environment = value["manager_environment_sha256"]
+    if (not isinstance(expected_environment, str) or not HASH_RE.fullmatch(expected_environment)
+            or environment_sha256(environment) != expected_environment):
+        die("manager clean-environment authority changed")
+    return value, operator, environment
+
+
+def open_lock() -> int:
+    fd = os.open(LOCK, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    info = os.fstat(fd)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+            or stat.S_IMODE(info.st_mode) != 0o600 or fd_has_extended_acl(fd)):
+        os.close(fd)
+        die("manager launcher lock is not ACL-free root-owned mode 0600")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        die("the Codex App Server manager launcher is already active", 75)
+    return fd
+
+
+def process_executable_path(pid: int) -> str | None:
+    if sys.platform != "darwin" or pid <= 0:
+        return None
+    libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    proc_pidpath = libproc.proc_pidpath
+    proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+    proc_pidpath.restype = ctypes.c_int
+    buffer = ctypes.create_string_buffer(4096)
+    length = proc_pidpath(pid, buffer, len(buffer))
+    if length <= 0:
+        return None
+    try:
+        return buffer.value.decode("utf-8", "strict")
+    except UnicodeDecodeError:
+        return None
+
+
+def process_arguments(pid: int) -> list[str] | None:
+    """Read one bounded initial argv vector with macOS KERN_PROCARGS2."""
+
+    if sys.platform != "darwin" or pid <= 1:
+        return None
+    libc = ctypes.CDLL(None, use_errno=True)
+    sysctl = libc.sysctl
+    sysctl.argtypes = [
+        ctypes.POINTER(ctypes.c_int), ctypes.c_uint, ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t,
+    ]
+    sysctl.restype = ctypes.c_int
+    mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2, pid
+    size = ctypes.c_size_t(0)
+    if sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
+        return None
+    if not 8 <= size.value <= 256 * 1024:
+        return None
+    buffer = ctypes.create_string_buffer(size.value)
+    if sysctl(mib, 3, buffer, ctypes.byref(size), None, 0) != 0:
+        return None
+    raw = bytes(buffer.raw[:size.value])
+    if len(raw) < ctypes.sizeof(ctypes.c_int):
+        return None
+    argc = int.from_bytes(
+        raw[:ctypes.sizeof(ctypes.c_int)], byteorder=sys.byteorder, signed=True,
+    )
+    if not 1 <= argc <= 64:
+        return None
+    offset = ctypes.sizeof(ctypes.c_int)
+    executable_end = raw.find(b"\0", offset)
+    if executable_end <= offset:
+        return None
+    offset = executable_end + 1
+    while offset < len(raw) and raw[offset] == 0:
+        offset += 1
+    result: list[str] = []
+    try:
+        for _ in range(argc):
+            end = raw.find(b"\0", offset)
+            if end < offset:
+                return None
+            result.append(raw[offset:end].decode("utf-8", "strict"))
+            offset = end + 1
+    except UnicodeDecodeError:
+        return None
+    return result
+
+
+def manager_arguments(authority: dict[str, object]) -> list[str]:
+    return [
+        str(authority["node_path"]), "--disable-sigusr1",
+        str(authority["manager_bundle_path"]),
+        "--state-dir", str(authority["manager_state_dir"]),
+        "--swarm-home", str(authority["swarm_home"]),
+    ]
+
+
+def wait_for_runner_lock(timeout: float = 35.0) -> None:
+    """Prove any previous root runner has completed its UID-wide cleanup."""
+
+    fd = os.open(
+        RUNNER_LOCK,
+        os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+                or stat.S_IMODE(info.st_mode) != 0o600 or fd_has_extended_acl(fd)):
+            die("global runner lock is not ACL-free root-owned mode 0600")
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                return
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    die("prior App Server runner did not complete UID-wide cleanup")
+                time.sleep(0.1)
+    finally:
+        os.close(fd)
+
+
+def remove_stale_admission(authority: dict[str, object], operator: pwd.struct_passwd) -> None:
+    if not os.path.lexists(ADMISSION):
+        wait_for_runner_lock()
+        return
+    stale = load_json_authority(
+        ADMISSION, "stale manager admission", ADMISSION_KEYS, ADMISSION_SCHEMA,
+        exact_mode=0o600, max_bytes=MAX_ADMISSION,
+    )
+    shared_keys = ADMISSION_KEYS - {
+        "schema", "nonce", "launcher_pid", "launcher_started",
+        "manager_pid", "manager_started",
+    }
+    for key in shared_keys:
+        if stale.get(key) != authority.get(key):
+            die(f"stale manager admission differs from current authority: {key}")
+    manager_pid = stale.get("manager_pid")
+    manager_started = stale.get("manager_started")
+    record = process_record(manager_pid) if type(manager_pid) is int else None
+    same_live_identity = (
+        type(manager_pid) is int and manager_pid > 1
+        and isinstance(manager_started, str)
+        and record is not None
+        and record[0] == operator.pw_uid
+        and record[2] == manager_started
+    )
+    exact_manager = (
+        same_live_identity
+        and process_executable_path(manager_pid) == authority["node_path"]
+        and process_arguments(manager_pid) == manager_arguments(authority)
+    )
+    if same_live_identity and not exact_manager:
+        die("a stale admitted manager is live but its executable/argv cannot be proven")
+    if exact_manager:
+        try:
+            os.killpg(manager_pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        deadline = time.monotonic() + 20.0
+        while time.monotonic() < deadline:
+            observed = process_record(manager_pid)
+            if observed is None or observed[0] != operator.pw_uid or observed[2] != manager_started:
+                break
+            time.sleep(0.1)
+        else:
+            try:
+                os.killpg(manager_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            kill_deadline = time.monotonic() + 5.0
+            while time.monotonic() < kill_deadline:
+                observed = process_record(manager_pid)
+                if observed is None or observed[0] != operator.pw_uid or observed[2] != manager_started:
+                    break
+                time.sleep(0.05)
+            else:
+                die("could not terminate the stale admitted manager")
+    os.unlink(ADMISSION)
+    wait_for_runner_lock()
+
+
+def write_admission(value: dict[str, object]) -> tuple[int, int]:
+    raw = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    if set(value) != ADMISSION_KEYS or len(raw) > MAX_ADMISSION:
+        die("manager admission record is malformed or oversized")
+    temporary = f"{ADMISSION}.tmp.{os.getpid()}"
+    try:
+        fd = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            os.fchown(fd, 0, 0)
+            os.fchmod(fd, 0o600)
+            view = memoryview(raw)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+            if fd_has_extended_acl(fd):
+                die("manager admission inherited an extended ACL")
+        finally:
+            os.close(fd)
+        os.replace(temporary, ADMISSION)
+    finally:
+        if os.path.lexists(temporary):
+            os.unlink(temporary)
+    parent_fd = os.open(os.path.dirname(ADMISSION), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+    info = safe_root_file(ADMISSION, "manager admission", mode=0o600, max_bytes=MAX_ADMISSION)
+    return info.st_dev, info.st_ino
+
+
+def remove_owned_admission(identity: tuple[int, int]) -> None:
+    if not os.path.lexists(ADMISSION):
+        return
+    info = safe_root_file(ADMISSION, "manager admission", mode=0o600, max_bytes=MAX_ADMISSION)
+    if (info.st_dev, info.st_ino) != identity:
+        die("manager admission identity changed before cleanup")
+    os.unlink(ADMISSION)
+
+
+def deny_debugger_attach() -> None:
+    """Make Darwin reject same-uid debugger/task-port attachment across exec."""
+
+    if sys.platform != "darwin":
+        die("manager debugger exclusion requires Darwin", 126)
+    libc = ctypes.CDLL(None, use_errno=True)
+    ptrace = libc.ptrace
+    ptrace.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+    ptrace.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    if ptrace(31, 0, None, 0) != 0:  # PT_DENY_ATTACH
+        die(f"could not deny manager debugger attachment: errno {ctypes.get_errno()}", 126)
+
+
+def child_exec(authority: dict[str, object], operator: pwd.struct_passwd,
+               environment: dict[str, str], gate: int) -> NoReturn:
+    try:
+        # The child is still root and blocked from operator attachment here.
+        # PT_DENY_ATTACH survives the later credential drop and Node exec.
+        deny_debugger_attach()
+        os.setsid()
+        ready = os.read(gate, 1)
+        os.close(gate)
+        if ready != b"1":
+            die("manager admission gate closed", 126)
+        null_fd = os.open("/dev/null", os.O_RDONLY)
+        try:
+            os.dup2(null_fd, 0)
+        finally:
+            if null_fd != 0:
+                os.close(null_fd)
+        os.initgroups(operator.pw_name, operator.pw_gid)
+        os.setgid(operator.pw_gid)
+        os.setuid(operator.pw_uid)
+        if ((os.getuid(), os.geteuid(), os.getgid(), os.getegid())
+                != (operator.pw_uid, operator.pw_uid, operator.pw_gid, operator.pw_gid)
+                or 0 in os.getgroups()):
+            die("manager credential drop proof failed", 126)
+        os.umask(0o077)
+        state_dir = str(authority["manager_state_dir"])
+        os.chdir(state_dir)
+        node = str(authority["node_path"])
+        argv = manager_arguments(authority)
+        os.execve(node, argv, environment)
+    except BaseException as exc:
+        print(f"qofi-codex-manager-launcher: manager exec failed: {exc}", file=sys.stderr)
+        os._exit(126)
+
+
+def supervise(authority: dict[str, object], operator: pwd.struct_passwd,
+              environment: dict[str, str]) -> int:
+    gate_read, gate_write = os.pipe()
+    manager_pid = os.fork()
+    if manager_pid == 0:
+        os.close(gate_write)
+        child_exec(authority, operator, environment, gate_read)
+    os.close(gate_read)
+    launcher_record = process_record(os.getpid())
+    manager_record = process_record(manager_pid)
+    if (launcher_record is None or launcher_record[0] != 0
+            or manager_record is None or manager_record[0] != 0
+            or manager_record[1] != os.getpid()):
+        os.close(gate_write)
+        try:
+            os.kill(manager_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        os.waitpid(manager_pid, 0)
+        die("could not bind launcher/manager process identities")
+    admission = {
+        "schema": ADMISSION_SCHEMA,
+        "nonce": os.urandom(32).hex(),
+        "operator_uid": operator.pw_uid,
+        "launcher_pid": os.getpid(),
+        "launcher_started": launcher_record[2],
+        "manager_pid": manager_pid,
+        "manager_started": manager_record[2],
+        "node_path": authority["node_path"],
+        "node_sha256": authority["node_sha256"],
+        "manager_bundle_path": authority["manager_bundle_path"],
+        "manager_bundle_sha256": authority["manager_bundle_sha256"],
+        "manager_launcher_path": authority["manager_launcher_path"],
+        "manager_launcher_sha256": authority["manager_launcher_sha256"],
+        "manager_python_path": authority["manager_python_path"],
+        "manager_python_sha256": authority["manager_python_sha256"],
+        "manager_state_dir": authority["manager_state_dir"],
+        "swarm_home": authority["swarm_home"],
+        "manager_environment_sha256": authority["manager_environment_sha256"],
+    }
+    identity = write_admission(admission)
+    os.write(gate_write, b"1")
+    os.close(gate_write)
+
+    stopping = False
+    deadline: float | None = None
+
+    def stop(_sig: int, _frame: object) -> None:
+        nonlocal stopping, deadline
+        if not stopping:
+            stopping = True
+            deadline = time.monotonic() + 30.0
+            try:
+                os.killpg(manager_pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+
+    for selected in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(selected, stop)
+    status = 0
+    try:
+        while True:
+            waited, status = os.waitpid(manager_pid, os.WNOHANG)
+            if waited == manager_pid:
+                break
+            if stopping and deadline is not None and time.monotonic() >= deadline:
+                try:
+                    os.killpg(manager_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                _, status = os.waitpid(manager_pid, 0)
+                break
+            time.sleep(0.1)
+    finally:
+        remove_owned_admission(identity)
+    if os.WIFEXITED(status):
+        return os.WEXITSTATUS(status)
+    if os.WIFSIGNALED(status):
+        return 128 + os.WTERMSIG(status)
+    return 70
+
+
+def main() -> None:
+    # Root-created admission/lock modes must not depend on the sudo caller.
+    os.umask(0o077)
+    if len(sys.argv) != 1:
+        die("this fixed launcher accepts no arguments", 64)
+    if os.getuid() != 0 or os.geteuid() != 0:
+        die("manager launcher must run as root through its fixed sudoers rule")
+    authority, operator, environment = load_and_validate_authority()
+    sudo_uid = os.environ.get("SUDO_UID", "")
+    if not sudo_uid.isdigit() or int(sudo_uid) != operator.pw_uid:
+        die("SUDO_UID does not match the attested operator")
+    # Nothing inherited from sudo is eligible to reach Node.
+    os.environ.clear()
+    os.environ.update({"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"})
+    lock_fd = open_lock()
+    try:
+        remove_stale_admission(authority, operator)
+        result = supervise(authority, operator, environment)
+    finally:
+        os.close(lock_fd)
+    raise SystemExit(result)
+
+
+if __name__ == "__main__":
+    main()

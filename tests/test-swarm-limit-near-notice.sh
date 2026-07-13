@@ -238,6 +238,39 @@ PROXY_RC=3 run "$IDLE_STUB" --or-poll
 assert_eq 3 "$rc" "no pane signal -> the poll's UNKNOWN passes through"
 
 echo ""
+echo "=== 9b) account switch near threshold: fresh pane latch never suppresses the percentage poll ==="
+# A successful re-auth touches LATCHED and therefore suppresses the PANE tier for
+# its short anti-loop cooldown. The newly selected account may already be near a
+# limit, so the independent /usage percentage tier must remain live throughout:
+# 90% is OK, then exactly 95% is NEAR on the very next tick. Use the REAL poller
+# here (not the exit-code stub) and keep the fresh latch across both readings.
+rm -rf "$STATE"; mkdir -p "$STATE"
+: > "$LATCHED"
+clear_notices
+set_notice swarm-alpha "You've used 99% of your session limit · resets old-account-window"
+SWITCH_PAYLOAD="$TMP/switched-account-usage.json"
+printf '%s\n' '{"five_hour":{"used_pct":4},"weekly":{"used_pct":90},"account":"browser-selected-next"}' > "$SWITCH_PAYLOAD"
+OUT="$(SWARM_HOME="$FAKE_HOME" \
+       SWARM_PANE_STATE_CMD="$IDLE_STUB" SWARM_PANE_NOTICE_CMD="$NOTICE_STUB" \
+       SWARM_STATE_DIR="$STATE" SWARM_ROTATE_THRESHOLD_PCT=95 \
+       SWARM_PANE_LATCH_COOLDOWN=900 SWARM_PANE_REPROMPT_COOLDOWN=0 \
+       SWARM_USAGE_PROBE="cat '$SWITCH_PAYLOAD'" \
+       SWARM_POLL_CMD_INNER="$ROOT/bin/swarm-usage-poll.sh" \
+       bash "$DETECT" --or-poll 2>&1)"; rc=$?
+assert_eq 0 "$rc" "new account at 90% during fresh pane cooldown -> poll remains live and reports OK"
+assert_has "$OUT" "weekly=90%" "delegated poll reports the new account's 90% reading"
+printf '%s\n' '{"five_hour":{"used_pct":5},"weekly":{"used_pct":95},"account":"browser-selected-next"}' > "$SWITCH_PAYLOAD"
+OUT="$(SWARM_HOME="$FAKE_HOME" \
+       SWARM_PANE_STATE_CMD="$IDLE_STUB" SWARM_PANE_NOTICE_CMD="$NOTICE_STUB" \
+       SWARM_STATE_DIR="$STATE" SWARM_ROTATE_THRESHOLD_PCT=95 \
+       SWARM_PANE_LATCH_COOLDOWN=900 SWARM_PANE_REPROMPT_COOLDOWN=0 \
+       SWARM_USAGE_PROBE="cat '$SWITCH_PAYLOAD'" \
+       SWARM_POLL_CMD_INNER="$ROOT/bin/swarm-usage-poll.sh" \
+       bash "$DETECT" --or-poll 2>&1)"; rc=$?
+assert_eq 10 "$rc" "new account reaching exactly 95% on the next tick -> NEAR despite fresh pane cooldown"
+assert_has "$OUT" "weekly=95%" "inclusive 95% evidence comes from the new account's delegated poll"
+
+echo ""
 echo "=== 10) tier disabled when pane-state injected WITHOUT a notice cmd ==="
 clear_notices
 set_notice swarm-alpha "You've used 99% of your session limit · resets 8:39am"

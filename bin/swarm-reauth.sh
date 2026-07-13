@@ -12,8 +12,9 @@
 # need the checkpoint→swap→relaunch machinery swarm-rotate.sh performs (which
 # exists to survive a fleet RESTART and its RAM-state loss). It only needs:
 #   1. run `/login` in an ISOLATED session (swarm-login-relay.sh --dedicated) so
-#      NO CTO pane is touched — the OAuth URL is posted to the product Discord
-#      channel and the operator authenticates the next account in their browser;
+#      NO CTO pane is touched — only a generic control button is posted to the
+#      product channel; the owner receives the URL ephemerally and authenticates
+#      the next account in their browser;
 #   2. verify the fresh credential;
 #   3. done — no restart, no guard, no commit.
 # The one risk this model carries (a running lead that does NOT adopt the fresh
@@ -37,10 +38,10 @@
 #       itself RATE-LIMITED (relay exit 7). Terminal — the tick escalates
 #       (SWARM_ATTENTION_CMD) and STOPS; it does NOT retry.
 #   5 — re-auth did NOT complete (relay returned any other non-zero: refused /
-#       lock contention / URL never rendered / Discord post failed / verify failed
+#       lock contention / URL never rendered / secure-control post failed / verify failed
 #       / operator auth timeout). The tick maps this to its exit 4 and retries on
 #       a later tick. NOTE the deliberate remap: the relay's OWN exit 6 means
-#       "Discord post failed", NOT ring exhaustion — only the relay's exit 7 maps
+#       "secure-control post failed", NOT ring exhaustion — only relay exit 7 maps
 #       to our 6. Collapsing them here is the entire reason this wrapper exists.
 #   2 — usage/config error (bad flag, SWARM_HOME wrong).
 #

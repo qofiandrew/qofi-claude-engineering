@@ -105,7 +105,7 @@
 #
 # Sample --observe log line (one per tick; fields are stable for easy grep/awk):
 #   swarm-rotate-tick: OBSERVE ts=2026-06-14T19:40:02Z proxy_verdict=NEAR proxy_exit=10 \
-#     five_hour_pct=88 weekly_pct=41 worst_pct=88 worst_window=5h threshold_pct=85 \
+#     five_hour_pct=98 weekly_pct=41 worst_pct=98 worst_window=5h threshold_pct=95 \
 #     account=max-a real_signal=OK real_exit=0 would_rotate=yes (NOT rotating: observe-mode)
 #
 # Usage:
@@ -301,6 +301,7 @@ EOF
     SWARMS=""
     while IFS= read -r _line; do
       swarm_conf_parse_line "$_line" || continue
+      [ "$SWARM_CONF_F_ENGINE" = "codex" ] && continue
       [ -z "$SWARM_CONF_F_NAME" ] && continue
       [ "$SWARM_CONF_F_ACCOUNT" = "$cap" ] && SWARMS="$SWARMS $SWARM_CONF_F_NAME"
     done < <(grep -vE '^[[:space:]]*(#|$)' "$CONF")

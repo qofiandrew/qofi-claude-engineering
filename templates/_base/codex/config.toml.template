@@ -1,0 +1,13 @@
+# Managed by swarm-codex-runtime.py. Local edits are replaced.
+[mcp_servers.fable_reviewer]
+command = "/usr/bin/sudo"
+args = ["-n", "-H", "-u", "#__QOFI_OPERATOR_UID__", "--", "/usr/bin/python3", "-I", "-B", "/usr/local/libexec/qofi-fable-reviewer-mcp.py"]
+enabled = true
+required = true
+startup_timeout_sec = 10
+tool_timeout_sec = 4300
+default_tools_approval_mode = "approve"
+enabled_tools = ["adversarial_review"]
+
+[mcp_servers.fable_reviewer.tools.adversarial_review]
+approval_mode = "approve"

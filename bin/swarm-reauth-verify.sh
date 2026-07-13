@@ -140,6 +140,7 @@ post_discord() {
 PARKED=""
 while IFS= read -r _line; do
   swarm_conf_parse_line "$_line" || continue
+  [ "$SWARM_CONF_F_ENGINE" = "claude" ] || continue
   _name="$SWARM_CONF_F_NAME"
   [ -z "$_name" ] && continue
   _sess="${PREFIX}-${_name}"

@@ -52,6 +52,8 @@ four | /r/four | BOT_FOUR | 111
 five | /r/five | BOT_FIVE | 222 | 555
 
 six  | /r/six  | BOT_SIX  | 333 | 666 | oldacct
+codex | /r/codex | BOT_CODEX | 444 | 777 | oldacct | codex
+explicit | /r/explicit | BOT_EXPLICIT | 555 | 888 | oldacct | claude | premium-a
 # trailing comment
 EOF
 }
@@ -60,7 +62,10 @@ EOF
 # 1) Rewrite a 6-column row: field 6 replaced, all else preserved.
 # ---------------------------------------------------------------------------
 echo "=== 6-col row: replace existing account ==="
-CONF="$TMP/c6.conf"; make_conf "$CONF"
+# Keep one deliberately redundant separator: macOS TMPDIR commonly ends in
+# `/`, and the strict atomic lock publisher must not regress historical Claude
+# callers merely because they construct an equivalent path spelling.
+CONF="$TMP//c6.conf"; make_conf "$CONF"
 ORIG="$(cat "$CONF")"
 swarm_conf_set_account "$CONF" "six" "maxb"; rc=$?
 assert_eq 0 "$rc" "rewrite of existing 6-col row returns 0"
@@ -139,6 +144,44 @@ while IFS= read -r _l; do
     assert_eq ""          "$SWARM_CONF_F_GUILD"   "parser reads the padded-empty guild on 'four'"
   fi
 done < <(grep -vE '^[[:space:]]*(#|$)' "$CONF")
+
+# ---------------------------------------------------------------------------
+# 7) Clearing ACCOUNT on engine-aware rows preserves the empty field-6 slot;
+#    ENGINE and CODEX_AUTH_POOL must never shift left.
+# ---------------------------------------------------------------------------
+echo "=== empty account preserves ENGINE + CODEX_AUTH_POOL ==="
+CONF="$TMP/cengine.conf"; make_conf "$CONF"
+swarm_conf_set_account "$CONF" "codex" ""
+assert_eq ""       "$(field_of "$CONF" codex 6)" "Codex row keeps an empty ACCOUNT field"
+assert_eq "codex"  "$(field_of "$CONF" codex 7)" "Codex ENGINE remains in field 7"
+swarm_conf_set_account "$CONF" "explicit" ""
+assert_eq ""        "$(field_of "$CONF" explicit 6)" "explicit-Claude row keeps an empty ACCOUNT field"
+assert_eq "claude"  "$(field_of "$CONF" explicit 7)" "explicit Claude ENGINE remains in field 7"
+assert_eq "premium-a" "$(field_of "$CONF" explicit 8)" "CODEX_AUTH_POOL remains in field 8"
+while IFS= read -r _l; do
+  swarm_conf_parse_line "$_l" || continue
+  case "$SWARM_CONF_F_NAME" in
+    codex) assert_eq "codex" "$SWARM_CONF_F_ENGINE" "parser still dispatches cleared Codex row to Codex" ;;
+    explicit) assert_eq "claude" "$SWARM_CONF_F_ENGINE" "parser still dispatches explicit Claude row to Claude" ;;
+  esac
+done < "$CONF"
+
+# ---------------------------------------------------------------------------
+# 8) A field-8 pool update never reuses or shifts Claude ACCOUNT / ENGINE.
+# ---------------------------------------------------------------------------
+echo "=== CODEX_AUTH_POOL rewrite is field-8-only ==="
+CONF="$TMP/cpool.conf"; make_conf "$CONF"
+swarm_conf_set_codex_auth_pool "$CONF" "codex" "premium-a"; rc=$?
+assert_eq 0 "$rc" "pool rewrite returns 0"
+assert_eq "oldacct" "$(field_of "$CONF" codex 6)" "pool update preserves dormant ACCOUNT"
+assert_eq "codex" "$(field_of "$CONF" codex 7)" "pool update preserves ENGINE"
+assert_eq "premium-a" "$(field_of "$CONF" codex 8)" "pool update writes CODEX_AUTH_POOL field 8"
+swarm_conf_set_codex_auth_pool "$CONF" "four" "default"; rc=$?
+assert_eq 0 "$rc" "pool rewrite pads a legacy row"
+assert_eq "" "$(field_of "$CONF" four 5)" "legacy pool padding preserves empty GUILD"
+assert_eq "" "$(field_of "$CONF" four 6)" "legacy pool padding preserves empty ACCOUNT"
+assert_eq "" "$(field_of "$CONF" four 7)" "legacy pool padding preserves empty ENGINE"
+assert_eq "default" "$(field_of "$CONF" four 8)" "legacy pool lands only in field 8"
 
 echo ""
 echo "=== Summary ==="

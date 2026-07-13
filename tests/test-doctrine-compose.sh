@@ -70,7 +70,7 @@ compose_check() {
 }
 
 compose_check "CLAUDE.md" "tests/fixtures/CLAUDE.engineering-cto.expected.md" \
-  engineering-cto/CLAUDE.preamble.md _base/CLAUDE.md engineering-cto/CLAUDE.md
+  engineering-cto/CLAUDE.preamble.md _base/CLAUDE.md _base/SWARM_BEHAVIOR.md engineering-cto/CLAUDE.md
 
 # Profile overlay (ADR-0013): the 'frontend' profile appends a 4th compose
 # source after engineering-cto/CLAUDE.md, which makes engineering-cto/CLAUDE.md
@@ -80,7 +80,7 @@ compose_check "CLAUDE.md" "tests/fixtures/CLAUDE.engineering-cto.expected.md" \
 # test-swarm-profile-dispatch.sh, which asserts byte-identity to this same
 # fixture through the live pipeline.)
 compose_check "CLAUDE.md (frontend profile)" "tests/fixtures/CLAUDE.engineering-cto.frontend.expected.md" \
-  engineering-cto/CLAUDE.preamble.md _base/CLAUDE.md engineering-cto/CLAUDE.md engineering-cto/profiles/frontend/CLAUDE.md
+  engineering-cto/CLAUDE.preamble.md _base/CLAUDE.md _base/SWARM_BEHAVIOR.md engineering-cto/CLAUDE.md engineering-cto/profiles/frontend/CLAUDE.md
 
 compose_check "ESCALATION.md" "tests/fixtures/ESCALATION.engineering-cto.expected.md" \
   engineering-cto/ESCALATION.preamble.md _base/ESCALATION.md engineering-cto/ESCALATION.md
@@ -95,13 +95,43 @@ echo ""
 echo "==> Round-trip: compose(cpo fragments) ≡ frozen fixtures"
 
 compose_check "cpo CLAUDE.md" "tests/fixtures/CLAUDE.cpo.expected.md" \
-  cpo/CLAUDE.preamble.md _base/CLAUDE.md cpo/CLAUDE.md
+  cpo/CLAUDE.preamble.md _base/CLAUDE.md _base/SWARM_BEHAVIOR.md cpo/CLAUDE.md
 
 compose_check "cpo ESCALATION.md" "tests/fixtures/ESCALATION.cpo.expected.md" \
   cpo/ESCALATION.preamble.md _base/ESCALATION.md cpo/ESCALATION.md
 
 compose_check "cpo permission-gate.sh" "tests/fixtures/permission-gate.cpo.expected.sh" \
   _base/hooks/permission-gate-prelude.sh cpo/hooks/permission-gate-policy.sh _base/hooks/permission-gate-tail.sh
+
+echo ""
+echo "==> Runtime doctrine parity: CLAUDE.md and AGENTS.md share one ordered fragment trace"
+
+shared_trace_from_manifest() { # manifest target
+  local manifest="$1" target="$2"
+  awk -F'|' -v target="$target" '
+    /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+    {
+      behavior=$1; sources=$2; output=$3
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", behavior)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", sources)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", output)
+      if (behavior != "compose" || output != target) next
+      n=split(sources, parts, "+")
+      for (i=1; i<=n; i++) if (parts[i] ~ /^_base\/(CLAUDE|SWARM_BEHAVIOR)\.md$/) print parts[i]
+    }
+  ' "$manifest"
+}
+
+for type in engineering-cto cpo; do
+  claude_trace="$(shared_trace_from_manifest "templates/$type/manifest.tsv" CLAUDE.md)"
+  agents_trace="$(shared_trace_from_manifest "templates/$type/manifest.tsv" AGENTS.md)"
+  expected="$(printf '%s\n' _base/CLAUDE.md _base/SWARM_BEHAVIOR.md)"
+  if [ "$claude_trace" = "$expected" ] && [ "$agents_trace" = "$expected" ]; then
+    pass "$type CLAUDE.md/AGENTS.md shared fragment trace is identical"
+  else
+    fail "$type shared doctrine trace drift (CLAUDE=[$claude_trace] AGENTS=[$agents_trace])"
+  fi
+done
 
 echo ""
 echo "==> Single-file refresh artifacts (no compose) ≡ frozen fixtures"

@@ -6,10 +6,11 @@ Fragments in this directory are role-AGNOSTIC: the foundational rules
 escalation contract) that apply to ANY archetype — engineering-cto today;
 cpo / company-brain when those overlays land.
 
-Each archetype's overlay (`engineering-cto/`, future `cpo/`,
-`company-brain/`) supplies its own preamble + role-specific sections,
-and the per-archetype `manifest.tsv` composes the final stamped
-artifact from `[overlay-preamble, _base/X, overlay-body]`.
+Each archetype's overlay (`engineering-cto/`, `cpo/`, future
+`company-brain/`) supplies its own preamble + role-specific sections. Both
+runtime entrypoints compose the same ordered shared fragment trace,
+`[_base/CLAUDE.md, _base/SWARM_BEHAVIOR.md]`, plus runtime/archetype routing
+material. The per-archetype `manifest.tsv` is the source of that trace.
 
 ## Compose mechanism
 
@@ -18,7 +19,8 @@ and concatenates them with **literal `cat`** to produce the stamped
 artifact. No separator is injected.
 
 ```
-compose | engineering-cto/CLAUDE.preamble.md+_base/CLAUDE.md+engineering-cto/CLAUDE.md | CLAUDE.md
+compose | engineering-cto/CLAUDE.preamble.md+_base/CLAUDE.md+_base/SWARM_BEHAVIOR.md+engineering-cto/CLAUDE.md | CLAUDE.md
+compose | engineering-cto/AGENTS.md+_base/CLAUDE.md+_base/SWARM_BEHAVIOR.md | AGENTS.md
 ```
 
 ### Optional per-profile overlay (engineering-cto, ADR-0013)
@@ -50,9 +52,11 @@ together at composition time.
 
 ### Round-trip test
 
-`tests/test-doctrine-compose.sh` proves byte-identity:
+`tests/test-doctrine-compose.sh` proves byte-identity and rejects shared-trace
+drift between the Claude and Codex entrypoints:
 
   composed(engineering-cto fragments) ≡ tests/fixtures/CLAUDE.engineering-cto.expected.md
+  shared-fragments(CLAUDE.md) ≡ shared-fragments(AGENTS.md)
 
 so editing any fragment is provably safe — the composed output is what
 it claims to be.

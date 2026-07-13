@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # swarm-init.sh — scaffold a repo with the Claude swarm operating system.
-# Usage: swarm-init.sh /path/to/repo [--type <name>] [--profile <name>] [--force]
+# Usage: swarm-init.sh /path/to/repo [--type <name>] [--profile <name>] [--engine claude|codex] [--force]
 #
 # Source of truth is $SWARM_HOME/templates (default ~/claude-swarm/templates),
 # whose contents are enumerated in templates/<type>/manifest.tsv — the per-
@@ -9,8 +9,9 @@
 # for the target's archetype via manifest_apply in swarm-lib.sh, so the three
 # commands cannot diverge on what "fully stamped" means.
 #
-# --type <name> stamps .claude/swarm-type with the given archetype BEFORE
-# manifest_apply runs, so swarm_type_of() resolves to that type. The name
+# --type <name> applies the selected archetype through an in-memory override,
+# then stamps .claude/swarm-type only AFTER the manifest adoption preflight
+# and apply succeed. The name
 # is validated against swarm_known_types (engineering-cto / cpo /
 # company-brain) — unknown types are refused, never silently
 # misclassified. When --type is absent NO marker is written; swarm_type_of
@@ -52,6 +53,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO=""
 TYPE=""
 PROFILE=""
+ENGINE="claude"
+ENGINE_EXPLICIT=0
 FORCE=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -67,6 +70,11 @@ while [ $# -gt 0 ]; do
       PROFILE="$2"; shift 2 ;;
     --profile=*)
       PROFILE="${1#--profile=}"; shift ;;
+    --engine)
+      [ $# -ge 2 ] || { echo "swarm-init: --engine requires a value" >&2; exit 1; }
+      ENGINE="$2"; ENGINE_EXPLICIT=1; shift 2 ;;
+    --engine=*)
+      ENGINE="${1#--engine=}"; ENGINE_EXPLICIT=1; shift ;;
     -h|--help)
       sed -n '1,40p' "$0"; exit 0 ;;
     --*)
@@ -80,9 +88,69 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -z "$REPO" ]  && { echo "usage: swarm-init.sh /path/to/repo [--type <name>] [--force]" >&2; exit 1; }
+[ -z "$REPO" ]  && { echo "usage: swarm-init.sh /path/to/repo [--type <name>] [--profile <name>] [--engine claude|codex] [--force]" >&2; exit 1; }
 [ -d "$REPO" ]  || { echo "swarm-init: $REPO is not a directory" >&2; exit 1; }
 REPO="$(cd "$REPO" && pwd)"
+case "$ENGINE" in
+  claude|codex) ;;
+  *) echo "swarm-init: --engine must be claude or codex (got: $ENGINE)" >&2; exit 1 ;;
+esac
+
+# A configured repository's surface is repository-scoped, even though engine
+# selection is row-scoped.  In particular, one Codex row makes AGENTS.md and
+# the managed-surface ledger authoritative for every Claude sibling sharing
+# that physical repository.  A bare direct swarm-init historically defaulted
+# to Claude and could therefore rewrite a configured Codex AGENTS.md while
+# leaving its Codex ledger behind.  Resolve the effective engine under the same
+# cooperative config lock used by sync.  swarm-add always passes --engine after
+# doing its own locked shared-repo resolution, so it does not re-enter the lock.
+INIT_CONFIG_LOCK_HELD=0
+cleanup_swarm_init() {
+  if [ "$INIT_CONFIG_LOCK_HELD" -eq 1 ]; then
+    swarm_conf_lock_release
+    INIT_CONFIG_LOCK_HELD=0
+  fi
+}
+trap cleanup_swarm_init EXIT
+
+if [ "$ENGINE_EXPLICIT" -eq 0 ]; then
+  CONF="$SWARM_HOME/swarm.conf"
+  if ! swarm_conf_lock_acquire "$CONF"; then
+    echo "swarm-init: REFUSED — lifecycle mutation in progress; repo surfaces were not initialized" >&2
+    exit 2
+  fi
+  INIT_CONFIG_LOCK_HELD=1
+  _init_matches=0
+  _init_codex=0
+  while IFS= read -r _init_line || [ -n "$_init_line" ]; do
+    _init_trimmed="$(_swarm_trim "$_init_line")"
+    case "$_init_trimmed" in ''|'#'*) continue ;; esac
+    if ! swarm_conf_parse_line "$_init_line"; then
+      echo "swarm-init: REFUSED — malformed swarm.conf prevents configured engine resolution" >&2
+      exit 2
+    fi
+    _init_configured="$SWARM_CONF_F_REPO"
+    [ -d "$_init_configured" ] || continue
+    _init_canonical="$(cd "$_init_configured" 2>/dev/null && pwd -P)" || {
+      echo "swarm-init: REFUSED — configured repository cannot be canonicalized: $_init_configured" >&2
+      exit 2
+    }
+    if [ "$SWARM_CONF_F_ENGINE" = "codex" ] && [ "$_init_canonical" != "$_init_configured" ]; then
+      echo "swarm-init: REFUSED — Codex row '$SWARM_CONF_F_NAME' uses a noncanonical repo alias: $_init_configured" >&2
+      exit 2
+    fi
+    [ "$_init_canonical" = "$REPO" ] || continue
+    _init_matches=$((_init_matches + 1))
+    [ "$SWARM_CONF_F_ENGINE" = "codex" ] && _init_codex=1
+  done < "$CONF"
+  if [ "$_init_matches" -gt 0 ]; then
+    if [ "$_init_codex" -eq 1 ]; then ENGINE="codex"; else ENGINE="claude"; fi
+    echo "swarm-init: configured repo surface resolved to $ENGINE"
+  else
+    swarm_conf_lock_release
+    INIT_CONFIG_LOCK_HELD=0
+  fi
+fi
 
 # Validate --type early — refusing here means we never stamp a marker for
 # a misspelled type and never run manifest_apply against a non-existent
@@ -108,6 +176,7 @@ if [ -n "$TYPE" ]; then
     exit 1
   fi
 fi
+export SWARM_APPLY_ENGINE_OVERRIDE="$ENGINE"
 
 # Validate --profile early (ADR-0013), before any marker write — refusal
 # leaves no partial state, mirroring the --type validation above. A profile
@@ -139,11 +208,16 @@ fi
 
 echo "Scaffolding swarm files into $REPO"
 
-# Stamp .claude/swarm-type BEFORE manifest_apply so swarm_type_of()
-# inside the apply resolves to the requested type, not the default.
+# Validate existing markers before manifest_apply. No mkdir or marker write is
+# allowed ahead of the Codex adoption preflight: a foreign `.codex/**` or
+# `.agents/skills/**` target must leave init with no partial marker state.
+EXISTING_TYPE=""
 if [ -n "$TYPE" ]; then
-  mkdir -p "$REPO/.claude"
-  EXISTING_TYPE=""
+  if [ -L "$REPO/.claude/swarm-type" ] || \
+     { [ -e "$REPO/.claude/swarm-type" ] && [ ! -f "$REPO/.claude/swarm-type" ]; }; then
+    echo "swarm-init: REFUSED — .claude/swarm-type is not a regular file" >&2
+    exit 1
+  fi
   if [ -f "$REPO/.claude/swarm-type" ]; then
     EXISTING_TYPE="$(head -n1 "$REPO/.claude/swarm-type" 2>/dev/null | tr -d '[:space:]')"
   fi
@@ -156,19 +230,15 @@ if [ -n "$TYPE" ]; then
     } >&2
     exit 1
   fi
-  if [ "$EXISTING_TYPE" != "$TYPE" ]; then
-    printf '%s\n' "$TYPE" > "$REPO/.claude/swarm-type"
-    echo "  stamped: .claude/swarm-type = $TYPE"
-  fi
 fi
 
-# Stamp .claude/swarm-profile BEFORE manifest_apply so swarm_profile_of()
-# inside the apply resolves to the requested profile (ADR-0013). Same
-# refuse-to-switch guard as the type marker: changing a swarm's profile is
-# not supported (it would mix doctrine overlays). Validated above.
+EXISTING_PROFILE=""
 if [ -n "$PROFILE" ]; then
-  mkdir -p "$REPO/.claude"
-  EXISTING_PROFILE=""
+  if [ -L "$REPO/.claude/swarm-profile" ] || \
+     { [ -e "$REPO/.claude/swarm-profile" ] && [ ! -f "$REPO/.claude/swarm-profile" ]; }; then
+    echo "swarm-init: REFUSED — .claude/swarm-profile is not a regular file" >&2
+    exit 1
+  fi
   if [ -f "$REPO/.claude/swarm-profile" ]; then
     EXISTING_PROFILE="$(head -n1 "$REPO/.claude/swarm-profile" 2>/dev/null | tr -d '[:space:]')"
   fi
@@ -181,19 +251,56 @@ if [ -n "$PROFILE" ]; then
     } >&2
     exit 1
   fi
-  if [ "$EXISTING_PROFILE" != "$PROFILE" ]; then
-    printf '%s\n' "$PROFILE" > "$REPO/.claude/swarm-profile"
-    echo "  stamped: .claude/swarm-profile = $PROFILE"
-  fi
 fi
 
 [ "$FORCE" -eq 1 ] && export SWARM_FORCE_SEED=1 || unset SWARM_FORCE_SEED
 
+# Resolve a requested type/profile without writing their marker first. The
+# manifest layer performs the full Codex adoption preflight before its first
+# write, using these explicit selections for manifest/profile dispatch.
+if [ -n "$TYPE" ]; then
+  export SWARM_APPLY_TYPE_OVERRIDE="$TYPE"
+else
+  unset SWARM_APPLY_TYPE_OVERRIDE
+fi
+if [ -n "$PROFILE" ]; then
+  export SWARM_APPLY_PROFILE_OVERRIDE_SET=1
+  export SWARM_APPLY_PROFILE_OVERRIDE="$PROFILE"
+else
+  unset SWARM_APPLY_PROFILE_OVERRIDE_SET SWARM_APPLY_PROFILE_OVERRIDE
+fi
+
 manifest_apply "$REPO" init
 rc=$?
+unset SWARM_APPLY_TYPE_OVERRIDE SWARM_APPLY_PROFILE_OVERRIDE_SET SWARM_APPLY_PROFILE_OVERRIDE SWARM_APPLY_ENGINE_OVERRIDE
 if [ "$rc" -ne 0 ]; then
   echo "swarm-init: aborted — manifest_apply failed (rc=$rc)" >&2
   exit "$rc"
+fi
+
+# Markers are committed only after a successful adoption+apply. Publish through
+# the manifest layer's engine-aware atomic writer: on a prepared Codex checkout
+# a raw mktemp+rename here would reintroduce the operator-primary gid and mode
+# 0600 after the manifest had just repaired the shared runtime boundary.
+_stamp_init_marker() {
+  local basename="$1" value="$2" current="$3" tmp
+  [ "$current" != "$value" ] || return 0
+  tmp="$(mktemp -t "swarm-init-${basename}.XXXXXX")" || return 1
+  if ! printf '%s\n' "$value" > "$tmp" || \
+     ! _swarm_publish_plain "$tmp" "$REPO/.claude/$basename" ".claude/$basename"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  rm -f "$tmp"
+  echo "  stamped: .claude/$basename = $value"
+}
+if [ -n "$TYPE" ] && ! _stamp_init_marker swarm-type "$TYPE" "$EXISTING_TYPE"; then
+  echo "swarm-init: manifest applied but failed to stamp .claude/swarm-type" >&2
+  exit 1
+fi
+if [ -n "$PROFILE" ] && ! _stamp_init_marker swarm-profile "$PROFILE" "$EXISTING_PROFILE"; then
+  echo "swarm-init: manifest applied but failed to stamp .claude/swarm-profile" >&2
+  exit 1
 fi
 
 RESOLVED_TYPE="$(swarm_type_of "$REPO")"

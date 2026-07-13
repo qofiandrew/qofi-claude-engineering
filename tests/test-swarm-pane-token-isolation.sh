@@ -57,13 +57,15 @@ ACCT_ENV_LINE="$(grep 'acct_env=' "$UP" | grep 'CLAUDE_CODE_OAUTH_TOKEN')"
 [ -n "$ACCT_ENV_LINE" ] || { echo "FATAL: could not find the CLAUDE_CODE_OAUTH_TOKEN acct_env line in $UP" >&2; exit 2; }
 PANE_ASSIGN="$(printf '%s' "$SENDKEYS_LINE" | sed -E 's/^[[:space:]]*tmux send-keys -t "\$sess" /PANE=/; s/ C-m$//')"
 
-# build_pane default|labeled  -> sets PANE to the exact string tmux would receive.
+# build_pane default|labeled [claude|codex] -> sets PANE to the exact string.
 build_pane() {
-  local mode="$1"
+  local mode="$1" engine="${2:-claude}"
   local SWARM_HOME="$TMP" TOKENS="$TMP/tokens.env" tokvar="BOT_ALPHA"
   local bound_exports="export DISCORD_BOUND_CHANNEL='111'"
   local SWARM_ACCT_TOKEN_VAR="OAUTH_TOKEN_MAXA" SWARM_ACCT_CONFIG_DIR="$TMP/.claude-accounts/maxa"
   local acct_env=""
+  local codex_key_scrub=""
+  [ "$engine" = "codex" ] && codex_key_scrub="unset OPENAI_API_KEY CODEX_API_KEY; "
   if [ "$mode" = labeled ]; then eval "$ACCT_ENV_LINE"; fi
   eval "$PANE_ASSIGN"
 }
@@ -96,6 +98,9 @@ assert_lacks "$PANE" "set -a" "no blanket auto-export (set -a) in the pane strin
 assert_has  "$PANE" 'DISCORD_BOT_TOKEN="$(. ' "bot token is a SCOPED subshell source"
 assert_has  "$PANE" 'CLAUDE_CODE_OAUTH_TOKEN="$(. ' "OAUTH token is a SCOPED subshell source"
 assert_has  "$PANE" "do unset " "the pane SCRUBS inherited vault vars (unset loop present)"
+assert_lacks "$PANE" "unset OPENAI_API_KEY CODEX_API_KEY" "Claude pane bytes do not gain Codex-only provider scrubs"
+build_pane default codex
+assert_has "$PANE" "unset OPENAI_API_KEY CODEX_API_KEY" "Codex pane scrubs both metered provider-key routes"
 
 # ---------------------------------------------------------------------------
 echo "=== CLEAN env (env -i): default pane has ONLY its own bot token ==="

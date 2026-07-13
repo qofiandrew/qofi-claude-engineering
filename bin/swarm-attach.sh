@@ -31,9 +31,16 @@ fi
 
 CONF="$SWARM_HOME/swarm.conf"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=swarm-lib.sh
+. "$SCRIPT_DIR/swarm-lib.sh"
+cleanup_swarm_attach() {
+  while [ "${SWARM_CONF_LOCK_DEPTH:-0}" -gt 0 ]; do swarm_conf_lock_release; done
+}
+trap cleanup_swarm_attach EXIT
 # SWARM_UP_BIN override exists so tests can substitute a stub; in normal use
 # this resolves to the sibling swarm-up.sh.
 SWARM_UP="${SWARM_UP_BIN:-$SCRIPT_DIR/swarm-up.sh}"
+SWARM_VIEW="${SWARM_VIEW_BIN:-$SCRIPT_DIR/swarm-view.sh}"
 PREFIX="${SWARM_TMUX_PREFIX:-swarm}"   # matches swarm-up.sh
 TMUX_BIN="${SWARM_TMUX_BIN:-tmux}"
 LAUNCH_WAIT_SECONDS="${SWARM_ATTACH_LAUNCH_WAIT:-10}"  # how long to poll for the session after launch
@@ -51,6 +58,19 @@ list_swarm_names() {
 # Is this name declared in swarm.conf? Exit 0 yes, 1 no.
 name_in_conf() {  # name
   list_swarm_names | grep -qxF "$1"
+}
+
+resolve_engine_for_name() {  # name
+  local _wanted="$1" _line _matches=0
+  RESOLVED_ENGINE=""
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    swarm_conf_parse_line "$_line" || continue
+    if [ "$SWARM_CONF_F_NAME" = "$_wanted" ]; then
+      _matches=$((_matches + 1))
+      RESOLVED_ENGINE="$SWARM_CONF_F_ENGINE"
+    fi
+  done < "$CONF"
+  [ "$_matches" -eq 1 ] && [ -n "$RESOLVED_ENGINE" ]
 }
 
 NAME="${1:-}"
@@ -90,15 +110,25 @@ if ! name_in_conf "$NAME"; then
   exit 1
 fi
 
+# Resolve the engine through the canonical parser. A Codex primary pane is a
+# daemon, never an interactive TUI; the traditional attach path must route to
+# the supported native-remote/event viewer rather than expose that daemon pane.
+resolve_engine_for_name "$NAME" || { echo "swarm-attach: could not resolve one engine for '$NAME'" >&2; exit 1; }
+ENGINE="$RESOLVED_ENGINE"
+
 SESS="${PREFIX}-${NAME}"
 
 # Attach-or-launch.
 if "$TMUX_BIN" has-session -t "$SESS" 2>/dev/null; then
-  echo "attached to $SESS · detach with Ctrl-b then d (never Ctrl-C)" >&2
+  if [ "$ENGINE" != "codex" ]; then
+    echo "attached to $SESS · detach with Ctrl-b then d (never Ctrl-C)" >&2
+  fi
 else
   echo "swarm-attach: session $SESS not running — launching with swarm-up.sh up $NAME" >&2
-  echo "swarm-attach: heads-up — you'll land mid-bringup. If the dev-channels prompt is" >&2
-  echo "swarm-attach: still waiting when you attach, press Enter to accept it." >&2
+  if [ "$ENGINE" != "codex" ]; then
+    echo "swarm-attach: heads-up — you'll land mid-bringup. If the dev-channels prompt is" >&2
+    echo "swarm-attach: still waiting when you attach, press Enter to accept it." >&2
+  fi
   # swarm-up.sh launch_one is synchronous: by the time it returns, tmux
   # new-session has run and the brief has been sent. The poll below is a
   # short defensive check in case launch_one fails partway (missing token,
@@ -114,7 +144,38 @@ else
     echo "swarm-attach: session $SESS did not come up within ${LAUNCH_WAIT_SECONDS}s — re-run swarm-up.sh up $NAME and watch for errors (token, repo path)" >&2
     exit 1
   fi
-  echo "attached to $SESS · detach with Ctrl-b then d (never Ctrl-C)" >&2
+  if [ "$ENGINE" != "codex" ]; then
+    echo "attached to $SESS · detach with Ctrl-b then d (never Ctrl-C)" >&2
+  fi
 fi
 
-exec "$TMUX_BIN" attach -t "$SESS"
+# Launch returned with a live session. Bind the engine read between two immutable
+# tmux generation reads; if down/migrate/up replaces the same session name in
+# the middle, the ids differ and attach refuses instead of landing on the other
+# engine's pane. Do not take the fleet-global writer lock here: attaching to an
+# unrelated running Claude TUI must remain available during repo setup.
+SESSION_BEFORE="$("$TMUX_BIN" display-message -p -t "$SESS" '#{session_id}' 2>/dev/null || true)"
+if ! resolve_engine_for_name "$NAME"; then
+  echo "swarm-attach: configured row changed or disappeared before attach" >&2
+  exit 1
+fi
+ENGINE="$RESOLVED_ENGINE"
+SESSION_TARGET="$("$TMUX_BIN" display-message -p -t "$SESS" '#{session_id}' 2>/dev/null || true)"
+case "$SESSION_BEFORE:$SESSION_TARGET" in
+  \$[0-9]*:\$[0-9]*) ;;
+  *) echo "swarm-attach: could not bind attach to immutable tmux session ids for $SESS" >&2; exit 1 ;;
+esac
+if [ "$SESSION_BEFORE" != "$SESSION_TARGET" ]; then
+  echo "swarm-attach: session $SESS was replaced while resolving its engine; retry attach" >&2
+  exit 1
+fi
+case "$SESSION_TARGET" in
+  \$[0-9]*) ;;
+  *) echo "swarm-attach: could not bind attach to the immutable tmux session id for $SESS" >&2; exit 1 ;;
+esac
+
+if [ "$ENGINE" = "codex" ]; then
+  echo "swarm-attach: '$NAME' uses engine=codex — opening the supported operator view (daemon pane stays hidden)" >&2
+  exec "$SWARM_VIEW" "$NAME"
+fi
+exec "$TMUX_BIN" attach -t "$SESSION_TARGET"

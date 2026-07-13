@@ -1,88 +1,177 @@
 #!/usr/bin/env bash
-# test-discord-reply-nudge.sh — the Stop nudge that reminds an engineering-cto
-# lead when a substantive response went to the terminal without a Discord post.
-#
-# Pins the SOFT, non-blocking contract: the hook NEVER blocks (always exit 0); it
-# emits an additionalContext nudge ONLY when (substantive lead text >= floor) AND
-# (no discord reply this turn). Silent when a reply happened (lead OR teammate-
-# sidechain), when the lead text is short/absent, or on a tool-only turn; and it
-# windows the CURRENT turn (a prior turn's reply doesn't suppress a new nudge).
-#
-# Run from $SWARM_HOME:  bash tests/test-discord-reply-nudge.sh
-# Exit 0 = all pass. bash 3.2-safe.
+# Compatibility test for the engineering Claude Stop adapter. Delivery/retry
+# policy is covered in swarm-harness/stop-delivery.test.ts; this pins the native
+# hook wiring, fail-closed launcher behavior, and durable queue boundary.
 
 set -uo pipefail
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOOK="$ROOT/templates/engineering-cto/hooks/discord-reply-nudge.sh"
+CHANNEL=1508921858165047390
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/stop-adapter.XXXXXX")"
+trap 'rm -rf "$TMP"' EXIT INT TERM
 
-PASS=0; FAIL=0; FAILURES=""
+PASS=0; FAIL=0
 pass(){ printf '  PASS  %s\n' "$1"; PASS=$((PASS+1)); }
-fail(){ printf '  FAIL  %s\n' "$1" >&2; FAIL=$((FAIL+1)); FAILURES="${FAILURES}
-  - $1"; }
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/nudge.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT INT TERM
+fail(){ printf '  FAIL  %s\n' "$1" >&2; FAIL=$((FAIL+1)); }
 
-# run_hook TRANSCRIPT -> echoes hook stdout; asserts the hook NEVER blocks (exit 0)
-run_hook(){
-  local t="$1" out rc
-  out="$(printf '{"hook_event_name":"Stop","stop_hook_active":false,"transcript_path":"%s"}' "$t" | bash "$HOOK" 2>/dev/null)"; rc=$?
-  [ "$rc" -eq 0 ] || fail "hook exited non-zero ($rc) — it must NEVER block"
-  printf '%s' "$out"
+echo '=== missing harness blocks Stop ==='
+out="$(printf '{}' | SWARM_HOME= bash "$HOOK" 2>/dev/null)"; rc=$?
+[ "$rc" -eq 2 ] && pass 'missing operator-controlled harness exits 2' || fail "missing harness rc=$rc"
+printf '%s' "$out" | grep -q '"decision":"block"' \
+  && pass 'missing harness emits a native block decision' || fail 'missing block decision'
+
+echo '=== failed Discord delivery becomes a verified private dead-letter ==='
+TRANSCRIPT="$TMP/transcript.jsonl"
+printf '%s\n' \
+  '{"type":"user","uuid":"u1","message":{"content":"task"}}' \
+  '{"type":"assistant","uuid":"a1","message":{"content":[{"type":"text","text":"Implemented the requested boundary and ran focused tests."}]}}' \
+  > "$TRANSCRIPT"
+STATE="$TMP/state"
+payload="$(printf '{"session_id":"session-1","task_id":"task-1","transcript_path":"%s"}' "$TRANSCRIPT")"
+printf '%s' "$payload" | env -u DISCORD_BOT_TOKEN \
+  SWARM_HOME="$ROOT" SWARM_NAME=press-backend DISCORD_BOUND_CHANNEL="$CHANNEL" \
+  SWARM_HARNESS_STATE_DIR="$STATE" bash "$HOOK" >/dev/null 2>"$TMP/stderr"; rc=$?
+[ "$rc" -eq 0 ] && pass 'durably queued stop may complete' || fail "queued stop rc=$rc"
+[ "$(find "$STATE/dead-letter" -type f -name '*.json' | wc -l | tr -d ' ')" = 1 ] \
+  && pass 'one dead-letter record written' || fail 'dead-letter record missing'
+[ "$(find "$STATE/audit" -type f -name '*.json' | wc -l | tr -d ' ')" = 1 ] \
+  && pass 'one audit record written' || fail 'audit record missing'
+python3 - "$STATE" <<'PY'
+import glob,json,os,stat,sys
+root=sys.argv[1]
+dead=json.load(open(glob.glob(root+'/dead-letter/*.json')[0]))
+audit=json.load(open(glob.glob(root+'/audit/*.json')[0]))
+assert dead['event']['runtime']=='claude'
+assert dead['event']['channelId']=='1508921858165047390'
+assert audit['outcome']['disposition']=='queued'
+for p in glob.glob(root+'/*/*.json'):
+    assert stat.S_IMODE(os.stat(p).st_mode)==0o600
+PY
+[ "$?" -eq 0 ] && pass 'queued event and private modes verify' || fail 'queued event verification failed'
+
+echo '=== Stop re-entry is idempotent ==='
+printf '%s' "$payload" | env -u DISCORD_BOT_TOKEN \
+  SWARM_HOME="$ROOT" SWARM_NAME=press-backend DISCORD_BOUND_CHANNEL="$CHANNEL" \
+  SWARM_HARNESS_STATE_DIR="$STATE" bash "$HOOK" >/dev/null 2>/dev/null; rc=$?
+[ "$rc" -eq 0 ] && pass 'replayed queued event completes' || fail "replay rc=$rc"
+[ "$(find "$STATE/dead-letter" -type f -name '*.json' | wc -l | tr -d ' ')" = 1 ] \
+  && pass 'replay does not duplicate dead-letter' || fail 'replay duplicated dead-letter'
+
+echo '=== lead and SubagentStop boundaries are distinct and durable ==='
+MULTI_STATE="$TMP/multi-state"
+for who in lead agent-a agent-b; do
+  transcript="$TMP/$who.jsonl"
+  printf '%s\n' \
+    "{\"type\":\"user\",\"uuid\":\"u-$who\",\"message\":{\"content\":\"task\"}}" \
+    "{\"type\":\"assistant\",\"uuid\":\"a-$who\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"$who boundary\"}]}}" \
+    > "$transcript"
+  if [ "$who" = lead ]; then
+    multi_payload="$(printf '{\"hook_event_name\":\"Stop\",\"session_id\":\"shared-session\",\"task_id\":\"shared-task\",\"stop_event_id\":\"same-native-id\",\"transcript_path\":\"%s\"}' "$transcript")"
+  else
+    multi_payload="$(printf '{\"hook_event_name\":\"SubagentStop\",\"session_id\":\"shared-session\",\"task_id\":\"shared-task\",\"stop_event_id\":\"same-native-id\",\"agent_id\":\"%s\",\"agent_transcript_path\":\"%s\"}' "$who" "$transcript")"
+  fi
+  printf '%s' "$multi_payload" | env -u DISCORD_BOT_TOKEN \
+    SWARM_HOME="$ROOT" SWARM_NAME=press-backend DISCORD_BOUND_CHANNEL="$CHANNEL" \
+    SWARM_HARNESS_STATE_DIR="$MULTI_STATE" bash "$HOOK" >/dev/null 2>/dev/null; rc=$?
+  [ "$rc" -eq 0 ] || fail "$who delivered-or-queued boundary rc=$rc"
+done
+[ "$(find "$MULTI_STATE/dead-letter" -type f -name '*.json' | wc -l | tr -d ' ')" = 3 ] \
+  && pass 'lead plus two subagents produce three distinct durable outcomes' \
+  || fail 'lead/subagent outcomes collided'
+[ "$(find "$MULTI_STATE/audit" -type f -name '*.json' | wc -l | tr -d ' ')" = 3 ] \
+  && pass 'every lead/subagent stop is audited' || fail 'subagent audit is incomplete'
+
+echo '=== both Claude templates register the same SubagentStop adapter ==='
+python3 - "$ROOT" <<'PY'
+import json,sys
+root=sys.argv[1]
+expected='bash "$CLAUDE_PROJECT_DIR/.claude/hooks/discord-reply-nudge.sh"'
+for kind in ('engineering-cto','cpo'):
+    value=json.load(open(f'{root}/templates/{kind}/settings.example.json'))
+    hooks=value['hooks']['SubagentStop']
+    commands=[entry['command'] for group in hooks for entry in group['hooks']]
+    assert commands == [expected], (kind,commands)
+PY
+[ "$?" -eq 0 ] && pass 'SubagentStop registration is symmetric' || fail 'SubagentStop registration drifted'
+
+echo '=== atomic parity receipt enables the Claude completion gate ==='
+ADOPT_STATE="$TMP/adopt-state"
+AUTHORITY="$TMP/adoption-authority"
+mkdir -m 700 "$ADOPT_STATE" "$AUTHORITY"
+ADOPT_STATE="$(cd "$ADOPT_STATE" && pwd -P)"
+AUTHORITY="$(cd "$AUTHORITY" && pwd -P)"
+ROOT_CANON="$(cd "$ROOT" && pwd -P)"
+POLICY_SHA="$(cd "$ROOT" && bun -e '
+  import { readFileSync } from "node:fs";
+  import { completionReviewPolicySha256, parseCompletionReviewPolicy } from "./swarm-harness/completion-review-policy.ts";
+  console.log(completionReviewPolicySha256(parseCompletionReviewPolicy(JSON.parse(readFileSync("./swarm-harness/completion-review-policy.json", "utf8")))));
+')"
+RECEIPT="$AUTHORITY/parity.json"
+python3 - "$RECEIPT" "$ADOPT_STATE" "$ROOT_CANON" "$POLICY_SHA" <<'PY'
+import json,os,sys
+path,state,repo,policy=sys.argv[1:]
+value={
+  'schema':'qofi-harness-parity-adoption/v1', 'contract':'claude-codex-v1',
+  'swarm':'press-backend', 'runtimes':['claude','codex'],
+  'state_root':state, 'roadmap_repo_root':repo,
+  'dr_refs':['ADR-0022','ADR-0023'], 'completion_policy_sha256':policy,
 }
+with open(path,'x') as f:
+    f.write(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n')
+os.chmod(path,0o600)
+PY
 
-# --- transcript line builders ---
-user_str(){ python3 -c 'import json,sys;print(json.dumps({"type":"user","message":{"content":sys.argv[1]}}))' "$1"; }
-asst_text(){ # text [sidechain=true|false]
-  python3 -c 'import json,sys
-print(json.dumps({"type":"assistant","isSidechain":(sys.argv[2]=="true"),
-  "message":{"content":[{"type":"thinking","thinking":"..."},{"type":"text","text":sys.argv[1]}]}}))' "$1" "${2:-false}"
+missing_payload='{"hook_event_name":"Stop","session_id":"adopted","task_id":"missing-review","stop_event_id":"native-missing","last_assistant_message":"must block"}'
+missing_out="$(printf '%s' "$missing_payload" | env -u DISCORD_BOT_TOKEN \
+  SWARM_HOME="$ROOT" SWARM_NAME=press-backend CLAUDE_PROJECT_DIR="$ROOT_CANON" \
+  DISCORD_BOUND_CHANNEL="$CHANNEL" SWARM_HARNESS_PARITY_RECEIPT="$RECEIPT" \
+  bash "$HOOK" 2>/dev/null)"; rc=$?
+[ "$rc" -eq 2 ] && pass 'adopted missing completion evidence blocks Stop' \
+  || fail "adopted missing evidence rc=$rc"
+printf '%s' "$missing_out" | grep -q '"decision":"block"' \
+  && pass 'adopted refusal emits native block decision' || fail 'adopted refusal lacks block decision'
+[ ! -d "$ADOPT_STATE/stops/dead-letter" ] || \
+  [ "$(find "$ADOPT_STATE/stops/dead-letter" -type f | wc -l | tr -d ' ')" = 0 ] \
+  && pass 'gate refusal performs no Discord/dead-letter delivery attempt' \
+  || fail 'gate refusal attempted delivery'
+
+valid_payload='{"hook_event_name":"Stop","session_id":"adopted","task_id":"reviewed-task","stop_event_id":"native-valid","last_assistant_message":"reviewed boundary","occurred_at_ms":4000}'
+EVENT_ID="$(cd "$ROOT" && PAYLOAD="$valid_payload" SWARM_NAME=press-backend CLAUDE_PROJECT_DIR="$ROOT_CANON" DISCORD_BOUND_CHANNEL="$CHANNEL" bun -e '
+  import { ClaudeStopAdapter } from "./swarm-harness/runtime-adapters.ts";
+  console.log(new ClaudeStopAdapter({env:process.env}).normalizeStop(JSON.parse(process.env.PAYLOAD)).eventId);
+')"
+RECEIPT_SHA="$(shasum -a 256 "$RECEIPT" | awk '{print $1}')"
+ENVELOPE_DIR="$ADOPT_STATE/completion-authority/claude/press-backend"
+mkdir -p -m 700 "$ENVELOPE_DIR"
+chmod 700 "$ADOPT_STATE/completion-authority" "$ADOPT_STATE/completion-authority/claude" "$ENVELOPE_DIR"
+python3 - "$ENVELOPE_DIR/reviewed-task.json" "$RECEIPT_SHA" "$EVENT_ID" <<'PY'
+import json,os,sys
+path,receipt,event=sys.argv[1:]
+diff='d'*64
+value={
+  'schema':'qofi-claude-completion-envelope/v1',
+  'adoption_receipt_sha256':receipt, 'runtime':'claude', 'swarm':'press-backend',
+  'task_id':'reviewed-task', 'stop_event_id':event, 'final_diff_sha256':diff,
+  'reviewed_paths':[],
+  'artifact':{
+    'schema':'qofi-harness-review-evidence/v1', 'artifact_id':'review-result',
+    'task_id':'reviewed-task', 'phase':'completion',
+    'reviewed_diff_sha256':diff, 'verdict':'approve',
+  },
 }
-asst_reply(){ # [sidechain=true|false]
-  python3 -c 'import json,sys
-print(json.dumps({"type":"assistant","isSidechain":(sys.argv[1]=="true"),
-  "message":{"content":[{"type":"tool_use","name":"mcp__plugin_discord-b2b_discord__reply","input":{"text":"posted"}}]}}))' "${1:-false}"
-}
-asst_tooluse(){ # a non-reply tool_use only, no text
-  printf '{"type":"assistant","isSidechain":false,"message":{"content":[{"type":"tool_use","name":"Read","input":{}}]}}'
-}
-LONG="This is a substantial operator-facing status update that comfortably exceeds the 150-character floor, so the nudge should treat it as a real response that ought to be delivered to Discord."
+with open(path,'x') as f:
+    f.write(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n')
+os.chmod(path,0o600)
+PY
+printf '%s' "$valid_payload" | env -u DISCORD_BOT_TOKEN \
+  SWARM_HOME="$ROOT" SWARM_NAME=press-backend CLAUDE_PROJECT_DIR="$ROOT_CANON" \
+  DISCORD_BOUND_CHANNEL="$CHANNEL" SWARM_HARNESS_PARITY_RECEIPT="$RECEIPT" \
+  bash "$HOOK" >/dev/null 2>/dev/null; rc=$?
+[ "$rc" -eq 0 ] && pass 'exact receipt-bound completion artifact may stop' \
+  || fail "valid adopted artifact rc=$rc"
+[ "$(find "$ADOPT_STATE/stops/dead-letter" -type f -name '*.json' | wc -l | tr -d ' ')" = 1 ] \
+  && pass 'valid gate proceeds into legacy-compatible delivered-or-queued transport' \
+  || fail 'valid gate did not reach transport'
 
-echo "=== 1) substantive lead text, NO reply -> NUDGE ==="
-F="$TMP/t1.jsonl"; { user_str "do the thing"; asst_text "$LONG"; } > "$F"
-out="$(run_hook "$F")"
-printf '%s' "$out" | grep -q 'additionalContext'    && pass "text-without-reply -> nudge emitted" || fail "expected a nudge"
-printf '%s' "$out" | grep -q 'discord reply tool'   && pass "nudge names the discord reply tool"  || fail "nudge should name the tool"
-printf '%s' "$out" | grep -q '"decision"'           && fail "nudge must NOT carry a block decision" || pass "nudge is non-blocking (no decision:block)"
-
-echo "=== 2) lead posted a reply -> SILENT ==="
-F="$TMP/t2.jsonl"; { user_str "do the thing"; asst_reply false; asst_text "$LONG"; } > "$F"
-[ -z "$(run_hook "$F")" ] && pass "lead reply present -> silent" || fail "should be silent when the lead replied"
-
-echo "=== 3) teammate (sidechain) reply -> SILENT (reply-anywhere, Q3) ==="
-F="$TMP/t3.jsonl"; { user_str "do the thing"; asst_reply true; asst_text "$LONG"; } > "$F"
-[ -z "$(run_hook "$F")" ] && pass "teammate-delivered reply -> silent" || fail "should be silent when a teammate posted"
-
-echo "=== 4) short lead text (< floor) -> SILENT ==="
-F="$TMP/t4.jsonl"; { user_str "do the thing"; asst_text "on it"; } > "$F"
-[ -z "$(run_hook "$F")" ] && pass "short text -> silent (below floor)" || fail "short text should not nudge"
-
-echo "=== 5) tool-only final (no operator-facing text) -> SILENT ==="
-F="$TMP/t5.jsonl"; { user_str "do the thing"; asst_tooluse; } > "$F"
-[ -z "$(run_hook "$F")" ] && pass "tool-only turn -> silent" || fail "tool-only should not nudge"
-
-echo "=== 6) prior turn delivered; CURRENT turn has substantive text + no reply -> NUDGE ==="
-F="$TMP/t6.jsonl"; { user_str "first"; asst_reply false; user_str "second"; asst_text "$LONG"; } > "$F"
-printf '%s' "$(run_hook "$F")" | grep -q 'additionalContext' && pass "windows the current turn (prior reply doesn't count)" || fail "should nudge on the new turn"
-
-echo "=== 7) fail-open: unreadable transcript -> silent, exit 0 ==="
-out="$(printf '{"hook_event_name":"Stop","stop_hook_active":false,"transcript_path":"/no/such/file.jsonl"}' | bash "$HOOK" 2>/dev/null)"; rc=$?
-{ [ "$rc" -eq 0 ] && [ -z "$out" ]; } && pass "missing transcript -> fail-open silent exit 0" || fail "fail-open expected"
-
-echo "=== 8) stop_hook_active=true -> silent (no re-entry) ==="
-F="$TMP/t8.jsonl"; { user_str "do the thing"; asst_text "$LONG"; } > "$F"
-out="$(printf '{"hook_event_name":"Stop","stop_hook_active":true,"transcript_path":"%s"}' "$F" | bash "$HOOK" 2>/dev/null)"
-[ -z "$out" ] && pass "stop_hook_active -> silent" || fail "should be silent under stop_hook_active"
-
-echo; printf '  PASS: %d   FAIL: %d\n' "$PASS" "$FAIL"
-[ "$FAIL" -eq 0 ] || { printf '\nFailures:%b\n' "$FAILURES" >&2; exit 1; }
-exit 0
+printf '\n  PASS: %d   FAIL: %d\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]

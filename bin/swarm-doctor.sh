@@ -76,6 +76,8 @@ NAME="$1"
 CONF="$SWARM_HOME/swarm.conf"
 CTO_WATCHER_CONFIG="${CTO_WATCHER_CONFIG:-$SWARM_HOME/cto-watcher/config.json}"
 CTO_BUS_WATCHER_BOT_ID="${CTO_BUS_WATCHER_BOT_ID:-1510298728148369448}"
+SWARM_OWNER_DISCORD_ID="${SWARM_OWNER_DISCORD_ID:-1507069153335443608}"
+SWARM_BUS_CHANNEL="${SWARM_BUS_CHANNEL:-1510301812434141194}"
 # ACCESS is resolved from THIS swarm's account (swarm.conf field 6), below,
 # once its row is parsed — never a hand-built $HOME/.claude path. An empty
 # account (every row today) resolves byte-for-byte to today's path, honoring
@@ -91,6 +93,7 @@ REPO=""
 TOKVAR=""
 CHANNEL=""
 ACCOUNT=""
+ENGINE=""
 FOUND=0
 while IFS= read -r _line; do
   swarm_conf_parse_line "$_line" || continue
@@ -99,6 +102,7 @@ while IFS= read -r _line; do
     TOKVAR="$SWARM_CONF_F_TOKVAR"
     CHANNEL="$SWARM_CONF_F_CHANNEL"
     ACCOUNT="$SWARM_CONF_F_ACCOUNT"
+    ENGINE="$SWARM_CONF_F_ENGINE"
     FOUND=1
     break
   fi
@@ -112,7 +116,9 @@ fi
 # Resolve the access.json for THIS swarm's account (field 6, empty today). The
 # resolver is the SOLE constructor of the path: an empty account maps to today's
 # $HOME/.claude/... (honoring SWARM_ACCESS_FILE), a label to its isolated dir.
-swarm_account_resolve "$ACCOUNT" || {
+ACCESS_ACCOUNT="$ACCOUNT"
+[ "$ENGINE" = "codex" ] && ACCESS_ACCOUNT=""
+swarm_account_resolve "$ACCESS_ACCOUNT" || {
   echo "swarm-doctor: invalid account '$ACCOUNT' in swarm.conf row for '$NAME'" >&2
   exit 2
 }
@@ -127,24 +133,66 @@ echo "===================================================================="
 echo "swarm-doctor: $NAME"
 echo "  repo:    $REPO"
 echo "  type:    $REPO_TYPE"
+echo "  engine:  $ENGINE"
 echo "  channel: ${CHANNEL:-<none>}"
 echo "===================================================================="
+
+# Assertion machinery is initialized before archetype dispatch because Codex
+# CPO rows have engine-native ACL requirements even though the historical CTO
+# bus checklist does not apply to them.
+BLOCKED=0
+pass() { printf '  PASS  %s\n' "$1"; }
+fail() { printf '  FAIL  %s\n' "$1" >&2; BLOCKED=1; }
+
+if [ "$ENGINE" = "codex" ]; then
+  if CODEX_ACL_OUT="$(/usr/bin/python3 -I -B - "$ACCESS" "$CHANNEL" "$REPO_TYPE" "$SWARM_BUS_CHANNEL" "$SWARM_OWNER_DISCORD_ID" "$CTO_BUS_WATCHER_BOT_ID" <<'PY'
+import json, os, stat, sys
+path, primary, archetype, bus, owner, watcher = sys.argv[1:7]
+try:
+    st=os.lstat(path); parent=os.path.dirname(os.path.realpath(path)); pst=os.lstat(parent)
+    if (not stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode)
+            or st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) != 0o600):
+        raise ValueError('file must be current-user regular mode 0600')
+    if (not stat.S_ISDIR(pst.st_mode) or stat.S_ISLNK(pst.st_mode)
+            or pst.st_uid != os.getuid() or stat.S_IMODE(pst.st_mode) != 0o700):
+        raise ValueError('parent must be current-user real mode 0700')
+    cfg=json.load(open(path)); top=cfg.get('allowFrom')
+    if not isinstance(top,list) or owner not in top:
+        raise ValueError('top-level allowFrom lacks the explicit operator id')
+    channels=[primary] + ([bus] if archetype == 'cpo' and bus != primary else [])
+    for channel in channels:
+        group=(cfg.get('groups') or {}).get(channel)
+        allow=group.get('allowFrom') if isinstance(group,dict) else None
+        if not isinstance(allow,list) or owner not in allow:
+            raise ValueError('group %s lacks the explicit operator id' % channel)
+    if archetype == 'cpo' and watcher not in cfg['groups'][bus]['allowFrom']:
+        raise ValueError('CPO bus group lacks the watcher id')
+except Exception as exc:
+    print(str(exc)); raise SystemExit(1)
+print('mode 0600; explicit operator; effective groups=' + ','.join(channels))
+PY
+)"; then
+    pass "Codex canonical ACL: $CODEX_ACL_OUT"
+  else
+    fail "Codex canonical ACL: ${CODEX_ACL_OUT:-missing/unreadable} ($ACCESS)"
+  fi
+fi
 
 if [ "$REPO_TYPE" != "engineering-cto" ]; then
   echo "  type '$REPO_TYPE' is not a CTO — the #cpo-cto-bus operational set"
   echo "  does not apply. (Doctrine/token checks for non-CTO archetypes are"
   echo "  swarm-up's preflight gates, not swarm-doctor's bus precondition set.)"
-  echo "  PASS (n/a): not a CTO swarm; no bus preconditions to assert."
+  if [ "$BLOCKED" -ne 0 ]; then
+    echo "swarm-doctor: BLOCKED — '$NAME' has an engine-native operational gap." >&2
+    exit 1
+  fi
+  echo "  PASS (n/a): not a CTO swarm; no CTO bus preconditions to assert."
   exit 0
 fi
 
 # ---------------------------------------------------------------------------
 # Assertion machinery. Each check prints PASS/FAIL; any FAIL flips BLOCKED.
 # ---------------------------------------------------------------------------
-BLOCKED=0
-pass() { printf '  PASS  %s\n' "$1"; }
-fail() { printf '  FAIL  %s\n' "$1" >&2; BLOCKED=1; }
-
 # --- 1) doctrine stamped --------------------------------------------------
 # (a) required doctrine files present (per archetype).
 MISSING=""
@@ -158,11 +206,14 @@ else
   pass "doctrine stamped: required files present ($(swarm_required_doctrine "$REPO_TYPE" | tr '\n' ' '))"
 fi
 
-# (b) enabledPlugins[discord-b2b@qofi-swarm] === true (bridge MCP spawns).
+# (b) Claude rows require the channel plugin. Codex uses its direct bridge and
+# must never be diagnosed against Claude's plugin/account runtime.
 SETTINGS="$REPO/.claude/settings.json"
-if [ ! -f "$SETTINGS" ]; then
+if [ "$ENGINE" = "codex" ]; then
+  pass "Claude channel plugin: n/a (engine=codex uses codex-bridge)"
+elif [ ! -f "$SETTINGS" ]; then
   fail "doctrine stamped: $SETTINGS missing (bridge plugin cannot be verified)"
-elif python3 - "$SETTINGS" "$PLUGIN_KEY" <<'PY' >/dev/null 2>&1
+elif /usr/bin/python3 -I -B - "$SETTINGS" "$PLUGIN_KEY" <<'PY' >/dev/null 2>&1
 import json, sys
 try:
     s = json.load(open(sys.argv[1]))
@@ -175,6 +226,54 @@ then
   pass "doctrine stamped: enabledPlugins[\"$PLUGIN_KEY\"] === true"
 else
   fail "doctrine stamped: enabledPlugins[\"$PLUGIN_KEY\"] not true in $SETTINGS (bridge MCP will not spawn)"
+fi
+
+# Codex-native diagnostics. These are read-only and use the same bounded CLI
+# line/auth/config contracts as the unattended launcher. Runtime is checked
+# when present; a stopped daemon is n/a rather than a wiring failure.
+if [ "$ENGINE" = "codex" ]; then
+  CODEX_HOST_OK=0
+  if swarm_codex_host_preflight "$REPO"; then
+    CODEX_HOST_OK=1
+    pass "Codex CLI: trusted canonical executable, bounded version $SWARM_CODEX_CLI_VERSION"
+    pass "Codex auth: exact ChatGPT subscription status verified"
+    pass "Codex runtime authority: $SWARM_CODEX_RUNTIME_SCHEMA via $SWARM_CODEX_RUNNER (uid=$SWARM_CODEX_RUNTIME_UID group=$SWARM_CODEX_RUNTIME_GROUP)"
+  else
+    fail "Codex host/auth: trusted bounded preflight failed"
+  fi
+
+  if [ -e "$REPO/.codex/config.toml" ] || [ -L "$REPO/.codex/config.toml" ]; then
+    if [ "$CODEX_HOST_OK" -eq 1 ] && \
+       /usr/bin/env -i HOME="$SWARM_CODEX_CANONICAL_HOME" CODEX_HOME="$SWARM_CODEX_CANONICAL_CODEX_HOME" \
+       PATH="$SWARM_CODEX_TOOL_PATH" LANG=C LC_ALL=C \
+       "$SWARM_CODEX_TRUSTED_BUN_REAL" --no-env-file --config=/dev/null --no-install \
+       --no-addons --no-macros --cwd="$SWARM_HOME/codex-bridge" \
+       "$SWARM_HOME/bin/codex-project-config-check.ts" "$REPO/.codex/config.toml" >/dev/null 2>&1; then
+      pass "Codex project config: strict allowlist passes"
+    else
+      fail "Codex project config: unsafe/unreviewed or checker unavailable"
+    fi
+  else
+    pass "Codex project config: n/a (no .codex/config.toml)"
+  fi
+  if [ -e "$(swarm_codex_state_dir "$NAME")/runtime.json" ]; then
+    if swarm_codex_runtime_read "$NAME"; then
+      pass "Codex runtime: healthy (ready=$SWARM_CODEX_RUNTIME_READY active=$SWARM_CODEX_RUNTIME_ACTIVE queued=$SWARM_CODEX_RUNTIME_QUEUE_DEPTH)"
+    else
+      fail "Codex runtime: $SWARM_CODEX_RUNTIME_STATUS ($SWARM_CODEX_RUNTIME_FILE)"
+    fi
+  else
+    pass "Codex runtime: n/a (daemon not currently running)"
+  fi
+  if [ -f "$REPO/.codex/hooks.json" ] && /usr/bin/python3 -I -B - "$REPO/.codex/hooks.json" <<'PY' >/dev/null 2>&1
+import json,sys
+assert json.load(open(sys.argv[1])) == {"hooks": {}}
+PY
+  then
+    pass "Codex command hooks: empty managed neutralizer present"
+  else
+    fail "Codex command hooks: .codex/hooks.json is not the empty neutralizer"
+  fi
 fi
 
 # --- 2) bot token PRESENT (presence only — value NEVER read/printed) -------
@@ -192,7 +291,7 @@ fi
 if [ ! -f "$CTO_WATCHER_CONFIG" ]; then
   fail "config.json ctoChannels: $CTO_WATCHER_CONFIG not found"
 else
-  CFG_OUT="$(python3 - "$CTO_WATCHER_CONFIG" "$NAME" "$CHANNEL" <<'PY'
+  CFG_OUT="$(/usr/bin/python3 -I -B - "$CTO_WATCHER_CONFIG" "$NAME" "$CHANNEL" <<'PY'
 import json, sys
 path, name, channel = sys.argv[1], sys.argv[2], sys.argv[3]
 try:
@@ -223,7 +322,7 @@ if [ -z "$CHANNEL" ]; then
   fail "access.json allowFrom: swarm.conf row has no channel id"
 elif [ ! -f "$ACCESS" ]; then
   fail "access.json allowFrom: $ACCESS not found"
-elif python3 - "$ACCESS" "$CHANNEL" "$CTO_BUS_WATCHER_BOT_ID" <<'PY' >/dev/null 2>&1
+elif /usr/bin/python3 -I -B - "$ACCESS" "$CHANNEL" "$CTO_BUS_WATCHER_BOT_ID" <<'PY' >/dev/null 2>&1
 import json, sys
 path, channel, watcher = sys.argv[1], sys.argv[2], sys.argv[3]
 try:

@@ -84,8 +84,8 @@
 #   gitignore   append the line in template-path to .gitignore idempotently.
 #
 # behavior   | template-path                                                                                            | target-path
-compose      | engineering-cto/CLAUDE.preamble.md+_base/CLAUDE.md+engineering-cto/CLAUDE.md                              | CLAUDE.md                 | teammate operating manual: honesty/verification floor, testing-mock policy, modular design + single-caller carve-out, data ownership, error/logging/operability, skill standards, DoD + beyond-ask disclosure
-refresh      | _base/AGENTS.md                                                                                           | AGENTS.md                 | agents.md pointer: canonical instructions live in CLAUDE.md; read+follow it before any work
+compose      | engineering-cto/CLAUDE.preamble.md+_base/CLAUDE.md+_base/SWARM_BEHAVIOR.md+engineering-cto/CLAUDE.md      | CLAUDE.md                 | teammate operating manual: honesty/verification floor, harness lifecycle/review/grounding policy, testing-mock policy, modular design + single-caller carve-out, data ownership, error/logging/operability, skill standards, DoD + beyond-ask disclosure
+compose      | engineering-cto/AGENTS.md+_base/CLAUDE.md+_base/SWARM_BEHAVIOR.md                                         | AGENTS.md                 | Codex entrypoint plus byte-identical shared doctrine fragments: direct doctrine/test/review routing, lead-vs-teammate split, and harness enforcement boundaries
 compose      | engineering-cto/ESCALATION.preamble.md+_base/ESCALATION.md+engineering-cto/ESCALATION.md                  | ESCALATION.md             | when to stop-and-ask vs proceed: one-way vs two-way doors, no-silence-as-consent, grave-action floors, agent->CTO triggers (incl shared-contract contention)
 refresh      | engineering-cto/TEAM_LEAD.md                                                                              | TEAM_LEAD.md              | CTO-only brief (not loaded by teammates): doc authoring, decomposition, worktree provisioning + one-writer contract lease, spawning, review, dev integration, assumption-note fold
 seed         | engineering-cto/PROJECT_SPEC.template.md                                                                  | PROJECT_SPEC.md           | this swarm's own spec: scope (sec3), acceptance (sec4), architecture (sec6), build log (sec10)
@@ -98,9 +98,15 @@ refresh      | engineering-cto/hooks/dod-affirm.sh                              
 refresh      | engineering-cto/hooks/canon-check.sh                                                                      | .claude/hooks/canon-check.sh | TaskCompleted: external-canon validation gate (CANON_SYNC metadata, module doc packs, CODE_MAP/TEST_MAP path existence, INVARIANTS coverage, OPEN_GAPS→GAP_LEDGER routing); guaranteed no-op in local-canon repos
 refresh      | engineering-cto/hooks/quality-check.sh                                                                    | .claude/hooks/quality-check.sh   | PostToolUse: per-file lint/typecheck nudge on edit (non-blocking); honors QOFI_* runtime controls
 refresh      | engineering-cto/hooks/session-summary.sh                                                                  | .claude/hooks/session-summary.sh | Stop: writes in-repo .claude/session-summary.md resume aid (never evidence, never ~/.claude)
-refresh      | engineering-cto/hooks/discord-reply-nudge.sh                                                              | .claude/hooks/discord-reply-nudge.sh | Stop: non-blocking nudge when a lead's substantive response went to the terminal without a Discord post (CPO exempt)
+refresh      | engineering-cto/hooks/discord-reply-nudge.sh                                                              | .claude/hooks/discord-reply-nudge.sh | Stop: thin native adapter to harness-owned verified Discord delivery, retry, private dead-letter, and per-event audit
 refresh      | _base/hooks/session-doctrine.sh                                                                           | .claude/hooks/session-doctrine.sh | SessionStart: injects the doctrine-read directive (TEAM_LEAD/ESCALATION/PROJECT_SPEC) into every session — the race-free guarantee behind the tmux launch brief
 settings     | engineering-cto/settings.example.json                                                                     | .claude/settings.json
+# Codex-native project layer. Command hooks are deliberately neutralized:
+# Codex 0.144.x executes trusted hook commands outside its tool sandbox, and a
+# definition hash does not make referenced repo scripts immutable. Keep an
+# explicit empty hooks file so sync also disables unsafe older Qofi hook sets.
+refresh      | engineering-cto/codex/hooks.json                                                                          | .codex/hooks.json
+refresh      | _base/codex/rules/qofi-hard-floor.rules                                                                   | .codex/rules/qofi-hard-floor.rules | experimental execpolicy: outside-sandbox forbidden prefixes for unambiguous hard-floor commands
 git-hook     | engineering-cto/git-hooks/pre-commit                                                                      | .git/hooks/pre-commit
 gitignore    | .claude/worktrees/                                                                                        | .gitignore
 gitignore    | .claude/session-summary.md                                                                                | .gitignore
@@ -118,6 +124,16 @@ refresh      | engineering-cto/skills/review-checklist-swift-ios/SKILL.md       
 refresh      | engineering-cto/skills/perf-budgets/SKILL.md                                                              | .claude/skills/perf-budgets/SKILL.md | on-demand performance-budget playbook for UI products (bundle/latency/Core Web Vitals before-after delta vs declared budget); floor DoD hook stays in CLAUDE.md §Performance budgets
 refresh      | engineering-cto/skills/at-scale-ops/SKILL.md                                                              | .claude/skills/at-scale-ops/SKILL.md | on-demand at-scale batch-op playbook (logging/observability + operability detail: structured logs, levels, run-ids, per-run summary, operator/support/audit controls); floor DoD hooks stay in CLAUDE.md §Error handling/§Logging/§Operability
 refresh      | engineering-cto/skills/data-migrations/SKILL.md                                                          | .claude/skills/data-migrations/SKILL.md | on-demand data-migration playbook (expand-contract steps, batched idempotent backfill, at-scale online patterns, test-on-a-copy); floor safety + DoD hooks stay in CLAUDE.md §Data migrations
+# Codex discovers repo skills under .agents/skills. These are intentionally
+# small route shims to the canonical .claude skill bodies stamped above.
+refresh      | engineering-cto/codex/skills/ts-node-stack/SKILL.md                                                      | .agents/skills/ts-node-stack/SKILL.md
+refresh      | engineering-cto/codex/skills/dead-code-scan/SKILL.md                                                     | .agents/skills/dead-code-scan/SKILL.md
+refresh      | engineering-cto/codex/skills/review-checklist-ts-node/SKILL.md                                           | .agents/skills/review-checklist-ts-node/SKILL.md
+refresh      | engineering-cto/codex/skills/review-checklist-python-uv/SKILL.md                                         | .agents/skills/review-checklist-python-uv/SKILL.md
+refresh      | engineering-cto/codex/skills/review-checklist-swift-ios/SKILL.md                                         | .agents/skills/review-checklist-swift-ios/SKILL.md
+refresh      | engineering-cto/codex/skills/perf-budgets/SKILL.md                                                       | .agents/skills/perf-budgets/SKILL.md
+refresh      | engineering-cto/codex/skills/at-scale-ops/SKILL.md                                                       | .agents/skills/at-scale-ops/SKILL.md
+refresh      | engineering-cto/codex/skills/data-migrations/SKILL.md                                                    | .agents/skills/data-migrations/SKILL.md
 # R4 local semgrep ruleset (consumed by security-scan.sh via SEMGREP_CONFIG; not a skill).
 refresh      | engineering-cto/semgrep/qofi-doctrine.yml                                                                 | .claude/semgrep/qofi-doctrine.yml | R4 semgrep rules: error-handling/DB/suppression/bounded-loop/private-import; pin via SEMGREP_CONFIG in security-scan.sh
 # Repo-LOCAL semgrep extension: seeded once, NEVER refreshed — the CTO's channel for

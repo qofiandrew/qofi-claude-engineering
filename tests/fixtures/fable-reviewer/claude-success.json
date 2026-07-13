@@ -1,0 +1,18 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "structured_output": {
+    "schema": "qofi-adversarial-review-output/v2",
+    "verdict": "approve",
+    "summary": "The bounded change preserves the reviewed invariants.",
+    "checked": [
+      "The supplied diff and named invariant context."
+    ],
+    "not_checked": [
+      "Live process adoption and external service behavior were not available in the supplied data."
+    ],
+    "findings": [],
+    "next_steps": []
+  }
+}

@@ -1,8 +1,24 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'fs'
+import { spawnSync } from 'child_process'
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  readFileSync,
+  writeFileSync,
+} from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { AccessStore, gate, defaultAccess, type Access, type InboundMeta } from './gate.ts'
+import {
+  AccessStore,
+  gate,
+  defaultAccess,
+  revalidateDeliveryAuthorization,
+  type Access,
+  type InboundMeta,
+} from './gate.ts'
 
 let dir: string
 let store: AccessStore
@@ -98,9 +114,18 @@ describe('DM gating', () => {
 describe('guild gating', () => {
   const withGroup = (channelId: string, policy: Partial<Access['groups'][string]> = {}) => {
     const a = store.load()
-    a.groups[channelId] = { requireMention: false, allowFrom: [], ...policy }
+    a.groups[channelId] = { requireMention: false, allowFrom: ['u1'], ...policy }
     store.save(a)
+    return a
   }
+
+  test('disabling DMs does not disable an explicitly allowed guild channel', async () => {
+    const a = withGroup('c1')
+    a.dmPolicy = 'disabled'
+    store.save(a)
+    const r = await gate(guild('u1', 'c1'), deps())
+    expect(r.action).toBe('deliver')
+  })
 
   test('message in a channel with no group entry drops', async () => {
     const r = await gate(guild('u1', 'chan1'), deps())
@@ -111,6 +136,12 @@ describe('guild gating', () => {
     withGroup('chan1')
     const r = await gate(guild('u1', 'chan1'), deps())
     expect(r.action).toBe('deliver')
+  })
+
+  test('empty guild allowFrom fails closed', async () => {
+    withGroup('chan1', { allowFrom: [] })
+    const r = await gate(guild('u1', 'chan1'), deps())
+    expect(r).toEqual({ action: 'drop', reason: 'group allowFrom is empty (fail closed)' })
   })
 
   test('bound channel list drops other channels even when opted in', async () => {
@@ -133,6 +164,120 @@ describe('guild gating', () => {
     expect((await gate(guild('u1', 'chan1', false), deps())).action).toBe('drop')
     expect((await gate(guild('u1', 'chan1', true), deps())).action).toBe('deliver')
   })
+
+})
+
+describe('live canonical authorization ceiling', () => {
+  test.skipIf(process.platform !== 'darwin')(
+    'rejects live extended ACL drift on the canonical file and parent',
+    async () => {
+      const parent = join(dir, 'canonical-private')
+      mkdirSync(parent, { mode: 0o700 })
+      chmodSync(parent, 0o700)
+      const canonical = join(parent, 'access.json')
+      writeFileSync(canonical, JSON.stringify({
+        dmPolicy: 'allowlist', allowFrom: ['operator'], groups: {}, pending: {},
+      }), { mode: 0o600 })
+      chmodSync(canonical, 0o600)
+      const local = defaultAccess()
+      local.allowFrom = ['operator']
+      store.save(local)
+      const canonicalDeps = deps({ canonicalAccessFile: realpathSync(canonical) })
+      const message = dm('operator')
+      expect((await gate(message, canonicalDeps)).action).toBe('deliver')
+
+      const chmod = (...args: string[]) => spawnSync('/bin/chmod', args, { encoding: 'utf8' })
+      try {
+        expect(chmod('+a', 'everyone allow read,write', canonical).status).toBe(0)
+        expect(await gate(message, canonicalDeps)).toEqual({
+          action: 'drop', reason: 'canonical access unavailable or invalid (fail closed)',
+        })
+        expect((await revalidateDeliveryAuthorization(message, canonicalDeps)).ok).toBe(false)
+        expect(chmod('-N', canonical).status).toBe(0)
+
+        expect(chmod('+a', 'everyone allow read,write', parent).status).toBe(0)
+        expect((await gate(message, canonicalDeps)).action).toBe('drop')
+        expect((await revalidateDeliveryAuthorization(message, canonicalDeps)).ok).toBe(false)
+      } finally {
+        spawnSync('/bin/chmod', ['-RN', parent])
+      }
+    },
+  )
+
+  test('a queued delivery is revoked when canonical sender/channel access changes before execution', async () => {
+    const canonical = join(dir, 'queued-canonical.json')
+    const local = defaultAccess()
+    local.groups.chan1 = { requireMention: false, allowFrom: ['watcher'] }
+    store.save(local)
+    const writeCanonical = (groups: Record<string, unknown>) => {
+      writeFileSync(canonical, JSON.stringify({
+        dmPolicy: 'allowlist', allowFrom: [], groups, pending: {},
+      }), { mode: 0o600 })
+    }
+    writeCanonical({ chan1: { requireMention: false, allowFrom: ['watcher'] } })
+    const queued = guild('watcher', 'chan1')
+    const recheckDeps = {
+      store,
+      boundChannels: ['chan1'],
+      canonicalAccessFile: realpathSync(canonical),
+    }
+    expect(await revalidateDeliveryAuthorization(queued, recheckDeps))
+      .toMatchObject({ ok: true })
+
+    writeCanonical({ chan1: { requireMention: false, allowFrom: ['operator'] } })
+    expect(await revalidateDeliveryAuthorization(queued, recheckDeps)).toEqual({
+      ok: false,
+      reason: 'sender/channel revoked by canonical group policy',
+    })
+    writeCanonical({})
+    expect((await revalidateDeliveryAuthorization(queued, recheckDeps)).ok).toBe(false)
+  })
+
+  test('freshly re-reads guild revocations and fails closed on malformed state', async () => {
+    const canonical = join(dir, 'canonical.json')
+    const local = defaultAccess()
+    local.allowFrom = ['operator']
+    local.groups.chan1 = { requireMention: false, allowFrom: ['operator', 'watcher'] }
+    store.save(local)
+    const writeCanonical = (allowFrom: string[]) => writeFileSync(canonical, JSON.stringify({
+      dmPolicy: 'allowlist',
+      allowFrom: ['operator'],
+      groups: { chan1: { requireMention: false, allowFrom } },
+      pending: {},
+    }), { mode: 0o600 })
+    writeCanonical(['operator', 'watcher'])
+    const canonicalDeps = deps({ canonicalAccessFile: realpathSync(canonical) })
+    expect((await gate(guild('watcher', 'chan1'), canonicalDeps)).action).toBe('deliver')
+
+    writeCanonical(['operator'])
+    expect(await gate(guild('watcher', 'chan1'), canonicalDeps)).toEqual({
+      action: 'drop', reason: 'sender revoked by canonical group allowFrom',
+    })
+    writeFileSync(canonical, '{broken')
+    expect(await gate(guild('operator', 'chan1'), canonicalDeps)).toEqual({
+      action: 'drop', reason: 'canonical access unavailable or invalid (fail closed)',
+    })
+    rmSync(canonical)
+    expect((await gate(guild('operator', 'chan1'), canonicalDeps)).action).toBe('drop')
+  })
+
+  test('local DM pairing/allowlist cannot override canonical revocation', async () => {
+    const canonical = join(dir, 'canonical-dm.json')
+    const local = defaultAccess()
+    local.allowFrom = ['operator']
+    store.save(local)
+    writeFileSync(canonical, JSON.stringify({
+      dmPolicy: 'allowlist', allowFrom: ['operator'], groups: {}, pending: {},
+    }), { mode: 0o600 })
+    const canonicalDeps = deps({ canonicalAccessFile: realpathSync(canonical) })
+    expect((await gate(dm('operator'), canonicalDeps)).action).toBe('deliver')
+    writeFileSync(canonical, JSON.stringify({
+      dmPolicy: 'allowlist', allowFrom: [], groups: {}, pending: {},
+    }))
+    expect(await gate(dm('operator'), canonicalDeps)).toEqual({
+      action: 'drop', reason: 'sender revoked by canonical DM allowFrom',
+    })
+  })
 })
 
 describe('AccessStore', () => {
@@ -143,6 +288,30 @@ describe('AccessStore', () => {
   test('corrupt file is moved aside and defaults returned', () => {
     writeFileSync(join(dir, 'access.json'), '{not json')
     expect(store.load().dmPolicy).toBe('pairing')
+  })
+
+  test('valid JSON with malformed shapes cannot broaden DM or guild access', async () => {
+    writeFileSync(join(dir, 'access.json'), JSON.stringify({
+      dmPolicy: 'pairing',
+      allowFrom: 'u1',
+      groups: {
+        chan1: { requireMention: 'no', allowFrom: 'u1' },
+      },
+      pending: [],
+      textChunkLimit: '999999',
+    }))
+    const loaded = store.load()
+    expect(loaded.allowFrom).toEqual([])
+    expect(loaded.groups.chan1).toEqual({ requireMention: true, allowFrom: [] })
+    expect(loaded.pending).toEqual({})
+    expect(loaded.textChunkLimit).toBeUndefined()
+    expect((await gate(dm('u1'), deps({ makeCode: () => 'safe01' }))).action).toBe('pair')
+    expect((await gate(guild('u1', 'chan1', true), deps())).action).toBe('drop')
+  })
+
+  test('non-object JSON is quarantined like invalid JSON', () => {
+    writeFileSync(join(dir, 'access.json'), 'null')
+    expect(store.load()).toEqual(defaultAccess())
   })
 
   test('static mode downgrades pairing to allowlist and ignores writes', () => {

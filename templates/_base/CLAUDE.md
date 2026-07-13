@@ -92,14 +92,14 @@ is **effectively lost.**
   shell output, working notes. Never the thing you need the operator to read.
 - **Intra-swarm agent-to-agent communication is out of scope** here; this rule
   governs human I/O. Coordination inside the swarm uses the archetype's playbook.
-- **A Stop nudge backs this up.** When a response cycle produces a substantive
-  operator-facing reply but posts nothing to Discord, a non-blocking nudge reminds
-  the lead that the terminal is unmonitored — deliver via the Discord reply tool
-  (or a `.md` file per §*Message length*). The engineering-cto lead is nudged on
-  any such turn; the CPO is nudged **only on an operator-origin turn** (a prompt
-  from #qofi-product), never on a bus/CTO turn — its silence-by-default toward CTOs
-  is correct and stays unnudged. The nudge changes WHERE operator-facing output
-  goes, never WHEN the CPO speaks to a CTO.
+- **Harness-owned Stop delivery enforces the boundary.** The final assistant
+  summary is data passed to the lifecycle harness; the harness itself performs
+  the Discord send and verifies the returned receipt. A transient failure is
+  retried with bounded backoff. Exhaustion writes an owner-private dead-letter
+  and attempts a label-only fallback escalation. Every Stop gets a durable audit
+  outcome, and the worker is not stopped until that outcome is
+  **delivered-or-queued**. This is runtime-blind policy shared by Claude and
+  Codex; an agent tool call or claim that it posted is never delivery evidence.
 
 ## Message length — never truncate to fit (foundational)
 

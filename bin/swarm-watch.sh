@@ -5,8 +5,8 @@
 # swarm-up.sh uses, and posts a per-channel heartbeat for EACH configured swarm,
 # using that swarm's own bot token. ONE launchd job covers all swarms.
 #
-# swarm.conf line (pipe-separated, 5 fields):
-#     name | /path/to/repo | TOKEN_VAR | CHANNEL_ID | GUILD_ID
+# swarm.conf line (pipe-separated, up to 7 fields):
+#     name | /path/to/repo | TOKEN_VAR | CHANNEL_ID | GUILD_ID | ACCOUNT | ENGINE
 # Token resolved from $SWARM_HOME/tokens.env (TOKEN_VAR -> bot token), exactly as
 # swarm-up.sh does. The heartbeat for a swarm is posted by that swarm's own bot,
 # into that swarm's channel. GUILD_ID is the Discord guild (server) snowflake;
@@ -15,7 +15,7 @@
 # frozen swarm-status/v1 contract transition window) but consumers will degrade
 # gracefully (no deep-link). The 4-field legacy line shape is no longer
 # emitted by swarm-add but still parsed — channel becomes the last present
-# field and guild_id is treated as blank.
+# field and guild_id is treated as blank. Empty ENGINE remains Claude.
 #
 # Per-swarm heartbeat state (pane content is the PRIMARY working signal;
 # transcript freshness disambiguates working-vs-stalled):
@@ -320,6 +320,7 @@ grep -vE '^[[:space:]]*(#|$)' "$CONF" | while IFS= read -r _line; do
   tokvar="$SWARM_CONF_F_TOKVAR"
   channel="$SWARM_CONF_F_CHANNEL"
   guild_id="$SWARM_CONF_F_GUILD"
+  engine="$SWARM_CONF_F_ENGINE"
   [ -z "$name" ] && continue
   [ -z "$channel" ] && { echo "swarm-watch: $name has no CHANNEL_ID (4th field) — skipping" >&2; continue; }
 
@@ -327,6 +328,65 @@ grep -vE '^[[:space:]]*(#|$)' "$CONF" | while IFS= read -r _line; do
   [ -z "$token" ] && { echo "swarm-watch: no token in \$$tokvar for $name — skipping" >&2; continue; }
 
   case "$repo" in "~"*) repo="$HOME${repo#\~}";; esac
+
+  # Codex has no Claude transcript directory or TUI footer. Its daemon publishes
+  # one atomic, heartbeating runtime contract; use that directly and never let a
+  # stale pre-engine Claude transcript paint this row working/idle/silent.
+  if [ "$engine" = "codex" ]; then
+    session_alive "$name"; rc=$?
+    if [ "$rc" -eq 0 ]; then alive=1; elif [ "$rc" -eq 2 ]; then alive=2; else alive=0; fi
+
+    alert_state="ok"
+    alert_msg=""
+    status_state="ready"
+    age_secs_for_status=""
+    limit_reset_for_status=""
+
+    if [ "$alive" -eq 0 ]; then
+      status="⚪ Codex swarm down (no session)"
+      status_state="down"
+      alert_state="down"
+      alert_msg="⚪ Codex swarm \`$name\` · DOWN — tmux session gone. Process dead; \`swarm-up.sh up $name\` to restart."
+    elif [ "$alive" -ne 1 ]; then
+      status="🔴 Codex swarm state unknown (tmux unavailable)"
+      status_state="silent"
+      alert_state="silent"
+      alert_msg="🔴 Codex swarm \`$name\` · STATE UNKNOWN — tmux could not be inspected."
+    elif swarm_codex_runtime_read "$name"; then
+      case "$SWARM_CODEX_RUNTIME_LAST_COMPLETED_AGE" in
+        ''|*[!0-9]*) age_secs_for_status="" ;;
+        *) age_secs_for_status="$SWARM_CODEX_RUNTIME_LAST_COMPLETED_AGE" ;;
+      esac
+      if [ "$SWARM_CODEX_RUNTIME_READY" -ne 1 ]; then
+        status="🟡 Codex swarm starting (runtime not ready)"
+        status_state="starting"
+      elif [ "$SWARM_CODEX_RUNTIME_ACTIVE" -eq 1 ] || \
+           [ "$SWARM_CODEX_RUNTIME_QUEUE_DEPTH" -gt 0 ] || \
+           [ -n "$SWARM_CODEX_RUNTIME_CHILD_PID" ]; then
+        status="🟢 Codex swarm working · queue $SWARM_CODEX_RUNTIME_QUEUE_DEPTH"
+        status_state="working"
+        [ "$ENABLE_TYPING" = "1" ] && curl --max-time "$CURL_MAX_TIME" -s -X POST -H "Authorization: Bot $token" "$API/channels/$channel/typing" >/dev/null 2>&1 || true
+      else
+        status="🟢 Codex swarm ready · waiting for input"
+        status_state="ready"
+      fi
+    elif [ "$SWARM_CODEX_RUNTIME_STATUS" = "missing" ]; then
+      # Short boot window before the daemon's first atomic state write.
+      status="🟡 Codex swarm starting (runtime state pending)"
+      status_state="starting"
+    else
+      status="🔴 Codex runtime $SWARM_CODEX_RUNTIME_STATUS"
+      status_state="silent"
+      alert_state="silent"
+      alert_msg="🔴 Codex swarm \`$name\` · RUNTIME $SWARM_CODEX_RUNTIME_STATUS — $SWARM_CODEX_RUNTIME_FILE is not a fresh live daemon snapshot. Inspect with \`bin/swarm-view.sh $name\`."
+    fi
+
+    content="$status · $name"
+    post_heartbeat "$channel" "$token" "$content"
+    post_alert "$channel" "$token" "$alert_state" "$alert_msg"
+    emit_status "$name" "$channel" "$guild_id" "$status_state" "$age_secs_for_status" "$limit_reset_for_status"
+    continue
+  fi
 
   # Resolve THIS swarm's projects dir from ITS account (field 6). Empty account
   # → ${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects} (default, byte-identical to

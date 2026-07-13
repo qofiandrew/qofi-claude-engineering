@@ -196,7 +196,7 @@ PROF_SET="$(SWARM_HOME="$ROOT" bash -c 'set +u; source "$1/bin/swarm-lib.sh"; pr
 echo ""
 echo "==> PART 2: real manifest_apply_compose injection (SWARM_HOME = repo)"
 
-CLAUDE_SRC_LIST="engineering-cto/CLAUDE.preamble.md+_base/CLAUDE.md+engineering-cto/CLAUDE.md"
+CLAUDE_SRC_LIST="engineering-cto/CLAUDE.preamble.md+_base/CLAUDE.md+_base/SWARM_BEHAVIOR.md+engineering-cto/CLAUDE.md"
 FIX_BASE="$ROOT/tests/fixtures/CLAUDE.engineering-cto.expected.md"
 FIX_FRONT="$ROOT/tests/fixtures/CLAUDE.engineering-cto.frontend.expected.md"
 

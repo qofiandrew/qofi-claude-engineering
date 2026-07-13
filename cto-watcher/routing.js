@@ -17,6 +17,13 @@ import { filterShuttleAttachments } from './attachments.js';
 
 export const STATES = ['DRIVING', 'WAITING_FOR_OPERATOR', 'STOOD_DOWN'];
 
+/** Explicit adoption gate for every ADR-0023 watcher surface. */
+export function harnessDraftSurfaceEnabled(config) {
+  return config?.structuredCheckInsEnabled === true
+    || config?.roadmapQueriesEnabled === true
+    || config?.roadmapEnabled === true;
+}
+
 /**
  * @typedef {Object} InAttachment
  * @property {string} name      - original filename (e.g. "response.md")
@@ -93,9 +100,41 @@ export function prepareContext(config, selfId) {
   // Liveness monitor (AUTO-mode accelerator). OFF unless explicitly enabled.
   // Thresholds tuned to the operator's distribution (work cycles ~20m, ~10% to 30m).
   const livenessEnabled = config.livenessEnabled === true;
+  const structuredCheckInsEnabled = config.structuredCheckInsEnabled === true;
+  if (structuredCheckInsEnabled) {
+    for (const [name, cto] of ctoByName) {
+      if (!cto.botUserId || !cto.authorId) {
+        throw new Error(`structuredCheckInsEnabled requires botUserId/authorId for CTO "${name}"`);
+      }
+    }
+  }
   const silenceThresholdMs = Math.round((config.silenceThresholdSeconds ?? 1800) * 1000);
   const pingCooldownMs = Math.round((config.pingCooldownSeconds ?? 1800) * 1000);
   const checkIntervalMs = Math.round((config.checkIntervalSeconds ?? 60) * 1000);
+
+  // Harness-backed visibility/check-ins. Each surface is separately disabled
+  // until the operator ratifies ADR-0023 and opts in. When authenticated queries
+  // are enabled, an unavailable artifact degrades visibly instead of inventing
+  // state; scheduled digests remain independently gated.
+  const roadmapEnabled = config.roadmapEnabled === true;
+  const roadmapQueriesEnabled = config.roadmapQueriesEnabled === true;
+  const roadmapDigestIntervalMs = Math.round((config.roadmapDigestIntervalSeconds ?? 86400) * 1000);
+  if (!Number.isSafeInteger(roadmapDigestIntervalMs)
+    || roadmapDigestIntervalMs < 60_000
+    || roadmapDigestIntervalMs > 31 * 24 * 60 * 60 * 1000) {
+    throw new Error('roadmapDigestIntervalSeconds must be from 60 seconds through 31 days');
+  }
+  const roadmapDigestChannelId = config.roadmapDigestChannelId ?? busChannelId;
+  requireSnowflake('roadmapDigestChannelId', roadmapDigestChannelId);
+  const checkInMaxAttempts = config.checkInMaxAttempts ?? 3;
+  if (!Number.isSafeInteger(checkInMaxAttempts) || checkInMaxAttempts < 2 || checkInMaxAttempts > 8) {
+    throw new Error('checkInMaxAttempts must be an integer from 2 through 8');
+  }
+  for (const field of ['roadmapRepoRoot', 'roadmapAuthorityFile', 'normalizedEventStoreDirectory']) {
+    if (config[field] !== undefined && (typeof config[field] !== 'string' || !config[field])) {
+      throw new Error(`${field} must be a non-empty path string`);
+    }
+  }
 
   // Usage-limit overlay (RATE_LIMITED) — fed from swarm-watch's status.json (see
   // swarmstatus.js). resumeBuffer is the grace window after a cap lifts before a
@@ -112,7 +151,8 @@ export function prepareContext(config, selfId) {
 
   return {
     selfId, busChannelId, cpoBotUserId, alertUserIds, ctoByName, ctoById, operatorChannelId,
-    livenessEnabled, silenceThresholdMs, pingCooldownMs, checkIntervalMs,
+    livenessEnabled, structuredCheckInsEnabled, silenceThresholdMs, pingCooldownMs, checkIntervalMs,
+    roadmapEnabled, roadmapQueriesEnabled, roadmapDigestIntervalMs, roadmapDigestChannelId, checkInMaxAttempts,
     resumeBufferMs, swarmStatusMaxAgeMs,
     maxAttachmentBytes, attachmentDownloadTimeoutMs,
   };

@@ -11,11 +11,19 @@
     "REPLACE_WITH_operator_user_id_to_DM_on_failclosed"
   ],
 
-  "_liveness_comment": "AUTO-mode liveness monitor (everything-in-bus: state parsed from the bus, pings posted to the bus). livenessEnabled=false keeps it OFF; the relay runs normally. Thresholds are seconds; defaults shown (silence/cooldown 30m, check 60s) and may be omitted.",
+  "_liveness_comment": "AUTO-mode liveness monitor. livenessEnabled=false keeps it OFF; the relay runs normally. With structuredCheckInsEnabled=false (the default), existing free-form/STATE pings are unchanged. Explicitly enabling structuredCheckInsEnabled replaces each DRIVING-but-idle ping with the ADR-0023 schema-enforced check-in sent directly to the named CTO channel/bot; a blanket heartbeat is then rejected. Thresholds are seconds; defaults shown and may be omitted.",
   "livenessEnabled": false,
+  "structuredCheckInsEnabled": false,
   "silenceThresholdSeconds": 1800,
   "pingCooldownSeconds": 1800,
   "checkIntervalSeconds": 60,
+  "checkInMaxAttempts": 3,
+
+  "_roadmap_comment": "ADR-0023 draft surface (implemented/tested, NOT live until operator ratification). structuredCheckInsEnabled, roadmapQueriesEnabled, and roadmapEnabled (scheduled digest) are separate explicit opt-ins; all default false. Check-in current_task reads the private normalized event store; roadmap output reads only CAS-bound .swarm-roadmap.json. Defaults: repo root = parent of cto-watcher, event store = $SWARM_STATE_DIR/events, roadmap authority = $SWARM_STATE_DIR/roadmap/authority.json. Digest channel defaults to busChannelId.",
+  "roadmapQueriesEnabled": false,
+  "roadmapEnabled": false,
+  "roadmapDigestIntervalSeconds": 86400,
+  "roadmapDigestChannelId": "REPLACE_WITH_cpo_cto_bus_channel_id",
 
   "_usage_limit_comment": "Usage-limit overlay (RATE_LIMITED). The watcher reads swarm-watch's status.json (default ~/.config/swarm/status.json; override with env CTO_WATCHER_SWARM_STATUS_JSON, or point SWARM_STATE_DIR at the dir) to learn which CTOs are paused on a Claude usage/5-hour limit, so it stops pinging a capped loop and waits. resumeBufferSeconds = grace window after a cap lifts before a resume nudge fires (lets Claude Code auto-resume first). swarmStatusMaxAgeSeconds = how stale the feed may be before it's distrusted. Defaults shown; may be omitted.",
   "resumeBufferSeconds": 180,

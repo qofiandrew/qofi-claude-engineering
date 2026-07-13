@@ -17,12 +17,59 @@
  * Honors DISCORD_STATE_DIR (default ~/.codex/channels/discord).
  */
 
-import { mkdirSync, writeFileSync } from 'fs'
+import { chmodSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
-import { AccessStore, type Access } from './gate.ts'
+import { AccessStore, SAFE_STATE_ID, type Access } from './gate.ts'
 
 const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.codex', 'channels', 'discord')
+
+function rotationStatus(stateDir: string): string[] {
+  const path = join(stateDir, 'rotation-state.json')
+  try {
+    const stat = lstatSync(path)
+    const uid = typeof process.getuid === 'function' ? process.getuid() : stat.uid
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== uid
+      || (stat.mode & 0o777) !== 0o600 || stat.size > 1024 * 1024) {
+      throw new Error('unsafe file')
+    }
+    const value: unknown = JSON.parse(readFileSync(path, 'utf8'))
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('shape')
+    const record = value as Record<string, unknown>
+    if (record.schema !== 'qofi-codex-profile-rotation/v1'
+      || typeof record.pool !== 'string'
+      || (record.active_profile !== null && typeof record.active_profile !== 'string')
+      || !Array.isArray(record.profiles)) throw new Error('schema')
+    const lines = [
+      `codex auth pool: ${record.pool}`,
+      `active profile: ${record.active_profile ?? '(parked)'}`,
+      `parked until: ${typeof record.parked_until_ms === 'number' && record.parked_until_ms > Date.now()
+        ? new Date(record.parked_until_ms).toISOString() : '(not parked)'}`,
+      'profile headroom / leases / cooldowns:',
+    ]
+    for (const raw of record.profiles.slice(0, 32)) {
+      if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('profile')
+      const profile = raw as Record<string, unknown>
+      if (typeof profile.label !== 'string' || !Array.isArray(profile.leased_by)) throw new Error('profile')
+      const fresh = profile.telemetry_status === 'fresh'
+        && typeof profile.observed_at_ms === 'number'
+        && profile.observed_at_ms <= Date.now()
+        && Date.now() - profile.observed_at_ms <= 30 * 60_000
+      const headroom = fresh && typeof profile.headroom_percent === 'number'
+        ? `${profile.headroom_percent.toFixed(1)}%`
+        : 'unknown'
+      const leases = profile.leased_by.filter(item => typeof item === 'string').join(',') || 'none'
+      const cooldown = typeof profile.cooldown_until_ms === 'number' && profile.cooldown_until_ms > Date.now()
+        ? new Date(profile.cooldown_until_ms).toISOString()
+        : 'ready'
+      lines.push(`  ${profile.label}: headroom=${headroom} leased_by=${leases} cooldown=${cooldown}`)
+    }
+    return lines
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ['codex auth pool: (rotation state not initialized)']
+    return ['codex auth pool: (rotation state unavailable)']
+  }
+}
 
 export function runCli(argv: string[], stateDir = STATE_DIR): string {
   const store = new AccessStore(stateDir)
@@ -44,6 +91,7 @@ export function runCli(argv: string[], stateDir = STATE_DIR): string {
         `allowFrom (${a.allowFrom.length}): ${a.allowFrom.join(', ') || '(none)'}`,
         `groups (${Object.keys(a.groups).length}): ${Object.keys(a.groups).join(', ') || '(none)'}`,
         `pending (${Object.keys(a.pending).length}):${pending ? '\n' + pending : ' (none)'}`,
+        ...rotationStatus(stateDir),
       ].join('\n')
     }
     case 'pair': {
@@ -56,11 +104,18 @@ export function runCli(argv: string[], stateDir = STATE_DIR): string {
         store.save(a)
         return `code ${code} expired — ask the sender to DM again`
       }
+      if (!SAFE_STATE_ID.test(p.senderId) || !SAFE_STATE_ID.test(p.chatId)) {
+        return 'pending pairing contains an invalid sender/channel id'
+      }
       if (!a.allowFrom.includes(p.senderId)) a.allowFrom.push(p.senderId)
       delete a.pending[code]
       store.save(a)
       mkdirSync(store.approvedDir, { recursive: true, mode: 0o700 })
-      writeFileSync(join(store.approvedDir, p.senderId), p.chatId)
+      chmodSync(store.approvedDir, 0o700)
+      writeFileSync(join(store.approvedDir, p.senderId), p.chatId, {
+        flag: 'wx',
+        mode: 0o600,
+      })
       return `approved sender ${p.senderId} — the daemon will confirm on Discord`
     }
     case 'deny': {
@@ -125,7 +180,9 @@ export function runCli(argv: string[], stateDir = STATE_DIR): string {
           break
         case 'textChunkLimit': {
           const n = Number(value)
-          if (!Number.isFinite(n) || n < 1) return 'textChunkLimit: positive number'
+          if (!Number.isSafeInteger(n) || n < 1 || n > 2000) {
+            return 'textChunkLimit: integer 1..2000'
+          }
           a.textChunkLimit = n
           break
         }

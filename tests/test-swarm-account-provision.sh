@@ -85,11 +85,17 @@ g = d.get("groups", {})
 if what == "ngroups": print(len(g))
 elif what == "allow0": print(len(list(g.values())[0]["allowFrom"]) if g else 0)
 elif what == "has1001": print("1001" in g)
+elif what == "top_owner": print("1507069153335443608" in d.get("allowFrom", []))
+elif what == "control_owner": print(d.get("loginControlOwnerId", ""))
 PY
 }
 assert_eq "3" "$(aj ngroups)" "access.json has one group per channel (3)"
 assert_eq "2" "$(aj allow0)" "each group allowFrom = owner + watcher (2)"
 assert_eq "True" "$(aj has1001)" "channel 1001 has a group"
+assert_eq "True" "$(aj top_owner)" "top-level allowFrom explicitly identifies the operator"
+assert_eq "1507069153335443608" "$(aj control_owner)" "login-control owner is explicitly pinned"
+assert_eq "600" "$(stat -f %Lp "$ACCESS_JSON" 2>/dev/null || stat -c %a "$ACCESS_JSON")" "access.json is owner-private mode 0600"
+assert_eq "700" "$(stat -f %Lp "$(dirname "$ACCESS_JSON")" 2>/dev/null || stat -c %a "$(dirname "$ACCESS_JSON")")" "new account Discord state is owner-private mode 0700"
 
 echo "=== NO token read or written ==="
 assert_lacks "$OUT" "DECOY-SECRET-XYZ" "the decoy token value never appears in output"

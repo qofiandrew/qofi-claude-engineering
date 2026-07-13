@@ -53,7 +53,7 @@ echo "local" > "$PROBE/.claude/canon-mode"
 echo ""
 echo "==> PART 2: real manifest_apply_compose canon injection"
 
-CLAUDE_SRC_LIST="engineering-cto/CLAUDE.preamble.md+_base/CLAUDE.md+engineering-cto/CLAUDE.md"
+CLAUDE_SRC_LIST="engineering-cto/CLAUDE.preamble.md+_base/CLAUDE.md+_base/SWARM_BEHAVIOR.md+engineering-cto/CLAUDE.md"
 FIX_BASE="$ROOT/tests/fixtures/CLAUDE.engineering-cto.expected.md"
 OVERLAY="$ROOT/templates/engineering-cto/canon/CLAUDE.external-canon.md"
 

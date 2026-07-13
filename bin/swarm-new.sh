@@ -15,7 +15,7 @@
 # enabledPlugins verify, access.json.
 #
 # Usage:
-#   swarm-new.sh <name> [--public] [--type <name>]
+#   swarm-new.sh <name> [--public] [--type <name>] [--engine <claude|codex>]
 #
 #   <name>     short, no spaces, [a-zA-Z][a-zA-Z0-9_-]*  (becomes both
 #              the GitHub repo name and, via swarm-add, the tmux session
@@ -39,6 +39,9 @@
 #                   the app doesn't exist yet, so swarm-add's walkthrough
 #                   prompts for it. Pass it only if the Discord app was
 #                   pre-created.
+#   --engine <name>  lead runtime passed through to swarm-add: claude
+#                   (default) or codex. Omit it to preserve the historical
+#                   Claude registration shape.
 #   -h, --help      this help
 #
 # Greenfield only — creates a brand-new repo at ~/qofirepos/<name>.
@@ -76,6 +79,8 @@ VISIBILITY="--private"
 TYPE=""
 PROFILE=""
 BOT_USER_ID=""
+ENGINE="claude"
+ENGINE_EXPLICIT=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -96,6 +101,11 @@ while [ $# -gt 0 ]; do
       BOT_USER_ID="$2"; shift 2 ;;
     --bot-user-id=*)
       BOT_USER_ID="${1#--bot-user-id=}"; shift ;;
+    --engine)
+      [ $# -ge 2 ] || { echo "swarm-new: --engine requires a value" >&2; usage 1; }
+      ENGINE="$2"; ENGINE_EXPLICIT=1; shift 2 ;;
+    --engine=*)
+      ENGINE="${1#--engine=}"; ENGINE_EXPLICIT=1; shift ;;
     -h|--help)  usage 0 ;;
     --*)        echo "swarm-new: unknown flag: $1" >&2; usage 1 ;;
     *)
@@ -107,6 +117,11 @@ while [ $# -gt 0 ]; do
 done
 
 [ -z "$NAME" ] && { echo "swarm-new: missing <name>" >&2; usage 1; }
+
+case "$ENGINE" in
+  claude|codex) : ;;
+  *) echo "swarm-new: --engine must be claude or codex (got: $ENGINE)" >&2; exit 1 ;;
+esac
 
 if [ -n "$TYPE" ]; then
   if ! swarm_type_is_known "$TYPE"; then
@@ -330,4 +345,5 @@ ADD_ARGS=("$NAME" "$REPO")
 [ -n "$TYPE" ]        && ADD_ARGS+=(--type "$TYPE")
 [ -n "$PROFILE" ]     && ADD_ARGS+=(--profile "$PROFILE")
 [ -n "$BOT_USER_ID" ] && ADD_ARGS+=(--bot-user-id "$BOT_USER_ID")
+[ "$ENGINE_EXPLICIT" -eq 1 ] && ADD_ARGS+=(--engine "$ENGINE")
 exec "$SCRIPT_DIR/swarm-add.sh" "${ADD_ARGS[@]}"

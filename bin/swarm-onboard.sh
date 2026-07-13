@@ -34,12 +34,13 @@
 #   swarm-onboard.sh /path/to/repo [flags...]
 #
 # Flags:
-#   --force-docs        overwrite CLAUDE.md, TEAM_LEAD.md, ESCALATION.md on collision
-#   --force-hooks       overwrite .claude/hooks/*.sh on collision
+#   --force-docs        overwrite managed doctrine (and Codex AGENTS.md) on collision
+#   --force-hooks       overwrite managed .claude/.codex hooks on collision
 #   --force-precommit   overwrite foreign .git/hooks/pre-commit
 #   --force             all three of the above (escape hatch)
 #   --force-dirty       proceed even if working tree is dirty (NOT recommended)
 #   --check             preflight only — report, never write or commit
+#   --engine <name>     repository runtime surfaces: claude (default) or codex
 #   -h, --help          this help
 #
 # NOT exposed as a flag (intentional):
@@ -67,24 +68,30 @@ FORCE_HOOKS=0
 FORCE_PRECOMMIT=0
 FORCE_DIRTY=0
 CHECK_ONLY=0
+ENGINE="claude"
 
-for arg in "$@"; do
-  case "$arg" in
-    --force-docs)      FORCE_DOCS=1 ;;
-    --force-hooks)     FORCE_HOOKS=1 ;;
-    --force-precommit) FORCE_PRECOMMIT=1 ;;
-    --force)           FORCE_DOCS=1; FORCE_HOOKS=1; FORCE_PRECOMMIT=1 ;;
-    --force-dirty)     FORCE_DIRTY=1 ;;
-    --check|-n)        CHECK_ONLY=1 ;;
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --force-docs)      FORCE_DOCS=1; shift ;;
+    --force-hooks)     FORCE_HOOKS=1; shift ;;
+    --force-precommit) FORCE_PRECOMMIT=1; shift ;;
+    --force)           FORCE_DOCS=1; FORCE_HOOKS=1; FORCE_PRECOMMIT=1; shift ;;
+    --force-dirty)     FORCE_DIRTY=1; shift ;;
+    --check|-n)        CHECK_ONLY=1; shift ;;
+    --engine)          [ $# -ge 2 ] || { echo "swarm-onboard: --engine requires a value" >&2; usage 1; }; ENGINE="$2"; shift 2 ;;
+    --engine=*)        ENGINE="${1#--engine=}"; shift ;;
     -h|--help)         usage 0 ;;
-    --*)               echo "swarm-onboard: unknown flag: $arg" >&2; usage 1 ;;
+    --*)               echo "swarm-onboard: unknown flag: $1" >&2; usage 1 ;;
     *)
-      if [ -z "$REPO" ]; then REPO="$arg"; else
-        echo "swarm-onboard: too many positional args ('$REPO' and '$arg')" >&2; usage 1
+      if [ -z "$REPO" ]; then REPO="$1"; else
+        echo "swarm-onboard: too many positional args ('$REPO' and '$1')" >&2; usage 1
       fi
+      shift
       ;;
   esac
 done
+case "$ENGINE" in claude|codex) ;; *) echo "swarm-onboard: --engine must be claude or codex" >&2; exit 1 ;; esac
+export SWARM_APPLY_ENGINE_OVERRIDE="$ENGINE"
 
 [ -z "$REPO" ] && { echo "swarm-onboard: missing repo path" >&2; usage 1; }
 [ -d "$REPO" ] || { echo "swarm-onboard: not a directory: $REPO" >&2; exit 1; }
@@ -163,8 +170,8 @@ if [ -n "${SWARM_RESULT_COLLISIONS:-}" ]; then
   printf '%s\n' "${SWARM_RESULT_COLLISIONS}" | sed '/^$/d' | sed 's/^/  /'
   echo ""
   echo "To proceed, re-run with the appropriate per-concern flag(s):"
-  echo "  --force-docs        overwrite CLAUDE.md / TEAM_LEAD.md / ESCALATION.md"
-  echo "  --force-hooks       overwrite .claude/hooks/*"
+  echo "  --force-docs        overwrite managed doctrine (including Codex AGENTS.md)"
+  echo "  --force-hooks       overwrite managed .claude/.codex hooks"
   echo "  --force-precommit   overwrite a foreign .git/hooks/pre-commit"
   echo "  --force             all of the above"
   echo ""
@@ -213,10 +220,16 @@ _collect_targets() {
   # Skip git-hook (handled via snapshot) and gitignore (tracked file; git
   # restore handles).
   case "$1" in git-hook|gitignore) return 0 ;; esac
+  _swarm_is_codex_managed_target "$3" \
+    && [ "$ENGINE" != "codex" ] && [ "$3" != "AGENTS.md" ] && return 0
   MANIFEST_TARGETS="$MANIFEST_TARGETS
 $3"
 }
 manifest_walk _collect_targets
+if [ "$ENGINE" = "codex" ]; then
+  MANIFEST_TARGETS="$MANIFEST_TARGETS
+.claude/codex-managed-paths"
+fi
 
 rollback() {
   echo ""
@@ -282,15 +295,21 @@ TPL_SHA="$(git -C "$SWARM_HOME" rev-parse --short HEAD 2>/dev/null || echo unkno
 _stage() {
   local behavior="$1" src="$2" tgt="$3"
   case "$behavior" in git-hook) return 0 ;; esac
+  _swarm_is_codex_managed_target "$tgt" \
+    && [ "$ENGINE" != "codex" ] && [ "$tgt" != "AGENTS.md" ] && return 0
   [ -e "$REPO/$tgt" ] || return 0
   ( cd "$REPO" && git add -- "$tgt" 2>/dev/null || true )
 }
 manifest_walk _stage
 
-# Stage the auto-stamped operator-owned paths list (lives outside the
-# manifest walk; see _swarm_stamp_operator_owned_list in swarm-lib.sh).
-if [ -e "$REPO/.claude/operator-owned-paths" ]; then
-  ( cd "$REPO" && git add -- ".claude/operator-owned-paths" 2>/dev/null || true )
+# Stage the auto-stamped ledgers (they live outside the manifest walk).
+for _ledger in .claude/operator-owned-paths; do
+  if [ -e "$REPO/$_ledger" ]; then
+    ( cd "$REPO" && git add -- "$_ledger" 2>/dev/null || true )
+  fi
+done
+if [ "$ENGINE" = "codex" ] && [ -e "$REPO/.claude/codex-managed-paths" ]; then
+  ( cd "$REPO" && git add -- ".claude/codex-managed-paths" 2>/dev/null || true )
 fi
 
 STAGED="$(cd "$REPO" && git diff --cached --name-only 2>/dev/null)"
@@ -377,6 +396,6 @@ the repo already exists.
 swarm-onboard does NOT register this repo with the swarm. When ready
 to spin up a Discord-facing swarm against it, run:
 
-  bin/swarm-add.sh <name> $REPO <channel_id>
+  bin/swarm-add.sh <name> $REPO <channel_id> --engine $ENGINE
 ====================================================================
 EOF

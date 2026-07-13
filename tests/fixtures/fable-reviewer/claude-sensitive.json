@@ -1,0 +1,24 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "structured_output": {
+    "schema": "qofi-adversarial-review-output/v2",
+    "verdict": "needs-changes",
+    "summary": "The affected account is reviewer@example.com.",
+    "checked": [
+      "The supplied diff."
+    ],
+    "not_checked": [],
+    "findings": [
+      {
+        "severity": "high",
+        "locus": "src/auth.ts:12",
+        "claim": "The provider organization org_4FableSecret is exposed.",
+        "evidence": "The supplied material binds account_live_identifier directly.",
+        "suggested_test": "Exercise the redaction boundary."
+      }
+    ],
+    "next_steps": []
+  }
+}

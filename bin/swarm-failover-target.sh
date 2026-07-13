@@ -96,6 +96,7 @@ in_list() { case " $2 " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 UNIVERSE=""
 while IFS= read -r _line; do
   swarm_conf_parse_line "$_line" || continue
+  [ "$SWARM_CONF_F_ENGINE" = "codex" ] && continue
   _a="$SWARM_CONF_F_ACCOUNT"
   [ -z "$_a" ] && continue          # default account is never a failover target
   in_list "$_a" "$UNIVERSE" && continue

@@ -1,0 +1,61 @@
+{
+  "id": "review-m5example-a1b2c3",
+  "kind": "adversarial-review",
+  "kindLabel": "adversarial-review",
+  "title": "Codex Adversarial Review",
+  "workspaceRoot": "/example/repository",
+  "jobClass": "review",
+  "summary": "One retry path needs attention.",
+  "write": false,
+  "createdAt": "2026-07-13T10:00:00.000Z",
+  "startedAt": "2026-07-13T10:00:00.100Z",
+  "status": "completed",
+  "phase": "done",
+  "pid": null,
+  "logFile": "/example/plugin-data/jobs/review-m5example-a1b2c3.log",
+  "threadId": "01900000-0000-7000-8000-000000000001",
+  "turnId": "01900000-0000-7000-8000-000000000002",
+  "completedAt": "2026-07-13T10:00:02.000Z",
+  "result": {
+    "review": "Adversarial Review",
+    "target": {
+      "scope": "branch",
+      "label": "branch changes"
+    },
+    "threadId": "01900000-0000-7000-8000-000000000001",
+    "context": {
+      "repoRoot": "/example/repository",
+      "branch": "feature/example",
+      "summary": "bounded branch context"
+    },
+    "codex": {
+      "status": 0,
+      "stderr": "",
+      "stdout": "{\"verdict\":\"needs-attention\"}",
+      "reasoning": []
+    },
+    "result": {
+      "verdict": "needs-attention",
+      "summary": "One retry path needs attention.",
+      "findings": [
+        {
+          "severity": "high",
+          "title": "A failed write can be replayed",
+          "body": "The retry path does not retain an idempotency witness.",
+          "file": "src/write.ts",
+          "line_start": 41,
+          "line_end": 44,
+          "confidence": 0.9,
+          "recommendation": "Add a failure-injection replay test."
+        }
+      ],
+      "next_steps": [
+        "Ratify or refute the finding before merge."
+      ]
+    },
+    "rawOutput": "{\"verdict\":\"needs-attention\"}",
+    "parseError": null,
+    "reasoningSummary": []
+  },
+  "rendered": "# Codex Adversarial Review\n"
+}

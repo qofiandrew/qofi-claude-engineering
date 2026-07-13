@@ -78,6 +78,52 @@ _write_root_ok() {  # absolute path writable without a prompt? (stricter than re
   esac
   return 1
 }
+
+# A lexical in-repo path may be a symlink into the host-owned login controller.
+# Resolve the path (including an existing symlinked parent) before any tool-level
+# or broad `node` allow can run. This is deliberately path-specific so work on
+# the repository source file bridge/login-control.ts remains routine.
+_is_login_control_path() {
+  LOGIN_PATH="$1" CWD="$CWD" python3 - <<'PY' 2>/dev/null
+import os, re
+p=os.environ.get('LOGIN_PATH','')
+cwd=os.environ.get('CWD','')
+if not p: raise SystemExit(1)
+if not os.path.isabs(p): p=os.path.join(cwd or os.getcwd(),p)
+p=os.path.realpath(os.path.expanduser(p))
+standard=re.search(r'/(?:\.claude|\.claude-accounts/[^/]+)/channels/discord/login-control(?:/|$)',p)
+roots=[]
+if os.environ.get('DISCORD_STATE_DIR'):
+    roots.append(os.path.realpath(os.path.join(os.environ['DISCORD_STATE_DIR'],'login-control')))
+config=os.environ.get('CLAUDE_CONFIG_DIR')
+if config:
+    roots.append(os.path.realpath(os.path.join(config,'channels','discord','login-control')))
+if standard or any(p==r or p.startswith(r.rstrip('/')+'/') for r in roots): raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+_bash_touches_login_control() {
+  LOGIN_CMD="$1" CWD="$CWD" python3 - <<'PY' 2>/dev/null
+import os, re, shlex
+try: toks=shlex.split(os.environ.get('LOGIN_CMD',''),posix=True)
+except Exception: raise SystemExit(1)
+cwd=os.environ.get('CWD','') or os.getcwd()
+roots=[]
+if os.environ.get('DISCORD_STATE_DIR'):
+    roots.append(os.path.realpath(os.path.join(os.environ['DISCORD_STATE_DIR'],'login-control')))
+if os.environ.get('CLAUDE_CONFIG_DIR'):
+    roots.append(os.path.realpath(os.path.join(os.environ['CLAUDE_CONFIG_DIR'],'channels','discord','login-control')))
+for tok in toks:
+    tok=os.path.expanduser(os.path.expandvars(tok))
+    p=tok if os.path.isabs(tok) else os.path.join(cwd,tok)
+    p=os.path.realpath(p)
+    if re.search(r'/(?:\.claude|\.claude-accounts/[^/]+)/channels/discord/login-control(?:/|$)',p):
+        raise SystemExit(0)
+    if any(p==r or p.startswith(r.rstrip('/')+'/') for r in roots): raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
 # Auto-allow a safe Bash utility ONLY if every path it touches stays in scope
 # and it contains no parent-dir traversal. A redirect (>) or mkdir/touch makes
 # it a write -> the stricter write scope applies. Tokenized with shlex (not a
@@ -440,6 +486,21 @@ PY
 # ---------------------------------------------------------------------------
 case "$TOOL" in
   Bash)
+    # The living roadmap is harness-derived and CAS-bound to private host
+    # authority. Agent shell processes get no path to it: arbitrary interpreters
+    # can write without a visible redirect, so any Bash command naming the exact
+    # artifact is denied. Workers may inspect it with the read-only Read tool.
+    printf '%s' "$CMD" | grep -qF '.swarm-roadmap.json' && deny "living roadmap is harness/operator-owned"
+    # Host-owned /login control. Requests contain an OAuth URL and responses
+    # contain the one-time authorization#state value. No agent tool may read,
+    # enumerate, edit, attach, or execute against this boundary; the Discord
+    # bridge and swarm-login-relay are its only consumers.
+    printf '%s' "$CMD" | grep -Eq '(SWARM_LOGIN_CONTROL_DIR|(^|[/~])\.claude(-accounts/[^/]+)?/channels/discord/login-control(/|$))' && deny "touches host-owned login-control state"
+    _bash_touches_login_control "$CMD" && deny "touches host-owned login-control state"
+    # Authentication ceremonies are host/operator actuators, never agent
+    # utilities. This also prevents an agent from enabling the relay's hermetic
+    # test seams to redirect OAuth material into a repository it can read.
+    printf '%s' "$CMD" | grep -Eq 'swarm-(login-relay|reauth)(\.sh)?([^[:alnum:]_-]|$)'                && deny "Claude re-auth is host/operator-only"
     printf '%s' "$CMD" | grep -Eq '(^|[^[:alnum:]_])rm[[:space:]]+-[a-zA-Z]*[rf]'                       && deny "recursive/forced delete"
     printf '%s' "$CMD" | grep -Eq '(^|[^[:alnum:]_])sudo([[:space:]]|$)'                                && deny "sudo"
     printf '%s' "$CMD" | grep -Eq '(curl|wget)[^|]*\|[[:space:]]*(sh|bash|zsh)'                          && deny "pipe-to-shell"
@@ -453,7 +514,12 @@ case "$TOOL" in
     printf '%s' "$CMD" | grep -Eq '>[[:space:]>]*("?\$HOME"?|~|/Users/[^/]+|/home/[^/]+)/\.config/swarm/' && deny "direct write to swarm state dir — use \"\$SWARM_HOME\"/bin/swarm-attention.sh"
     ;;
   Edit|Write|MultiEdit|NotebookEdit)
+    _is_login_control_path "$FILE" && deny "edit of host-owned login-control state"
     case "$FILE" in
+      .swarm-roadmap.json|*/.swarm-roadmap.json)
+        deny "living roadmap is harness/operator-owned" ;;
+      *SWARM_LOGIN_CONTROL_DIR*|*/.claude/channels/discord/login-control|*/.claude/channels/discord/login-control/*|*/.claude-accounts/*/channels/discord/login-control|*/.claude-accounts/*/channels/discord/login-control/*)
+        deny "edit of host-owned login-control state" ;;
       *access.json|*settings.json|*settings.local.json|*.env|*/.ssh/*|*credential*|*secret*)
         deny "edit of security/credential file" ;;
     esac
@@ -474,7 +540,10 @@ case "$TOOL" in
     # Read-only — but confined to the repo. In-repo secret files stay denied
     # even though their path is in scope (the read-tool path bypasses the Bash
     # secret-regex and the Edit floor, so it needs its own guard).
+    _is_login_control_path "$FILE" && deny "read of host-owned login-control state"
     case "$FILE" in
+      *SWARM_LOGIN_CONTROL_DIR*|*/.claude/channels/discord/login-control|*/.claude/channels/discord/login-control/*|*/.claude-accounts/*/channels/discord/login-control|*/.claude-accounts/*/channels/discord/login-control/*)
+        deny "read of host-owned login-control state" ;;
       *.example|*.sample) : ;;   # *.env.example etc. are templates, safe to read
       *.env|*/.env|*.env.*|*/.env.*|*tokens.env|*access.json|*/.ssh/*|*/.aws/*|*/.gnupg/*|*.pem|*id_rsa*|*id_ed25519*)
         deny "read of secret/credential file" ;;

@@ -29,7 +29,18 @@
           {
             "type": "command",
             "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/discord-reply-nudge.sh\"",
-            "timeout": 15
+            "timeout": 45
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/discord-reply-nudge.sh\"",
+            "timeout": 45
           }
         ]
       }
