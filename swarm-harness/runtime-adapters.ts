@@ -29,6 +29,7 @@ export interface ClaudeStopEnvironment {
   CLAUDE_PROJECT_DIR?: string
   DISCORD_BOUND_CHANNEL?: string
   DISCORD_OPERATOR_CHANNEL?: string
+  DISCORD_BUS_CHANNEL?: string
   SWARM_STOP_FALLBACK_CHANNEL?: string
 }
 
@@ -135,6 +136,20 @@ function choosePrimaryChannel(bound: readonly string[], transcriptChannel: strin
   return bound.length === 1 ? bound[0] : null
 }
 
+function chooseLifecycleChannel(
+  env: ClaudeStopEnvironment,
+  bound: readonly string[],
+  transcriptChannel: string | null,
+): string | null {
+  const bus = String(env.DISCORD_BUS_CHANNEL ?? '').trim()
+  // Only the CPO receives this role-specific variable. Keep routine lifecycle
+  // receipts off its operator conversation while retaining the operator as the
+  // explicit failure fallback below. Ignore a bus value outside the injected
+  // bound-channel authority.
+  if (/^\d{16,22}$/.test(bus) && bound.includes(bus)) return bus
+  return choosePrimaryChannel(bound, transcriptChannel)
+}
+
 function explicitFallback(env: ClaudeStopEnvironment, primary: string | null): string | null {
   const candidate = String(
     env.SWARM_STOP_FALLBACK_CHANNEL ?? env.DISCORD_OPERATOR_CHANNEL ?? '',
@@ -180,7 +195,7 @@ export class ClaudeStopAdapter implements RuntimeStopAdapter<ClaudeStopHookInput
       try { transcriptChannel = transcriptBoundary(this.readTranscript(parentPath)).chatId } catch {}
     }
     const bound = parseChannels(this.env.DISCORD_BOUND_CHANNEL)
-    const channelId = choosePrimaryChannel(bound, transcriptChannel)
+    const channelId = chooseLifecycleChannel(this.env, bound, transcriptChannel)
     const project = String(this.env.CLAUDE_PROJECT_DIR ?? '')
     const swarm = safeStopLabel(this.env.SWARM_NAME, safeStopLabel(basename(project), 'swarm'))
     const session = safeStopLabel(input.session_id, 'session')

@@ -35,6 +35,21 @@ describe('runtime lifecycle adapters translate only', () => {
     })
   })
 
+  test('Claude routes CPO lifecycle receipts to the bus, not the operator conversation', () => {
+    const adapter = new ClaudeStopAdapter({
+      env: {
+        SWARM_NAME: 'qofi-product',
+        DISCORD_BOUND_CHANNEL: `${OP},${BUS}`,
+        DISCORD_OPERATOR_CHANNEL: OP,
+        DISCORD_BUS_CHANNEL: BUS,
+      },
+      readTranscript: () => transcript('operator-facing summary', OP),
+    })
+    const result = adapter.normalizeStop({ session_id: 's-1', transcript_path: '/parent' })
+    expect(result.channelId).toBe(BUS)
+    expect(result.fallbackChannelId).toBe(OP)
+  })
+
   test('Claude event identity remains stable when Stop re-enters', () => {
     const raw = transcript('same summary')
     const adapter = new ClaudeStopAdapter({
