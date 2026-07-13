@@ -162,15 +162,25 @@ export class ClaudeStopAdapter implements RuntimeStopAdapter<ClaudeStopHookInput
 
   normalizeStop(input: ClaudeStopHookInput): NormalizedStopEvent {
     const hookEvent = input.hook_event_name === 'SubagentStop' ? 'SubagentStop' : 'Stop'
+    const parentPath = typeof input.transcript_path === 'string' ? input.transcript_path : ''
     const path = hookEvent === 'SubagentStop' && typeof input.agent_transcript_path === 'string'
       ? input.agent_transcript_path
-      : typeof input.transcript_path === 'string' ? input.transcript_path : ''
+      : parentPath
     let boundary: TranscriptBoundary = { summary: '', chatId: null, identity: digest(['no-transcript']) }
     if (path) {
       try { boundary = transcriptBoundary(this.readTranscript(path)) } catch {}
     }
+    // Native SubagentStop transcripts usually contain only the sidechain and
+    // therefore omit the Discord turn envelope. Recover only the channel from
+    // the parent transcript; the subagent transcript remains authoritative for
+    // summary and identity. choosePrimaryChannel still rejects any channel not
+    // present in the injected binding.
+    let transcriptChannel = boundary.chatId
+    if (hookEvent === 'SubagentStop' && !transcriptChannel && parentPath && parentPath !== path) {
+      try { transcriptChannel = transcriptBoundary(this.readTranscript(parentPath)).chatId } catch {}
+    }
     const bound = parseChannels(this.env.DISCORD_BOUND_CHANNEL)
-    const channelId = choosePrimaryChannel(bound, boundary.chatId)
+    const channelId = choosePrimaryChannel(bound, transcriptChannel)
     const project = String(this.env.CLAUDE_PROJECT_DIR ?? '')
     const swarm = safeStopLabel(this.env.SWARM_NAME, safeStopLabel(basename(project), 'swarm'))
     const session = safeStopLabel(input.session_id, 'session')

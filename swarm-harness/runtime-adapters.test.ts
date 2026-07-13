@@ -83,6 +83,29 @@ describe('runtime lifecycle adapters translate only', () => {
     }).eventId).toBe(agentA.eventId)
   })
 
+  test('Claude SubagentStop recovers a multi-bound turn channel from the parent transcript', () => {
+    const child = [
+      JSON.stringify({
+        type: 'user', uuid: 'agent-user',
+        message: { content: 'delegated task without a Discord envelope' },
+      }),
+      JSON.stringify({
+        type: 'assistant', uuid: 'agent-assistant', isSidechain: false,
+        message: { content: [{ type: 'text', text: 'subagent summary' }] },
+      }),
+    ].join('\n')
+    const adapter = new ClaudeStopAdapter({
+      env: { SWARM_NAME: 'qofi-product', DISCORD_BOUND_CHANNEL: `${OP},${BUS}` },
+      readTranscript: path => path === '/parent' ? transcript('lead summary', BUS) : child,
+    })
+    const result = adapter.normalizeStop({
+      hook_event_name: 'SubagentStop', session_id: 's-1', task_id: 'task-1',
+      transcript_path: '/parent', agent_transcript_path: '/child', agent_id: 'agent-a',
+    })
+    expect(result.channelId).toBe(BUS)
+    expect(result.summary).toBe('subagent summary')
+  })
+
   test('Claude treats a supplied native stop id as digest input, not replay authority', () => {
     const adapter = new ClaudeStopAdapter({
       env: { SWARM_NAME: 'press-backend', DISCORD_BOUND_CHANNEL: OP },
