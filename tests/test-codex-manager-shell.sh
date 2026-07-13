@@ -84,6 +84,13 @@ eq 9 "$rc" "host preflight failure is preserved"
 eq $'health\ndrain\nresume' "$(cat "$CONTROL_LOG")" "failed preflight still resumes the established manager"
 unset PREFLIGHT_RC
 
+if grep -qF 'if swarm_codex_manager_host_preflight "$REPO"; then' \
+    "$ROOT/bin/swarm-doctor.sh"; then
+  ok "doctor drains the shared manager around its root preflight"
+else
+  bad "doctor bypasses the manager-aware root preflight wrapper"
+fi
+
 echo "=== stale socket recovery is launcher-owned ==="
 : > "$TMP/fail-control"; rm -f "$TMP/session" "$TMP/launched"; : > "$TMUX_LOG"; : > "$CONTROL_LOG"
 SWARM_CODEX_MANAGER_START_TIMEOUT=3 swarm_codex_manager_ensure; rc=$?

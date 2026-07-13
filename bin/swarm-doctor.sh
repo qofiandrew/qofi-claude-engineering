@@ -233,7 +233,7 @@ fi
 # when present; a stopped daemon is n/a rather than a wiring failure.
 if [ "$ENGINE" = "codex" ]; then
   CODEX_HOST_OK=0
-  if swarm_codex_host_preflight "$REPO"; then
+  if swarm_codex_manager_host_preflight "$REPO"; then
     CODEX_HOST_OK=1
     pass "Codex CLI: trusted canonical executable, bounded version $SWARM_CODEX_CLI_VERSION"
     pass "Codex auth: exact ChatGPT subscription status verified"
