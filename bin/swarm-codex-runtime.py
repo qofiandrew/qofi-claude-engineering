@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import NoReturn
 
@@ -47,7 +48,7 @@ TOOLCHAIN = "/usr/local/libexec/qofi-codex-toolchain"
 SUDOERS = "/private/etc/sudoers.d/qofi-codex-runtime"
 LOCK = "/private/var/run/qofi-codex-runner.lock"
 WORKSPACE_REGISTRY = "/private/var/db/qofi-codex-runtime-workspaces.json"
-WORKSPACE_SCHEMA = "qofi-codex-workspaces/v2"
+WORKSPACE_SCHEMA = "qofi-codex-workspaces/v3"
 WORKSPACE_JOURNAL_EVIDENCE_SCHEMA = "qofi-codex-workspace-journal-evidence/v1"
 QUIESCENCE_PROOF_SCHEMA = "qofi-codex-quiescence-proof/v1"
 DEFAULT_USER = "_qofi_codex"
@@ -918,6 +919,45 @@ class WorkspaceRootMismatch(RuntimeError):
     pass
 
 
+class AttrList(ctypes.Structure):
+    _fields_ = [
+        ("bitmapcount", ctypes.c_ushort),
+        ("reserved", ctypes.c_ushort),
+        ("commonattr", ctypes.c_uint32),
+        ("volattr", ctypes.c_uint32),
+        ("dirattr", ctypes.c_uint32),
+        ("fileattr", ctypes.c_uint32),
+        ("forkattr", ctypes.c_uint32),
+    ]
+
+
+def workspace_volume_uuid_fd(fd: int) -> str:
+    """Return the stable filesystem UUID for a descriptor-bound workspace.
+
+    Darwin's st_dev is a mount-session identifier and can change across a
+    reboot even when an APFS file keeps the same inode.  ATTR_VOL_UUID is the
+    persistent volume identity needed by recovery journals.
+    """
+
+    attr_vol_uuid = 0x00040000
+    attributes = AttrList(5, 0, 0, attr_vol_uuid, 0, 0, 0)
+    output = ctypes.create_string_buffer(64)
+    libc = ctypes.CDLL(None, use_errno=True)
+    fgetattrlist = libc.fgetattrlist
+    fgetattrlist.argtypes = [
+        ctypes.c_int, ctypes.POINTER(AttrList), ctypes.c_void_p,
+        ctypes.c_size_t, ctypes.c_uint32,
+    ]
+    fgetattrlist.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    if fgetattrlist(fd, ctypes.byref(attributes), output, len(output), 0) != 0:
+        die(f"could not bind workspace volume identity: errno {ctypes.get_errno()}")
+    returned_size = struct.unpack_from("=I", output.raw)[0]
+    if returned_size != 20:
+        die("workspace volume identity returned an unexpected size")
+    return str(uuid.UUID(bytes=output.raw[4:20]))
+
+
 def open_workspace_root_fd(
     repo: str,
     *,
@@ -956,6 +996,22 @@ def open_workspace_root_fd(
         os.close(fd)
         raise WorkspaceRootMismatch("workspace root was replaced while binding")
     return repo, fd, opened
+
+
+def workspace_volume_uuid_for_path(
+    repo: str,
+    expected_identity: tuple[int, int],
+) -> str:
+    try:
+        _canonical, fd, _info = open_workspace_root_fd(
+            repo, expected_identity=expected_identity,
+        )
+    except WorkspaceRootMismatch as exc:
+        die(str(exc))
+    try:
+        return workspace_volume_uuid_fd(fd)
+    finally:
+        os.close(fd)
 
 
 def sha256(path: str) -> str:
@@ -4553,7 +4609,9 @@ def workspace_registry() -> dict[str, dict[str, object]]:
     except (UnicodeDecodeError, ValueError) as exc:
         die(f"workspace registry is unreadable: {exc}")
     if (not isinstance(value, dict) or set(value) != {"schema", "workspaces"}
-            or value["schema"] not in ("qofi-codex-workspaces/v1", WORKSPACE_SCHEMA)
+            or value["schema"] not in (
+                "qofi-codex-workspaces/v1", "qofi-codex-workspaces/v2", WORKSPACE_SCHEMA,
+            )
             or not isinstance(value["workspaces"], dict)
             or not all(isinstance(path, str) and os.path.isabs(path)
                        and isinstance(journal, dict) for path, journal in value["workspaces"].items())
@@ -4582,6 +4640,7 @@ def workspace_registry() -> dict[str, dict[str, object]]:
                 pass
             converted[path] = {
                 "root": identity,
+                "volume": None,
                 "phase": "legacy",
                 "entries": {
                     rel: {"before": None, "managed": None}
@@ -4590,14 +4649,24 @@ def workspace_registry() -> dict[str, dict[str, object]]:
             }
         return converted
     result: dict[str, dict[str, object]] = {}
-    for path, journal in value["workspaces"].items():
-        if (os.path.normpath(path) != path or path == "/" or set(journal) != {"root", "phase", "entries"}
+    for path, source_journal in value["workspaces"].items():
+        journal = dict(source_journal)
+        if value["schema"] == "qofi-codex-workspaces/v2":
+            journal["volume"] = None
+        if (os.path.normpath(path) != path or path == "/"
+                or set(journal) != {"root", "volume", "phase", "entries"}
                 or journal["phase"] not in ("preparing", "prepared", "legacy")
                 or not isinstance(journal["root"], list) or len(journal["root"]) != 2
                 or any(type(item) is not int or item < 0 for item in journal["root"])
+                or (journal["volume"] is not None
+                    and (not isinstance(journal["volume"], str)
+                         or not re.fullmatch(
+                             r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}",
+                             journal["volume"],
+                         )))
                 or not isinstance(journal["entries"], dict)
                 or len(journal["entries"]) > MAX_TREE_ENTRIES + 1):
-            die("workspace registry contains an unsafe v2 workspace journal")
+            die("workspace registry contains an unsafe workspace journal")
         entries = journal["entries"]
         for rel, record in entries.items():
             if (not isinstance(rel, str)
@@ -4708,6 +4777,61 @@ def write_workspace_registry(registry: dict[str, dict[str, object]]) -> None:
     }, indent=2, sort_keys=True) + "\n", 0o600)
 
 
+def reconcile_workspace_journal_identity(
+    journal: dict[str, object],
+    current_root: list[int],
+    current_volume: str,
+    current_root_metadata: list[object],
+) -> bool:
+    """Rebind a journal after a mount-session device number changes.
+
+    New journals use volume UUID plus inode as their durable identity.  A v2
+    journal has no volume UUID, so its one-time upgrade additionally requires
+    the complete root metadata and inode to match, with only st_dev differing.
+    """
+
+    old_root = journal.get("root")
+    old_volume = journal.get("volume")
+    records = journal.get("entries")
+    if (not isinstance(old_root, list) or len(old_root) != 2
+            or not isinstance(records, dict)):
+        return False
+    old_dev, old_inode = map(int, old_root)
+    new_dev, new_inode = current_root
+    if old_inode != new_inode:
+        return False
+    if old_volume is not None and old_volume != current_volume:
+        return False
+    if old_dev != new_dev and old_volume is None:
+        root_record = records.get("")
+        root_saved = root_record.get("managed") or root_record.get("before") \
+            if isinstance(root_record, dict) else None
+        if (not isinstance(root_saved, list) or len(root_saved) != 6
+                or root_saved[3] != "d"
+                or [*root_saved[:4], root_saved[5]]
+                != [*current_root_metadata[:4], current_root_metadata[5]]):
+            return False
+    if old_dev != new_dev:
+        for record in records.values():
+            if not isinstance(record, dict):
+                return False
+            for key in ("before", "managed"):
+                saved = record.get(key)
+                if saved is None:
+                    continue
+                if not isinstance(saved, list) or len(saved) != 6 or saved[4] != old_dev:
+                    return False
+        for record in records.values():
+            assert isinstance(record, dict)
+            for key in ("before", "managed"):
+                saved = record.get(key)
+                if isinstance(saved, list):
+                    saved[4] = new_dev
+        journal["root"] = current_root
+    journal["volume"] = current_volume
+    return True
+
+
 def snapshot_workspace(
     repo: str,
     *,
@@ -4718,10 +4842,12 @@ def snapshot_workspace(
         repo, expected_identity=expected_identity,
     )
     current_root = [int(entries[""][4]), int(entries[""][5])]
+    current_volume = workspace_volume_uuid_for_path(canonical, tuple(current_root))
     journal = registry.get(canonical)
     if journal is None:
         journal = {
             "root": current_root,
+            "volume": current_volume,
             "phase": "preparing",
             "entries": {
                 rel: {"before": saved, "managed": None}
@@ -4730,7 +4856,9 @@ def snapshot_workspace(
         }
         registry[canonical] = journal
     else:
-        if journal["root"] != current_root:
+        if not reconcile_workspace_journal_identity(
+            journal, current_root, current_volume, entries[""],
+        ):
             die("registered workspace root was replaced; release it before preparing this path")
         journal["phase"] = "preparing"
         records = journal["entries"]
@@ -4753,7 +4881,10 @@ def finalize_workspace_snapshot(
     if journal is None:
         die("workspace journal disappeared before finalization")
     current_root = [int(entries[""][4]), int(entries[""][5])]
-    if journal["root"] != current_root:
+    current_volume = workspace_volume_uuid_for_path(canonical, tuple(current_root))
+    if not reconcile_workspace_journal_identity(
+        journal, current_root, current_volume, entries[""],
+    ):
         die("workspace root changed during preparation")
     records = journal["entries"]
     assert isinstance(records, dict)
@@ -4775,7 +4906,7 @@ def cleanup_workspace(repo: str, operator: pwd.struct_passwd,
             die("workspace cleanup received an invalid root identity")
         if journal_root == [0, 0]:
             return "replaced"
-        expected_identity = (journal_root[0], journal_root[1])
+        expected_identity = None
     else:
         expected_identity = None
         journal = {}
@@ -4785,6 +4916,17 @@ def cleanup_workspace(repo: str, operator: pwd.struct_passwd,
         )
     except WorkspaceRootMismatch as exc:
         return "absent" if "absent" in str(exc) else "replaced"
+    if "entries" in snapshot and "root" in snapshot:
+        current_root = [root_info.st_dev, root_info.st_ino]
+        current_metadata: list[object] = [
+            root_info.st_uid, root_info.st_gid, stat.S_IMODE(root_info.st_mode),
+            "d", root_info.st_dev, root_info.st_ino,
+        ]
+        if not reconcile_workspace_journal_identity(
+            journal, current_root, workspace_volume_uuid_fd(root_fd), current_metadata,
+        ):
+            os.close(root_fd)
+            return "replaced"
     if "entries" not in snapshot or "root" not in snapshot:
         # In-memory compatibility for an interrupted pre-v2 transaction. Bind
         # saved records to the descriptor we actually opened.

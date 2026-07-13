@@ -290,6 +290,94 @@ class ProvisioningTests(unittest.TestCase):
             self.assertEqual(runtime.cleanup_workspace(str(root), self.operator, journal), "replaced")
             self.assertEqual(metadata(root), before)
 
+    def test_v2_workspace_journal_rebinds_st_dev_after_reboot(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.home()) as outer_raw:
+            outer = Path(outer_raw)
+            root = outer / "repo"
+            root.mkdir(mode=0o755)
+            (root / "tracked").write_text("tracked\n")
+            registry_path = outer / "registry.json"
+            with mock.patch.object(runtime, "WORKSPACE_REGISTRY", str(registry_path)):
+                runtime.snapshot_workspace(str(root))
+                registry = runtime.workspace_registry()
+                journal = registry[str(root)]
+                current_dev = int(journal["root"][0])
+                stale_dev = current_dev + 2
+                journal["root"][0] = stale_dev
+                journal.pop("volume")
+                for record in journal["entries"].values():
+                    for key in ("before", "managed"):
+                        if record[key] is not None:
+                            record[key][4] = stale_dev
+                registry_path.write_text(json.dumps({
+                    "schema": "qofi-codex-workspaces/v2",
+                    "workspaces": registry,
+                }))
+                registry_path.chmod(0o600)
+
+                runtime.snapshot_workspace(str(root))
+
+                migrated = runtime.workspace_registry()[str(root)]
+                self.assertEqual(migrated["root"], [current_dev, root.stat().st_ino])
+                self.assertEqual(
+                    migrated["volume"],
+                    runtime.workspace_volume_uuid_for_path(
+                        str(root), (current_dev, root.stat().st_ino),
+                    ),
+                )
+                for record in migrated["entries"].values():
+                    for saved in (record["before"], record["managed"]):
+                        if saved is not None:
+                            self.assertEqual(saved[4], current_dev)
+
+    def test_workspace_journal_never_rebinds_to_another_volume(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.home()) as outer_raw:
+            root = Path(outer_raw) / "repo"
+            root.mkdir(mode=0o755)
+            _canonical, entries = runtime.capture_workspace_metadata(str(root))
+            current = entries[""]
+            journal = {
+                "root": [current[4] + 2, current[5]],
+                "volume": "00000000-0000-0000-0000-000000000000",
+                "phase": "prepared",
+                "entries": {"": {"before": current.copy(), "managed": current.copy()}},
+            }
+            self.assertFalse(runtime.reconcile_workspace_journal_identity(
+                journal,
+                [current[4], current[5]],
+                runtime.workspace_volume_uuid_for_path(
+                    str(root), (current[4], current[5]),
+                ),
+                current,
+            ))
+
+    def test_v3_release_rebinds_st_dev_on_the_same_volume(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.home()) as outer_raw:
+            outer = Path(outer_raw)
+            root = outer / "repo"
+            root.mkdir(mode=0o755)
+            (root / "tracked").write_text("tracked\n")
+            registry_path = outer / "registry.json"
+            with mock.patch.object(runtime, "WORKSPACE_REGISTRY", str(registry_path)):
+                runtime.snapshot_workspace(str(root))
+                runtime.prepare_workspace(str(root), self.operator, self.shared)
+                runtime.finalize_workspace_snapshot(str(root))
+                journal = runtime.workspace_registry()[str(root)]
+                current_dev = int(journal["root"][0])
+                stale_dev = current_dev + 2
+                journal["root"][0] = stale_dev
+                for record in journal["entries"].values():
+                    for key in ("before", "managed"):
+                        if record[key] is not None:
+                            record[key][4] = stale_dev
+
+                self.assertEqual(
+                    runtime.cleanup_workspace(str(root), self.operator, journal),
+                    "released",
+                )
+                self.assertEqual(journal["root"][0], current_dev)
+                self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o700)
+
     def test_command_release_retains_journal_for_moved_or_replaced_root(self) -> None:
         for replacement_present in (False, True):
             with self.subTest(replacement_present=replacement_present), \

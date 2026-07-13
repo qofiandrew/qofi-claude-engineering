@@ -147,7 +147,11 @@ bin/swarm-codex-runtime.sh uninstall
 Do not run global `uninstall` while any Codex row is active: it disables all
 Codex launches even without `--remove-account`. A missing/replaced registered
 workspace fails teardown closed so its inode-bound restoration journal is not
-discarded.
+discarded. Workspace journals bind the inode to the filesystem's stable volume
+UUID; the session-local `st_dev` value is refreshed after an APFS remount or
+reboot. Legacy v2 journals receive a one-time refresh only when the complete
+root metadata and inode still match, so a genuinely replaced root remains
+closed.
 
 The hidden runtime user's exact search-only ACEs on the operator home,
 `~/.codex`, and `~/.codex/channels` are shared by every Codex daemon. They
