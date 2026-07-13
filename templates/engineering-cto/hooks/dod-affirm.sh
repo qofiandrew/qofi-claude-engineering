@@ -218,14 +218,20 @@ except Exception:
 # there is at least one commit). Tasks routinely end in a commit, so the
 # affirmation lives there naturally. Under a --no-ff merge discipline the tip
 # is often a MERGE commit whose message legitimately lacks the DoD lines —
-# they live on the feature commit directly beneath it — so ALSO read the newest
-# NON-merge commit. Same trust model ("the latest work commit or the summary"),
-# now blind to the merge wrapper instead of blinded by it.
+# they live on the merged branch beneath its second parent. In that case read
+# the newest non-merge commit introduced by that parent, excluding the first
+# parent's existing history. Do not use a repository-wide timestamp ordering:
+# Git may choose the first-parent seed when commits share a timestamp, and it
+# could also admit an unrelated older affirmation from the base branch.
 HEAD_MSG=""
 if cd "$ROOT" 2>/dev/null && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   HEAD_MSG="$(git log -1 --pretty=%B 2>/dev/null || true)"
+  MERGED_WORK_MSG=""
+  if git rev-parse --verify -q 'HEAD^2' >/dev/null 2>&1; then
+    MERGED_WORK_MSG="$(git log --no-merges --topo-order -1 --pretty=%B 'HEAD^2' --not 'HEAD^1' 2>/dev/null || true)"
+  fi
   HEAD_MSG="$HEAD_MSG
-$(git log --no-merges -1 --pretty=%B 2>/dev/null || true)"
+$MERGED_WORK_MSG"
 fi
 
 CORPUS="$(printf '%s\n%s\n' "$CANDIDATES" "$HEAD_MSG")"

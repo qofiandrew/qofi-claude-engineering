@@ -23,10 +23,13 @@ HOOK="$REPO_ROOT/templates/engineering-cto/hooks/dod-affirm.sh"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/dod-fmt.XXXXXX")"
 WORK="$(cd "$WORK" && pwd -P)"
 trap 'rm -rf "$WORK"' EXIT
+FIXED_GIT_DATE="2000-01-01T00:00:00Z"
 
-# A minimal git repo so the payload cwd resolves to a real work tree.
+# A minimal git repo so the payload cwd resolves to a real work tree. Every
+# commit shares one timestamp to reproduce Git's one-second ordering tie.
 git -C "$WORK" init -q -b dev
-git -C "$WORK" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "seed"
+env GIT_AUTHOR_DATE="$FIXED_GIT_DATE" GIT_COMMITTER_DATE="$FIXED_GIT_DATE" \
+  git -C "$WORK" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "seed"
 
 PASS=0; FAIL=0
 
@@ -69,21 +72,25 @@ echo ""
 echo "=== merge-wrapper blindness: DoD lines on the feature commit under a --no-ff merge still satisfy the gate ==="
 # Repro of the live false-block (2026-07-09/10): work commits carry the DoD
 # block, the branch is merged --no-ff, so HEAD is a merge commit WITHOUT the
-# lines. The hook must read the newest NON-merge commit too — same trust model
-# ("the latest work commit or the summary"), blind to the merge wrapper.
+# lines. The hook must read the newest non-merge commit introduced on the
+# merged side, blind to the merge wrapper but not open to stale base history.
 git -C "$WORK" -c user.email=t@t -c user.name=t checkout -q -b feat-dod
-git -C "$WORK" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "feat: thing
+env GIT_AUTHOR_DATE="$FIXED_GIT_DATE" GIT_COMMITTER_DATE="$FIXED_GIT_DATE" \
+  git -C "$WORK" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "feat: thing
 
 $(block)"
 git -C "$WORK" -c user.email=t@t -c user.name=t checkout -q dev
-git -C "$WORK" -c user.email=t@t -c user.name=t merge -q --no-ff feat-dod -m "merge: thing"
+env GIT_AUTHOR_DATE="$FIXED_GIT_DATE" GIT_COMMITTER_DATE="$FIXED_GIT_DATE" \
+  git -C "$WORK" -c user.email=t@t -c user.name=t merge -q --no-ff feat-dod -m "merge: thing"
 run 0 "" "empty summary + DoD-stamped feature commit under a --no-ff merge PASSES"
 # And the fix does not weaken the gate: a merge atop a feature commit that
 # LACKS the lines still blocks on an empty summary.
 git -C "$WORK" -c user.email=t@t -c user.name=t checkout -q -b feat-nodod
-git -C "$WORK" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "feat: unaffirmed thing"
+env GIT_AUTHOR_DATE="$FIXED_GIT_DATE" GIT_COMMITTER_DATE="$FIXED_GIT_DATE" \
+  git -C "$WORK" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "feat: unaffirmed thing"
 git -C "$WORK" -c user.email=t@t -c user.name=t checkout -q dev
-git -C "$WORK" -c user.email=t@t -c user.name=t merge -q --no-ff feat-nodod -m "merge: unaffirmed thing"
+env GIT_AUTHOR_DATE="$FIXED_GIT_DATE" GIT_COMMITTER_DATE="$FIXED_GIT_DATE" \
+  git -C "$WORK" -c user.email=t@t -c user.name=t merge -q --no-ff feat-nodod -m "merge: unaffirmed thing"
 run 2 "" "merge atop an UNaffirmed feature commit still BLOCKS on an empty summary"
 
 echo ""
