@@ -297,10 +297,10 @@ read_line() {
   local var="$1" prompt="$2" val
   if [ "$HAVE_TTY" -eq 1 ]; then
     printf '%s' "$prompt" >/dev/tty
-    IFS= read -r val </dev/tty
+    IFS= read -r val </dev/tty || return 1
   else
     printf '%s' "$prompt"
-    IFS= read -r val
+    IFS= read -r val || return 1
   fi
   eval "$var=\$val"
 }
@@ -1290,7 +1290,10 @@ name is just for your own organization.
 Now paste it here.
 EOF
   while [ -z "$CHANNEL" ]; do
-    read_line CHANNEL "Channel ID: "
+    if ! read_line CHANNEL "Channel ID: "; then
+      echo "swarm-add: input ended before a Channel ID was received; aborting." >&2
+      exit 2
+    fi
     if ! echo "$CHANNEL" | grep -qE '^[0-9]+$'; then
       echo "  Not a valid channel ID — must be all digits. Try again." >&2
       CHANNEL=""
@@ -1332,7 +1335,10 @@ as the application's "Application ID" (Developer Portal -> General
 Information -> Copy), or right-click the bot in Discord -> Copy User ID.
 EOF
     while [ -z "$BOT_USER_ID" ]; do
-      read_line BOT_USER_ID "Bot user id: "
+      if ! read_line BOT_USER_ID "Bot user id: "; then
+        echo "swarm-add: input ended before a Bot user id was received; aborting." >&2
+        exit 2
+      fi
       if ! echo "$BOT_USER_ID" | grep -qE '^[0-9]+$'; then
         echo "  Not a valid id — must be all digits. Try again." >&2
         BOT_USER_ID=""
@@ -1705,7 +1711,10 @@ elif [ "$VERIFY_RC" -eq 3 ]; then
 
 EOF
   REPAIR_ANS=""
-  read_line REPAIR_ANS "Repair now? [Y/n]: "
+  if ! read_line REPAIR_ANS "Repair now? [Y/n]: "; then
+    echo "swarm-add: input ended before plugin repair confirmation; no repair was applied." >&2
+    exit 2
+  fi
   case "$REPAIR_ANS" in
     n|N|no|No|NO) echo "  declined — exit 2"; exit 2 ;;
   esac

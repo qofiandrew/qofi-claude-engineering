@@ -52,8 +52,20 @@ export BOT_REPOSWAP="fixture-token"
 export BOT_LABELEDCLAUDE="fixture-token"
 export BOT_LABELEDREVERSE="fixture-token"
 export BOT_MISSINGTMUX="fixture-token"
+export BOT_EOFPROMPT="fixture-token"
 TOKENS
 printf '{"dmPolicy":"pairing","allowFrom":["owner"],"groups":{},"pending":{}}\n' > "$HOME/.claude/channels/discord/access.json"
+
+# Engine migration requires a positive quiescence proof. Hosted macOS runners
+# do not install tmux, so make the default test boundary hermetic and reserve
+# explicit per-case stubs below for missing/live/racing-session coverage.
+QUIESCENT_TMUX="$TMP/tmux-quiescent"
+cat > "$QUIESCENT_TMUX" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+chmod +x "$QUIESCENT_TMUX"
+SWARM_TMUX_BIN="$QUIESCENT_TMUX"; export SWARM_TMUX_BIN
 
 RUNTIME_LOG="$TMP/runtime.log"; : > "$RUNTIME_LOG"; export RUNTIME_LOG
 RUNTIME_STUB="$TMP/codex-runtime"
@@ -91,6 +103,23 @@ lacks(){ if printf '%s' "$1" | grep -qF -- "$2"; then bad "$3 (found [$2])"; els
 run_add(){
   HOME="$HOME" SWARM_HOME="$SWARM" bash "$ROOT/bin/swarm-add.sh" "$@" 2>&1
 }
+run_add_detached_eof(){
+  HOME="$HOME" SWARM_HOME="$SWARM" /usr/bin/python3 - "$ROOT/bin/swarm-add.sh" "$@" <<'PY'
+import os, subprocess, sys
+proc = subprocess.run(
+    ["bash", sys.argv[1], *sys.argv[2:]],
+    env=os.environ.copy(),
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    start_new_session=True,
+    text=True,
+    timeout=5,
+)
+sys.stdout.write(proc.stdout)
+raise SystemExit(proc.returncode)
+PY
+}
 engine_for(){
   awk -F'|' -v n="$1" '$1 ~ "^[[:space:]]*" n "[[:space:]]*$" {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $7); print $7; exit}' "$SWARM/swarm.conf"
 }
@@ -109,6 +138,17 @@ OUT="$(run_add --help)"; rc=$?
 eq 0 "$rc" 'swarm-add help succeeds'
 has "$OUT" 'swarm-codex-runtime.sh login' 'Codex help names the dedicated hidden-account login command'
 lacks "$OUT" 'host `codex login`' 'Codex help never recommends current-user auth for an unattended lead'
+
+echo '=== noninteractive EOF refuses instead of spinning at a required prompt ==='
+EOF_REPO="$TMP/eof-repo"; mkdir -p "$EOF_REPO"
+cat >> "$SWARM/swarm.conf" <<CONF
+eofprompt | $EOF_REPO | BOT_EOFPROMPT | 222
+CONF
+before="$(cat "$SWARM/swarm.conf")"
+OUT="$(run_add_detached_eof eofprompt "$EOF_REPO" 222 --skip-walkthrough)"; rc=$?
+eq 2 "$rc" 'EOF at the required Bot user-id prompt fails closed'
+has "$OUT" 'input ended before a Bot user id was received' 'EOF refusal explains the missing input'
+eq "$before" "$(cat "$SWARM/swarm.conf")" 'EOF refusal leaves registration state byte-unchanged'
 
 echo '=== explicit engine upgrades an existing legacy row ==='
 OUT="$(run_add legacy "$REPO" 111 --skip-walkthrough --type cpo --engine codex --codex-auth-pool premium)"; rc=$?
