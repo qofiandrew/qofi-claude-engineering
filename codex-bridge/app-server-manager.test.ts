@@ -354,6 +354,7 @@ class FakeManagerClient implements ManagerClient {
   readonly interrupts: Array<{ threadId: string; turnId: string }> = []
   readonly effectiveParams: Array<AppServerThreadStartParams | AppServerThreadResumeParams> = []
   readonly reads: Array<{ threadId: string; includeTurns: boolean }> = []
+  readonly turnStarted = deferred<void>()
   nextThread = 1
   nextStartError: Error | null = null
   nextTurnStartError: Error | null = null
@@ -417,6 +418,7 @@ class FakeManagerClient implements ManagerClient {
       completion: completion.promise,
     }
     this.turns.push({ params, completion, handle })
+    this.turnStarted.resolve(undefined)
     return handle
   }
 
@@ -2160,9 +2162,10 @@ describe('AppServerManager turn reservations', () => {
 
   test('consumes once into an active lease and clears the expiry timer before awaiting upstream', async () => {
     const f = fixture()
+    const reservationTtlMs = 1_000
     const manager = await AppServerManager.start({
       stateDir: f.managerState, swarmHome: f.swarmHome, operatorHome: f.operatorHome,
-      generationFactory: f.generationFactory, reservationTtlMs: 20,
+      generationFactory: f.generationFactory, reservationTtlMs,
     })
     managers.push(manager)
     const registered = await manager.register({
@@ -2178,14 +2181,29 @@ describe('AppServerManager turn reservations', () => {
       threadId: null,
       prompt: 'remain active beyond reservation ttl',
     })
-    await new Promise(resolve => setTimeout(resolve, 50))
+    const outcome = pending.then(
+      terminal => ({ kind: 'terminal' as const, terminal }),
+      error => ({ kind: 'error' as const, error }),
+    )
+    const admission = await Promise.race([
+      f.clients[0].turnStarted.promise.then(() => ({ kind: 'active' as const })),
+      outcome,
+    ])
+    if (admission.kind === 'error') throw admission.error
+    expect(admission.kind).toBe('active')
+    await new Promise(resolve => setTimeout(
+      resolve,
+      Math.max(0, reservation.expiresAtMs - Date.now()) + 25,
+    ))
     expect(manager.health()).toMatchObject({ phase: 'active', status: 'busy', upstreamReady: true })
     expect(f.stops).toHaveLength(0)
     f.clients[0].turns[0].completion.resolve({
       ok: true, threadId: 'thread-1', turnId: 'turn-1', status: 'completed',
       messages: ['done'], ambiguous: false,
     })
-    const terminal = await pending
+    const completed = await outcome
+    if (completed.kind === 'error') throw completed.error
+    const terminal = completed.terminal
     await expect(manager.startTurn({
       registrationToken: registered.registrationToken,
       reservationToken: reservation.reservationToken,

@@ -27,9 +27,20 @@ describe('host trust boundaries', () => {
       current = parent
     }
   }
+  const installedPlanAvailable = Boolean(
+    nodeBin && codexBin && ownerControlledChain(nodeBin) && ownerControlledChain(codexBin),
+  )
 
-  test.skipIf(!nodeBin || !codexBin
-    || !ownerControlledChain(nodeBin ?? '/') || !ownerControlledChain(codexBin ?? '/'))(
+  test('required CI host trust plan cannot be silently skipped', () => {
+    if (process.env.QOFI_REQUIRE_CODEX_SANDBOX === '1') {
+      expect(
+        installedPlanAvailable,
+        'CI must stage owner-controlled Node and Codex paths for the live trust-boundary test',
+      ).toBe(true)
+    }
+  })
+
+  test.skipIf(!installedPlanAvailable)(
     'accepts the installed absolute Node + canonical codex.js plan', () => {
     const root = mkdtempSync(join(tmpdir(), 'codex-real-plan-'))
     const state = join(root, 'state')
