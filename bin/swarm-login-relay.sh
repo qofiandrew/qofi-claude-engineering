@@ -329,6 +329,7 @@ CONTROL_DELETE_CMD="${SWARM_LOGIN_CONTROL_DELETE_CMD:-}"
 PROBE_SESSION="${SWARM_LOGIN_PROBE_SESSION:-swarm-login-probe}"
 PROBE_CWD="${SWARM_LOGIN_PROBE_CWD:-$SWARM_HOME}"
 PROBE_LAUNCH="${SWARM_LOGIN_PROBE_LAUNCH:-claude}"
+PROBE_BROWSER_POLICY="discord-only-v1"
 PROBE_READY_PAT="${SWARM_LOGIN_PROBE_READY_PAT:-for agents|for shortcuts|auto mode}"
 PROBE_TRUST_PAT="${SWARM_LOGIN_PROBE_TRUST_PAT:-trust the files|Do you trust|Yes, proceed}"
 PROBE_LAUNCH_TIMEOUT="${SWARM_LOGIN_PROBE_LAUNCH_TIMEOUT:-40}"
@@ -918,6 +919,11 @@ probe_match_pat() { printf '%s' "$1" | grep -q -i -E "$2" 2>/dev/null; }
 # shell) fails this, triggering recreation.
 probe_session_ready() {
   "$TMUX_BIN" has-session -t "$SESS" 2>/dev/null || return 1
+  # A probe created before the Discord-only policy may still let Claude open a
+  # local browser. Never reuse it: the probe is stateless, so recreation is the
+  # safe migration boundary.
+  [ "$("$TMUX_BIN" show-options -qv -t "$SESS" @qofi_login_browser_policy 2>/dev/null)" = "$PROBE_BROWSER_POLICY" ] \
+    || return 1
   local frame; frame="$(pane_capture)"
   [ -z "$frame" ] && return 1
   probe_match_pat "$frame" "$PROBE_READY_PAT" || return 1
@@ -932,10 +938,18 @@ create_probe_session() {
   "$TMUX_BIN" kill-session -t "$SESS" 2>/dev/null || true
   "$TMUX_BIN" new-session -d -s "$SESS" -x "$PROBE_COLS" -y "$PROBE_ROWS" 2>/dev/null \
     || { echo "$PROG: could not create login-probe session '$SESS'" >&2; return 1; }
+  if ! "$TMUX_BIN" set-option -t "$SESS" @qofi_login_browser_policy "$PROBE_BROWSER_POLICY" 2>/dev/null; then
+    echo "$PROG: could not bind the Discord-only browser policy to login-probe session '$SESS'" >&2
+    "$TMUX_BIN" kill-session -t "$SESS" 2>/dev/null || true
+    return 1
+  fi
   # API keys unset so the probe uses the Max keychain (default account) — the
-  # fleet's shared credential, which is exactly what /login here re-auths. exec
-  # so the claude process replaces the shell.
-  "$TMUX_BIN" send-keys -t "$SESS" "cd $(printf '%q' "$PROBE_CWD") && unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN && exec $PROBE_LAUNCH" Enter 2>/dev/null || true
+  # fleet's shared credential, which is exactly what /login here re-auths.
+  # Browser launching is deliberately refused: the owner opens the ephemeral
+  # OAuth interaction from Discord, never from this unattended Mac. BROWSER is
+  # the standard launcher override; NO_BROWSER also pins the intent for clients
+  # that support the explicit convention. exec replaces the shell.
+  "$TMUX_BIN" send-keys -t "$SESS" "cd $(printf '%q' "$PROBE_CWD") && unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN && export BROWSER=/usr/bin/false NO_BROWSER=1 && exec $PROBE_LAUNCH" Enter 2>/dev/null || true
 
   local _deadline=$((SECONDS + PROBE_LAUNCH_TIMEOUT)) _trusted=0 _frame
   while :; do

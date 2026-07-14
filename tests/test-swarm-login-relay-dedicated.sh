@@ -76,6 +76,8 @@ frames="${MOCK_FRAMES_DIR:?}"
 printf '%s\n' "$*" >> "$log"
 case "${1:-}" in
   has-session) exit "${MOCK_HAS_SESSION_RC:-0}" ;;
+  show-options) printf '%s\n' "${MOCK_BROWSER_POLICY:-discord-only-v1}"; exit 0 ;;
+  set-option) exit 0 ;;
   send-keys)   exit 0 ;;
   new-session) exit 0 ;;
   kill-session) exit 0 ;;
@@ -142,6 +144,7 @@ reset_frames() {
     "$$" "$BOT_ID" "$TEST_CHANNEL" "$(date +%s)" > "$LOGIN_CONTROL_DIR/ready-$TEST_CHANNEL-$BOT_ID.json"
   chmod 600 "$LOGIN_CONTROL_DIR/ready-$TEST_CHANNEL-$BOT_ID.json"
   T_HAS_SESSION_RC=0
+  T_BROWSER_POLICY=discord-only-v1
 }
 
 run_dedicated() {
@@ -154,6 +157,7 @@ run_dedicated() {
     export MOCK_TMUX_LOG MOCK_FRAMES_DIR MOCK_CURL_LOG
     export MOCK_BOT_ID="$BOT_ID" MOCK_CHANNEL_ID="$TEST_CHANNEL" MOCK_CONTROL_MESSAGE_ID="$CONTROL_MESSAGE_ID"
     export MOCK_HAS_SESSION_RC="$T_HAS_SESSION_RC"
+    export MOCK_BROWSER_POLICY="$T_BROWSER_POLICY"
     export MOCK_CURL_CODE=200
     export SWARM_LOGIN_AUTHCHECK_CMD='exit 0'
     export SWARM_LOGIN_URL_TIMEOUT=5 SWARM_LOGIN_AUTH_TIMEOUT=5 SWARM_LOGIN_POLL_INTERVAL=0
@@ -199,6 +203,7 @@ assert_eq "send-keys -t swarm-login-probe C-u /login Enter" "$(send_keys_log | g
 echo "--- THE ISOLATION INVARIANT: no key ever targets a CTO pane ---"
 assert_lacks "$(send_keys_log)" "swarm-prodtest" "no send-keys ever targets the CTO pane swarm-prodtest"
 assert_has "$(send_keys_log)" "swarm-login-probe" "every /login key targets the isolated probe session"
+assert_lacks "$(grep '^new-session' "$MOCK_TMUX_LOG" 2>/dev/null || true)" "swarm-login-probe" "a current Discord-only probe is safely reused"
 
 echo "--- channel resolution is from the SWARM ROW, not the session ---"
 assert_has "$(sed -n '1p' "$MOCK_CURL_LOG")" "/channels/$TEST_CHANNEL/messages" "secure control posted to the product row's channel"
@@ -223,8 +228,19 @@ run_dedicated --dedicated prodtest
 assert_eq 0 "$rc" "dedicated create path exits 0"
 assert_has "$(grep '^new-session' "$MOCK_TMUX_LOG" | head -n1)" "swarm-login-probe" "created the probe session (new-session)"
 assert_has "$(grep '^new-session' "$MOCK_TMUX_LOG" | head -n1)" "-x 800" "probe created 800 cols wide — the OAuth URL must render UNWRAPPED (a 200-col pane hard-clipped it to a broken link, live 2026-07-10)"
-assert_has "$(send_keys_log)" "exec claude" "launched a plain claude in the probe session"
+assert_has "$(send_keys_log)" "export BROWSER=/usr/bin/false NO_BROWSER=1 && exec claude" "probe refuses local browser launching before Claude starts"
+assert_has "$(grep '^set-option' "$MOCK_TMUX_LOG" | head -n1)" "@qofi_login_browser_policy discord-only-v1" "probe session records the Discord-only browser policy"
 assert_lacks "$(send_keys_log)" "swarm-prodtest" "create path also never touches a CTO pane"
+
+echo ""
+echo "=== 2a) DEDICATED migration: a legacy probe without browser policy is recreated ==="
+reset_frames "$FRAME_READY" "$FRAME_READY" "$FRAME_URL" "$FRAME_SUCCESS"
+T_BROWSER_POLICY=legacy
+run_dedicated --dedicated prodtest
+assert_eq 0 "$rc" "legacy probe migration exits 0"
+assert_has "$(grep '^kill-session' "$MOCK_TMUX_LOG" | head -n1)" "swarm-login-probe" "legacy browser-capable probe is discarded"
+assert_has "$(grep '^new-session' "$MOCK_TMUX_LOG" | head -n1)" "swarm-login-probe" "legacy probe is recreated under the new policy"
+assert_has "$(send_keys_log)" "export BROWSER=/usr/bin/false NO_BROWSER=1 && exec claude" "migrated probe blocks local browser launching"
 
 echo ""
 echo "=== 2b) COMPLETENESS gate: a width-truncated URL (no state=) is NEVER posted ==="
