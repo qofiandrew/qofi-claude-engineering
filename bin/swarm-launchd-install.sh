@@ -14,7 +14,7 @@
 #   @@SWARM_HOME@@     -> $SWARM_HOME
 #   @@HOME@@           -> $HOME
 #   @@TMUX_BIN@@       -> $SWARM_TMUX_BIN if set, else `command -v tmux`
-#   @@TICK_INTERVAL@@  -> $SWARM_TICK_INTERVAL if set, else 300 (seconds between
+#   @@TICK_INTERVAL@@  -> $SWARM_TICK_INTERVAL if set, else 60 (seconds between
 #                         rotation-orchestrator ticks; only the rotate-tick plist
 #                         uses it — harmless no-op for templates without it)
 #
@@ -88,7 +88,7 @@ fi
 # rotate-tick template carries @@TICK_INTERVAL@@; for every other template the
 # substitution below finds nothing to replace. Validate it's a positive integer
 # so we never render a malformed StartInterval into the plist.
-TICK_INTERVAL="${SWARM_TICK_INTERVAL:-300}"
+TICK_INTERVAL="${SWARM_TICK_INTERVAL:-60}"
 case "$TICK_INTERVAL" in
   ''|*[!0-9]*) echo "swarm-launchd-install: SWARM_TICK_INTERVAL must be a positive integer (seconds); got '$TICK_INTERVAL'" >&2; exit 1 ;;
 esac

@@ -317,7 +317,7 @@ LD_OUT2="$TMP/ld2"; mkdir -p "$LD_OUT2"
 HOME="$FAKE_HOME" SWARM_TMUX_BIN="$FAKE_TMUX" SWARM_HOME="$ROOT" \
   bash "$ROOT/bin/swarm-launchd-install.sh" --render-only "$LD_OUT2" >/dev/null 2>&1
 if [ -f "$LD_OUT2/com.qofi.swarm-rotate-tick.plist" ]; then
-  assert_has "$(cat "$LD_OUT2/com.qofi.swarm-rotate-tick.plist")" "<integer>300</integer>" "default cadence is 300s when SWARM_TICK_INTERVAL unset"
+  assert_has "$(cat "$LD_OUT2/com.qofi.swarm-rotate-tick.plist")" "<integer>60</integer>" "default cadence is 60s when SWARM_TICK_INTERVAL unset"
 else
   bad "default-interval render missing"
 fi

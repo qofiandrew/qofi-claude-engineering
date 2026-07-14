@@ -7,7 +7,7 @@
         HOME          -> $HOME                (this user's home)
         TMUX_BIN      -> $(command -v tmux)   (/opt/homebrew on Apple Silicon,
                                                /usr/local on Intel)
-        TICK_INTERVAL -> $SWARM_TICK_INTERVAL (seconds between ticks; default 300)
+        TICK_INTERVAL -> $SWARM_TICK_INTERVAL (seconds between ticks; default 60)
      and writes the result to
         ~/Library/LaunchAgents/com.qofi.swarm-rotate-tick.plist.
      This keeps the repo username/host-agnostic — every mini renders its own. -->
@@ -29,8 +29,8 @@
   </array>
 
   <!-- PERIODIC, not persistent: run once per interval and exit. StartInterval is
-       the cadence (seconds). Rendered from $SWARM_TICK_INTERVAL (default 300 =
-       every 5 minutes) by the installer — tune it per machine without editing
+       the cadence (seconds). Rendered from $SWARM_TICK_INTERVAL (default 60 =
+       every minute) by the installer — tune it per machine without editing
        this template. Do NOT also set KeepAlive: this is a periodic tick, not a
        long-lived daemon. RunAtLoad fires one tick at install so the operator
        sees it work immediately. -->

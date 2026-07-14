@@ -113,6 +113,20 @@ else
   bad "rotate-tick render differs from the plain substitution (seam not inert)"
 fi
 
+# The byte-identity fixtures above deliberately pin 300 to test substitution
+# independently of policy. Also prove the production default stays fast enough
+# to observe a rapidly burning account before a five-minute sampling gap.
+DEFAULT_OUT="$TMP/out-default"
+OUT="$(
+  unset SWARM_TICK_INTERVAL SWARM_TICK_OBSERVE
+  env HOME="$HOME" SWARM_HOME="$ROOT" SWARM_TMUX_BIN="$FAKE_TMUX" \
+    SWARM_ROTATE_TICK_ENV="$TMP/does-not-exist" \
+    bash "$INSTALL" --render-only "$DEFAULT_OUT" 2>&1
+)"; rc=$?
+assert_eq 0 "$rc" "default-cadence render exits 0"
+DEFAULT_INTERVAL="$(python3 -c 'import plistlib,sys; print(plistlib.load(open(sys.argv[1], "rb"))["StartInterval"])' "$DEFAULT_OUT/$TICK_BASE")"
+assert_eq 60 "$DEFAULT_INTERVAL" "production rotation watcher defaults to a one-minute cadence"
+
 echo ""
 echo "=== 2) INERT: comments/blank-only env file -> still byte-identical ==="
 printf '# only comments here\n\n   \n# SWARM_CREDSWAP_CMD=commented out\n' > "$TMP/empty.env"
